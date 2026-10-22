@@ -82,6 +82,9 @@ pub struct SessionShowArgs {
     /// `agent_session.session_id` of the session to inspect (from `libra agent session list`)
     #[arg(value_name = "SESSION_ID")]
     pub session_id: String,
+    /// Page of at most 64 local commit links for this captured session.
+    #[arg(long, value_name = "N", default_value_t = 1, value_parser = clap::value_parser!(u16).range(1..=100))]
+    pub commit_page: u16,
     /// Copy the currently verified Claude Code transcript source to a new
     /// path; extraction never overwrites an existing file, has no
     /// captured-metadata-path fallback, and may be unavailable.
@@ -566,6 +569,11 @@ async fn show(args: SessionShowArgs, output: &OutputConfig) -> CliResult<()> {
     } else {
         None
     };
+    let commit_links = if terminal_capture.is_some() {
+        Some(read_session_commit_links(&snapshot, &args.session_id, args.commit_page).await)
+    } else {
+        None
+    };
     snapshot
         .commit()
         .await
@@ -639,6 +647,7 @@ async fn show(args: SessionShowArgs, output: &OutputConfig) -> CliResult<()> {
                         session: &payload,
                         terminal_capture: terminal_capture.as_ref(),
                         summary: summary.as_ref(),
+                        commit_links: commit_links.as_ref(),
                     },
                     output,
                 )?;
@@ -666,6 +675,29 @@ async fn show(args: SessionShowArgs, output: &OutputConfig) -> CliResult<()> {
                         );
                     }
                 }
+                if !output.quiet
+                    && let Some(links) = &commit_links
+                {
+                    println!(
+                        "commit_links: {} (page {}; evidence completeness unknown)",
+                        links.links.len(),
+                        links.page
+                    );
+                    for link in &links.links {
+                        println!("  {} {}", link.hash_kind, link.commit_oid);
+                    }
+                    if links.has_more {
+                        println!("  more: use --commit-page {}", links.page + 1);
+                    }
+                    if links.page_limit_reached {
+                        println!(
+                            "  page limit reached; additional links are outside this bounded view"
+                        );
+                    }
+                    if links.evidence_state != "available" {
+                        println!("  link evidence: unavailable for the current scope");
+                    }
+                }
             }
             if let Some(transcript) = transcript
                 && !output.quiet
@@ -691,6 +723,128 @@ struct SessionShowOutput<'a> {
     terminal_capture: Option<&'a CaptureTerminalDiagnostic>,
     #[serde(skip_serializing_if = "Option::is_none")]
     summary: Option<&'a SessionSummaryView>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    commit_links: Option<&'a SessionCommitLinks>,
+}
+
+#[derive(Serialize)]
+struct SessionCommitLink {
+    hash_kind: String,
+    commit_oid: String,
+}
+
+#[derive(Serialize)]
+struct SessionCommitLinks {
+    page: u16,
+    evidence_state: &'static str,
+    evidence_completeness: &'static str,
+    has_more: bool,
+    page_limit_reached: bool,
+    links: Vec<SessionCommitLink>,
+}
+
+impl SessionCommitLinks {
+    fn unavailable(page: u16) -> Self {
+        Self {
+            page,
+            evidence_state: "unavailable",
+            evidence_completeness: "unknown",
+            has_more: false,
+            page_limit_reached: false,
+            links: Vec::new(),
+        }
+    }
+}
+
+async fn read_session_commit_links<C: ConnectionTrait>(
+    conn: &C,
+    session_id: &str,
+    page: u16,
+) -> SessionCommitLinks {
+    let Some(worktree_root) = crate::internal::worktree_scope::WorktreeScope::request_scope()
+        .map(|request| request.worktree_root)
+        .or_else(|| {
+            crate::utils::util::try_get_request_paths(None)
+                .ok()
+                .map(|(_, root, _)| root)
+        })
+    else {
+        return SessionCommitLinks::unavailable(page);
+    };
+    let Ok(scope) =
+        crate::internal::ai::capture_scope::CaptureScope::resolve(conn, &worktree_root).await
+    else {
+        return SessionCommitLinks::unavailable(page);
+    };
+    if scope
+        .assert_workspace_fence_live_for_commit(conn)
+        .await
+        .is_err()
+    {
+        return SessionCommitLinks::unavailable(page);
+    }
+    let mut values = vec![session_id.into()];
+    values.extend(scope.sql_values());
+    let Ok(owner) = conn
+        .query_one_raw(Statement::from_sql_and_values(
+            conn.get_database_backend(),
+            format!(
+                "SELECT 1 FROM agent_session s WHERE s.session_id = ? AND {}
+             AND NOT EXISTS (SELECT 1 FROM agent_import_tombstone t
+                             WHERE t.erased_session_id = s.session_id)",
+                crate::internal::ai::capture_scope::CaptureScope::matches_existing_sql("s")
+            ),
+            values.clone(),
+        ))
+        .await
+    else {
+        return SessionCommitLinks::unavailable(page);
+    };
+    if owner.is_none() {
+        return SessionCommitLinks::unavailable(page);
+    }
+    values.push((i64::from(page) - 1).saturating_mul(64).into());
+    let Ok(rows) = conn
+        .query_all_raw(Statement::from_sql_and_values(
+            conn.get_database_backend(),
+            format!(
+                "SELECT l.hash_kind, l.commit_oid FROM agent_session_commit l
+             JOIN agent_session s ON s.session_id = l.session_id
+             WHERE s.session_id = ? AND {}
+               AND NOT EXISTS (SELECT 1 FROM agent_import_tombstone t
+                               WHERE t.erased_session_id = s.session_id)
+             ORDER BY l.hash_kind, l.commit_oid LIMIT 65 OFFSET ?",
+                crate::internal::ai::capture_scope::CaptureScope::matches_existing_sql("s")
+            ),
+            values,
+        ))
+        .await
+    else {
+        return SessionCommitLinks::unavailable(page);
+    };
+    let page_limit_reached = rows.len() > 64 && page == 100;
+    let has_more = rows.len() > 64 && !page_limit_reached;
+    let mut links = Vec::new();
+    for row in rows.into_iter().take(64) {
+        let (Ok(hash_kind), Ok(commit_oid)) = (
+            row.try_get_by::<String, _>("hash_kind"),
+            row.try_get_by::<String, _>("commit_oid"),
+        ) else {
+            return SessionCommitLinks::unavailable(page);
+        };
+        links.push(SessionCommitLink {
+            hash_kind,
+            commit_oid,
+        });
+    }
+    SessionCommitLinks {
+        page,
+        evidence_state: "available",
+        evidence_completeness: "unknown",
+        has_more,
+        page_limit_reached,
+        links,
+    }
 }
 
 fn emit_summary(summary: &SessionSummaryView) {

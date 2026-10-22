@@ -18,8 +18,22 @@ CX-23 的 `agent.commit_trailer` 默认关闭。配置不可读时关闭关联�
 去重注入 `Libra-Agent-Session` trailer，ref 成功后在同一 SQLite 事务内重验会话作用域与 workspace lease，再写本地
 DAO 关联。amend 从被替换提交继承仍授权的会话链接。
 `--no-agent-trailer` 省略本次自动 trailer 但保留关联；dry-run 无关联写。
-CX-27 durable journal 尚未实现，ref 后 DAO 错误仅告警，本地崩溃恢复不承诺。
-Cloud refs-only metadata 不备份本地关联或无 trailer 关联。
+CX-27 对无 trailer 提交在 `with_reflog` 的 writer transaction 内先校验 tombstone、
+scope 和 lease，再追加 checksummed prepared intent 到
+`.libra/agent-commit-links.v1` 并执行 `sync_data`（Unix 首次创建另同步目录；
+Windows 采用 write-through 原子移动持久化首次目录项），
+最后才移动 ref。ref 失败可留下 prepared intent；ref 成功后 DAO 失败告警并
+保留 intent，成功则在写锁内追加 linked stage。日志上限 10 MiB，拒绝
+symlink；坏尾只保留完整校验记录，校验和有效但 schema/version 未知时拒绝
+截断或覆盖。擦除先提交 tombstone，再持相同写锁压缩
+journal 并同步目录；失败报告 partial，重试擦除可清理。CX-20 的只读 doctor
+以 `--commit-link-page` 每页检查最多 100 个从当前 worktree HEAD 可达的提交；显式 `doctor --repair`
+重验当前 scope、lease、tombstone 和 committed checkpoint 后补关联；
+`session show --commit-page` 每页反查最多 64 个关联。空证据也标 unknown，
+不把当前日志当已自动恢复。损坏或无法回收的满日志只有显式
+`doctor --repair --reset-commit-link-journal` 才原子清空；它会丢弃其中剩余
+无 trailer 的本地恢复证据，不删除 checkpoint。Cloud refs-only metadata
+不备份本地关联或 journal。
 
 `libra commit` 的目标是把索引快照记录为新提交，并处理消息来源、作者/提交者、vault 签名、`.libra/hooks` commit 生命周期、结构化输出和兼容拒绝。P1-10 支持 `pre-commit`、`prepare-commit-msg`、`commit-msg`、`post-rewrite` 与 `post-commit`；Git hooks bridge（`.git/hooks` / `core.hooksPath`）仍按 [`_compatibility.md` D3](_compatibility.md#d3git-hooks-bridge-作为核心特性) 拒绝。常用 Git commit 表面已经覆盖：消息/模板/复用、amend、auto-stage、author/date/env、cleanup、dry-run/porcelain、trailers、编辑器、verbose diff 与稳定错误码。编辑器模板默认含注释化 status；`commit.status=false` 可关闭，`--status`/`--no-status` 显式覆盖，且仅在 cleanup 会剥离注释时注入。`commit.cleanup`/`commit.verbose` 提供既有 local→global 默认；`commit.gpgSign` 提供签名默认值，显式 `-S`/`--gpg-sign` 强制 vault 签名，`--no-gpg-sign` 强制跳过，最后一个 CLI 签名标志生效。
 

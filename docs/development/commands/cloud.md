@@ -4,6 +4,12 @@
 
 `libra cloud` 的目标是通过 Cloudflare D1/R2 备份、恢复和同步 Libra 仓库元数据与对象数据。它是 Libra 云端备份扩展，重点是结构化进度、JSON/quiet 输出和云配置错误可诊断性，不对应 Git 原生命令。
 
+CX-27 的 `.libra/agent-commit-links.v1` 是本地无 trailer 提交关联恢复日志。
+当前 refs-only metadata 和 D1 capture graph 均不包含该日志或
+`agent_session_commit` 关联表；cloud restore 成功后不能据空表判断原本
+没有关联。跨机器重建只可将可达提交 trailer 当作待核验线索，完整
+关联镜像/恢复属于另立方案。
+
 ## 对比 Git 与兼容性
 
 - 兼容级别：`intentionally-different`。Libra cloud backup/restore extension, not a Git command

@@ -89,7 +89,7 @@ rollout discovery and the TUI snake smoke remain separate plan gates.
 
 ## Codex turn attribution (CX-05 development)
 
-The first nonempty persisted record pins the typed coverage preview's codec for the entire source snapshot. A `session_meta` header recording `cli_version: 0.162.1` selects the current structured codec; other or missing headers keep the legacy codec. Appending current markers to an older resumed session cannot reinterpret its prefix. Supply the complete source snapshot; an isolated tail is not an equivalent coverage source. The owning header remains in the ordinary source. Future automatic writer activation must persist this codec choice with the session rather than infer a new choice on retry.
+The first nonempty persisted record pins the typed coverage preview's codec for the entire source snapshot. A `session_meta` header recording `cli_version: 0.162.1` or `0.163.0` selects the current structured codec; other or missing versions keep the legacy codec. Appending current markers to an older resumed session cannot reinterpret its prefix. Supply the complete source snapshot; an isolated tail is not an equivalent coverage source. The owning header remains in the ordinary source. Future automatic writer activation must persist this codec choice with the session rather than infer a new choice on retry.
 
 The current codec groups inputs by validated `turn_id` from `turn_context`, lifecycle markers or accepted input metadata. Steering inputs in one turn share a group. Scoped responses and late input mirrors do not rewind the active stream context. An unscoped or matching-turn terminal marker closes it. A malformed terminal scope leaves the stream open and qualifies the projection. An id-less optional turn context preserves a lifecycle-established scope while qualifying the projection; without lifecycle proof it clears the context. An explicit null or invalid turn ID clears it. Fresh raw input scoped to an older turn stays in that group and qualifies ordering, while following unscoped output keeps the active turn. Missing or invalid turn IDs use incomplete ordinal compatibility keys based on group creation order, separately from dense projection ordinals; earlier empty groups becoming visible do not shift those keys.
 
@@ -461,7 +461,12 @@ Tool results are redacted before they are written. The server redacts `structure
 | `--cursor <cursor>` | `session list`, `checkpoint list` | Opaque keyset cursor from the previous page's `next_cursor`; do not construct by hand |
 | `--extract-transcript <path>` | `session show` | Re-derive and copy at most 16 MiB from the currently verified Claude Code transcript source to a new local file. This never falls back to a captured metadata path, never overwrites an existing path, and rejects oversize sources without publishing output. With `--json`, the result is the safe `{ "session": <session row>, "extracted_transcript": { "output_path": <path>, "bytes": <count> } }` envelope; the extraction block contains only the destination path and byte count; neither JSON nor human output reveals the provider source path. |
 | `--all` | `clean` | Clean all stopped-session checkpoints instead of only the most recent |
-| `--repair` | `doctor` | Repair detected checkpoint-store inconsistencies (rebuild stale/missing catalog rows, re-enqueue missing `object_index` rows, safely drain valid expired ordinary writer markers, and immediately drain `cleanup_pending` markers regardless of ordinary TTL); malformed markers remain `manual_required`; detection-only when omitted |
+| `--repair` | `doctor` | Repair detected checkpoint-store inconsistencies (rebuild stale/missing catalog rows, re-enqueue missing `object_index` rows, safely drain valid expired ordinary writer markers, and immediately drain `cleanup_pending` markers regardless of ordinary TTL); malformed markers remain `manual_required`. Also repair currently authorized, reachable agent commit links; detection-only when omitted. Journal damage to a complete frame is preserved for inspection |
+| `--commit-link-page <1..100>` | `doctor` | Inspect one deterministic page of at most 100 commits reachable from this worktree's HEAD for local link recovery evidence; completeness is always unknown |
+| `--codex-legacy-after <checkpoint-id>` | `doctor` | Continue the Codex legacy reasoning revision scan after the checkpoint cursor reported by the preceding doctor page; use with `--repair` to repair that page |
+| `--reset-commit-link-journal` | `doctor --repair` | Explicitly discard a corrupt or unrecoverably full local commit-link journal after inspection. A readable journal with capacity is refused. This loses any trailer-free recovery evidence still in the journal; commits, checkpoints and current catalog links remain |
+| `--acknowledge-commit-link-loss` | `doctor --repair --reset-commit-link-journal` | After inspecting other pages and worktrees, permit reset of a readable full journal even when their recovery evidence remains. Does not override failed repair, lease checks, or unfinished 64-link batches |
+| `--commit-page <1..100>` | `session show` | Show one page of at most 64 local commit links for a scoped Codex session; page 100 reports a limit if more links exist |
 | `--remote <name>` | `push` | Select the remote used for pushing agent trace refs |
 | `--force-rewrite` | `push` | Allow the non-fast-forward push that follows a local `clean` prune (the traces ref is Libra-managed and rewritten as a whole chain); uses force-with-lease against the last tip this repository pushed — never an unconditional force — so a remote rewritten elsewhere still fails closed |
 | `--dry-run` | `checkpoint rewind` | Show the impact without modifying files; this is the default |
@@ -512,8 +517,46 @@ that flag. Dry-run neither links nor previews the automatic trailer. Links are w
 update, with session scope and workspace lease rechecked in one database
 transaction; a failure is reported as a warning. Amend carries forward
 previously linked, still-authorized sessions and adds newly eligible ones,
-including when `-m` replaces the message. The crash-recovery journal belongs
-to CX-27 and is not available yet. Cloud refs-only metadata does not back up
+including when `-m` replaces the message. A trailer-free commit first writes a
+checksummed prepared intent to `.libra/agent-commit-links.v1` under the same
+SQLite writer lock as the ref move. The journal is limited to 10 MiB,
+owner-only on Unix, and synced before moving the ref; unsafe files and failed
+writes abort the commit. A failed ref move may leave an uncommitted intent.
+The journal is local recovery evidence; `libra agent doctor` reads one bounded
+page of commits reachable from the current worktree's HEAD without changing it,
+and `doctor --repair` explicitly
+replays eligible, currently authorized links. Completed prepared/linked pairs
+are reclaimed when the 10 MiB cap is reached. A damaged complete record is
+preserved for inspection; only a genuinely incomplete final frame is removed.
+`--commit-link-page <1..100>` selects a 100-commit page. The report always says
+that evidence completeness is unknown, even when no candidate is found.
+`session show <id> --commit-page <1..100>` lists at most 64 local links per page
+for a scoped Codex session, with the same unknown-completeness caveat. A corrupt
+complete frame or permanently full journal needs operator inspection;
+`doctor --repair --reset-commit-link-journal` explicitly replaces it
+with an empty journal (Unix mode 0600) and discards its remaining local link recovery
+evidence. A readable journal with capacity cannot be reset; run ordinary repair
+first. Permission, I/O, unsafe-entry and future-schema errors refuse reset
+with a fatal error naming the category; ordinary (non-reset) doctor reports
+it as `commit_links.journal_unavailable_reason`.
+The reset option runs after available current-page evidence has been replayed
+and compacted. A readable full journal also requires a live lease, successful
+repair/cleanup and no unfinished batch (64 links or 128 candidates). If repair
+frees enough space, reset is skipped and `journal_reset=false`. A corrupt or
+oversized journal can be reset without a lease or successful repair after
+operator inspection. A readable full journal also needs an empty
+`next_commit_page` unless `--acknowledge-commit-link-loss` is given; even a
+longer history with no known links on later pages needs that acknowledgement.
+If another page/worktree has evidence or the current history scan is incomplete,
+inspect it first and add
+`--acknowledge-commit-link-loss` to authorize discarding that evidence.
+`unmatched_scope_intents` counts current-scope records outside the selected
+page or current branch, unreachable commits and hash-kind mismatches.
+A partially completed erasure can then be retried with `libra agent erase`.
+If post-repair journal
+cleanup fails, `commit_links.cleanup_incomplete` is true and the catalog repair
+remains visible in the report.
+Cloud refs-only metadata does not back up
 this local table or a trailer-free link; an opt-in trailer in a reachable commit
 can only be used as a recovery clue after repository/session scope checks.
 
@@ -523,9 +566,9 @@ A root commit can select sessions anchored to the unborn parent. The
 opt-in trailer exposes its raw session ID to anyone who can read the commit.
 A trailer-free link means a link made with `--no-agent-trailer`; cloud sync
 currently uploads refs but not this SQLite table. If
-a post-ref association warning appears, keep the completed commit and source
-session; there is no automatic repair command until CX-27, so do not amend
-solely to retry the link.
+a post-ref association warning appears, keep the completed commit, journal and source
+session; run `libra agent doctor --repair` in the same worktree to replay an
+eligible reachable link. Do not amend solely to retry the link.
 An amend that reuses its old message can retain a visible trailer for an erased
 or out-of-scope session, but creates no new local link for that session;
 `--no-agent-trailer` does not remove inherited or user-written message text.
@@ -1912,15 +1955,27 @@ Codex hook settings reads accept regular files only: `hooks.json` and `config.to
 Codex installation diagnostics in `libra agent doctor` include all 12 managed events. Each event has a fixed `reason`: `configured`, `missing`, `drifted`, `untrusted` or `disabled`; JSON exposes these rows under `data.provider_hooks[].events`. Aggregate `installed=true` requires every managed event to match the current handler and be enabled and trusted. Edited or stale duplicates carrying Libra's status message keep that event unconfigured; marker-less user handlers are outside this diagnostic. An intentional `enabled=false` is reported as disabled without adding a trust-gap banner when its hash is current. These read-only settings checks never print hook commands, hashes or configuration bodies and do not prove that the host executed a hook. Use Codex 0.162.1 or newer; refresh missing or untrusted Libra handlers with `libra agent enable --agent codex`, and review intentional disables before running enable. For drifted entries, inspect `hooks.json` and the matching `[hooks.state]` entry in `config.toml` first: enable refreshes handlers whose ownership is still provable, but preserves malformed handlers that only carry the status message. Those require manual correction or removal after review; repeating enable alone may not clear their diagnostic.
 
 
-## Legacy Codex thinking reads (CX-16 development)
+## Codex ordinary thinking and attached data (CX-16/CX-06)
 
 In this development source, `libra agent checkpoint show <id> --json` returns
 credential-scanned ordinary Codex thinking in `data.reasoning.readable`, and
-nonempty retained opaque values in `data.reasoning.encrypted_content`.
+nonempty top-level reasoning `response_item` opaque values in
+`data.reasoning.encrypted_content`.
 `availability` is `unproven`, or `partial` for truncated, malformed or unsupported
 records; `readable_obtained` reports whether this view contains readable text.
-These values do not prove native origin or decryption. The checkpoint metadata
-must belong to its ordinary tree and agree with the session's provider when it
+These values do not prove native origin or decryption.
+The ordinary rollout also retains nonempty `encrypted_content` at a reasoning
+`response_item` and in `compacted.payload.replacement_history`. The latter
+remains available in the ordinary rollout and default export, but is not
+listed in the JSON show reasoning facet. An internal eligibility check requires
+the matching rollout filename, `session_meta` session and a supported Codex
+writer version, then binds each decoded JSON string to its turn and record
+ordinal. Show and export do not use that index. Duplicate keys and malformed
+records are excluded from the eligibility check without deleting their
+ordinary source bytes. Indexed values are unproven, neither decrypted nor
+native artifacts.
+
+The checkpoint metadata must belong to its ordinary tree and agree with the session's provider when it
 contains `agent_kind`; older metadata may omit that field. Failed binding or
 transcript reads return a content-free `unavailable` facet, never the raw blob.
 An empty transcript also returns `unavailable` with `reason=no_transcript` and
@@ -1946,12 +2001,29 @@ the configured read limit when retrieving a larger checkpoint in full. Only
 JSON string tokens are decoded; arbitrary escapes outside a string or in an
 unsupported malformed envelope do not acquire a second interpretation.
 
+`libra agent doctor --json` now reports `codex_legacy_reasoning_revision`
+for a current-scope, ref-reachable committed checkpoint whose ordinary
+transcript contains bound Codex thinking but lacks its content-bound revision.
+Plain `doctor` only reports it; `doctor --repair` appends a metadata revision
+keyed by checkpoint and content digest. The original checkpoint and transcript
+stay unchanged, repeated repair is idempotent, and an erased session is never
+recovered. Each scan page examines at most 64 candidate rows and reads at most
+128 MiB of ordinary transcript data, with a 16 MiB cap per checkpoint;
+`--repair` may read eligible bodies again under a separate 128 MiB page budget. When
+the report gives a continuation cursor, pass it as
+`--codex-legacy-after <checkpoint-id>`; add `--repair` on each page to append
+eligible revisions. Ineligible, unreadable and skipped checkpoints are not
+certified by later pages. This creates no native reasoning artifact and
+requires no schema migration.
+
 Human show, checkpoint/session lists, graph and doctor do not expand these
 bodies. Reads do not rewrite objects, traces or coverage claims. Raw export
 still requires `--raw --allow-raw` and records granted or denied access; default
 export creates no raw-access audit. Run the synthetic reader cases locally with
 `cargo test --features test-live-agent --test codex_capture_local_test codex_legacy_ -- --ignored --test-threads=1`.
 They do not prove live model capture, and are excluded from CI.
+Run the separate local legacy revision and cursor repair case with
+`cargo test --locked --features test-live-agent --test agent_doctor_repair_test codex_legacy_ -- --ignored --test-threads=1`.
 
 
 ## Codex terminal budget (CX-02 development)

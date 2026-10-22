@@ -1,10 +1,14 @@
-//! Codex 0.162.1 reasoning fields at the ordinary, authorized source boundary.
+//! Codex 0.162.1/0.163.0 reasoning fields at the ordinary source boundary.
 //!
 //! This classifier grants no native authority. Associated JSON values remain
 //! ordinary transcript data; only decoded strings undergo credential scanning.
 //! Number tokens are copied unchanged so unknown data is never rounded.
 
-use std::{collections::BTreeMap, time::Instant};
+use std::{
+    collections::{BTreeMap, BTreeSet},
+    path::Path,
+    time::Instant,
+};
 
 use serde::Serialize;
 use zeroize::Zeroizing;
@@ -20,6 +24,356 @@ use super::{
 
 const MAX_LINE_BYTES: usize = 1024 * 1024;
 const MAX_FIELDS: usize = 4096;
+
+/// An ordinary decoded JSON string associated with a pinned Codex rollout.
+/// The original, credential-scanned JSONL remains the durable carrier. This
+/// view neither authenticates nor decrypts `encrypted_content`.
+#[derive(Clone, PartialEq, Eq)]
+pub struct CodexAttachedField {
+    pub session_id: String,
+    pub turn_key: Option<String>,
+    pub record_id: Option<String>,
+    pub line_ordinal: u32,
+    pub record_ordinal: u32,
+    pub history_index: Option<u32>,
+    pub value: String,
+    pub availability: &'static str,
+}
+
+#[derive(Default, Clone, PartialEq, Eq)]
+pub struct CodexAttachedProjection {
+    pub fields: Vec<CodexAttachedField>,
+    pub readable: Vec<String>,
+    pub duplicate_rejected: u32,
+    pub unsupported: u32,
+    pub refused: bool,
+}
+
+impl CodexAttachedProjection {
+    pub fn data_obtained(&self) -> bool {
+        self.readable.iter().any(|text| !text.is_empty())
+            || self.fields.iter().any(|field| !field.value.is_empty())
+    }
+
+    pub fn readable_obtained(&self) -> bool {
+        self.readable.iter().any(|text| !text.is_empty())
+    }
+}
+
+/// Project only a rollout whose filename, header session and supported writer
+/// version all agree. The caller must first authorize this source for the
+/// current repository and pass its credential-scanned ordinary bytes.
+pub fn authorize_codex_attached_fields(
+    file_name: &str,
+    session_id: &str,
+    source: &[u8],
+) -> CodexAttachedProjection {
+    let leaf = Path::new(file_name)
+        .file_name()
+        .and_then(|leaf| leaf.to_str());
+    let valid_leaf = !session_id.is_empty()
+        && session_id.len() <= 128
+        && session_id
+            .bytes()
+            .all(|byte| byte.is_ascii_hexdigit() || byte == b'-')
+        && leaf.is_some_and(|leaf| {
+            leaf.starts_with("rollout-") && leaf.ends_with(&format!("-{session_id}.jsonl"))
+        });
+    if !valid_leaf {
+        return CodexAttachedProjection {
+            refused: true,
+            ..CodexAttachedProjection::default()
+        };
+    }
+    project_catalog_bound_codex_attached_fields(session_id, source)
+}
+
+/// For a transcript already loaded through a repository-scoped committed
+/// checkpoint: its catalog provider session supplies the independent binding,
+/// while the rollout header is still checked from the original bytes.
+pub(crate) fn project_catalog_bound_codex_attached_fields(
+    session_id: &str,
+    source: &[u8],
+) -> CodexAttachedProjection {
+    let mut result = CodexAttachedProjection::default();
+    if session_id.is_empty()
+        || session_id.len() > 128
+        || !session_id
+            .bytes()
+            .all(|byte| byte.is_ascii_hexdigit() || byte == b'-')
+        || source.len() as u64 > super::TRANSCRIPT_READ_HARD_CAP_BYTES
+    {
+        result.refused = true;
+        return result;
+    }
+    let mut header_valid = false;
+    let mut current_turn: Option<String> = None;
+    let mut seen = BTreeSet::new();
+    for (line_index, line) in source.split(|byte| *byte == b'\n').enumerate() {
+        if line.iter().all(u8::is_ascii_whitespace) {
+            continue;
+        }
+        if line.len() > MAX_LINE_BYTES || line_index > u32::MAX as usize {
+            if !header_valid {
+                result.refused = true;
+                return result;
+            }
+            result.unsupported = result.unsupported.saturating_add(1);
+            current_turn = None;
+            continue;
+        }
+        let entry = match super::coverage::parse_canon_value(line) {
+            Ok(value) => value,
+            Err(error) => {
+                if !header_valid {
+                    result.refused = true;
+                    return result;
+                }
+                if error.to_string().contains("duplicate") {
+                    result.duplicate_rejected = result.duplicate_rejected.saturating_add(1);
+                } else {
+                    result.unsupported = result.unsupported.saturating_add(1);
+                }
+                current_turn = None;
+                continue;
+            }
+        };
+        let tag = entry.get("type").and_then(CanonValue::as_str);
+        let payload = entry.get("payload");
+        if !header_valid {
+            header_valid = tag == Some("session_meta")
+                && payload
+                    .and_then(|value| value.get("id"))
+                    .and_then(CanonValue::as_str)
+                    == Some(session_id)
+                && payload
+                    .and_then(|value| value.get("cli_version"))
+                    .and_then(CanonValue::as_str)
+                    .is_some_and(super::coverage::supported_codex_cli_version);
+            if !header_valid {
+                result.refused = true;
+                return result;
+            }
+            continue;
+        }
+        if tag == Some("session_meta") {
+            let same_session = payload
+                .and_then(|value| value.get("id"))
+                .and_then(CanonValue::as_str)
+                == Some(session_id);
+            let supported_version = payload
+                .and_then(|value| value.get("cli_version"))
+                .and_then(CanonValue::as_str)
+                .is_some_and(super::coverage::supported_codex_cli_version);
+            if !same_session || !supported_version {
+                return CodexAttachedProjection {
+                    refused: true,
+                    ..CodexAttachedProjection::default()
+                };
+            }
+            current_turn = None;
+            continue;
+        }
+        let Some(payload) = payload else { continue };
+        if payload
+            .get("thread_id")
+            .is_some_and(|thread| thread.as_str() != Some(session_id))
+        {
+            result.unsupported = result.unsupported.saturating_add(1);
+            continue;
+        }
+        let event = payload.get("type").and_then(CanonValue::as_str);
+        if tag == Some("turn_context")
+            || (tag == Some("event_msg") && matches!(event, Some("task_started" | "turn_started")))
+        {
+            current_turn = payload
+                .get("turn_id")
+                .and_then(CanonValue::as_str)
+                .filter(|key| super::coverage::valid_provider_turn_id(key))
+                .map(str::to_owned);
+        }
+        if tag == Some("event_msg")
+            && matches!(
+                event,
+                Some("task_complete" | "turn_complete" | "turn_aborted")
+            )
+        {
+            let closing = payload.get("turn_id").and_then(CanonValue::as_str);
+            if closing.is_none() || closing == current_turn.as_deref() {
+                current_turn = None;
+            }
+        }
+        if tag == Some("response_item") {
+            if let Some(turn_key) = current_turn.as_deref() {
+                absorb_attached_record(
+                    &mut result,
+                    &mut seen,
+                    AttachedCoordinates {
+                        session_id,
+                        turn_key: Some(turn_key),
+                        line_ordinal: line_index as u32,
+                        record_ordinal: 0,
+                        history_index: None,
+                    },
+                    payload,
+                );
+            } else if payload.get("type").and_then(CanonValue::as_str) == Some("reasoning") {
+                result.unsupported = result.unsupported.saturating_add(1);
+            }
+        } else if tag == Some("compacted") {
+            if let Some(CanonValue::Array(records)) = payload.get("replacement_history") {
+                for (index, record) in records.iter().take(MAX_FIELDS).enumerate() {
+                    absorb_attached_record(
+                        &mut result,
+                        &mut seen,
+                        AttachedCoordinates {
+                            session_id,
+                            turn_key: None,
+                            line_ordinal: line_index as u32,
+                            record_ordinal: index as u32,
+                            history_index: Some(index as u32),
+                        },
+                        record,
+                    );
+                }
+                if records.len() > MAX_FIELDS {
+                    result.unsupported = result.unsupported.saturating_add(1);
+                }
+            } else if payload.get("replacement_history").is_some() {
+                result.unsupported = result.unsupported.saturating_add(1);
+            }
+        }
+    }
+    if !header_valid {
+        result.refused = true;
+    }
+    result
+}
+
+/// Legacy committed checkpoints can carry a normalized turn followed by
+/// ordinary source reasoning lines. The catalog/ref binding is established
+/// by the caller; this strict shape check prevents a bare legacy key from
+/// fabricating obtained data or native authority.
+pub(crate) fn catalog_bound_stored_thinking_obtained(source: &[u8]) -> bool {
+    if source.is_empty() || source.len() as u64 > super::TRANSCRIPT_READ_HARD_CAP_BYTES {
+        return false;
+    }
+    let mut lines = source
+        .split(|byte| *byte == b'\n')
+        .filter(|line| !line.iter().all(u8::is_ascii_whitespace));
+    let Some(first) = lines.next() else {
+        return false;
+    };
+    if first.len() > MAX_LINE_BYTES {
+        return false;
+    }
+    let Ok(header) = super::coverage::parse_canon_value(first) else {
+        return false;
+    };
+    if header.get("agent_kind").and_then(CanonValue::as_str) != Some("codex")
+        || !header
+            .get("logical_turn_key")
+            .and_then(CanonValue::as_str)
+            .is_some_and(super::coverage::valid_provider_turn_id)
+        || !matches!(header.get("schema_version"), Some(CanonValue::Int(1 | 2)))
+        || !matches!(header.get("records"), Some(CanonValue::Array(_)))
+    {
+        return false;
+    }
+    for line in lines {
+        if line.len() > MAX_LINE_BYTES {
+            continue;
+        }
+        let Ok(entry) = super::coverage::parse_canon_value(line) else {
+            continue;
+        };
+        if entry.get("type").and_then(CanonValue::as_str) != Some("response_item") {
+            continue;
+        }
+        let Some(payload) = entry.get("payload") else {
+            continue;
+        };
+        let Some(classified) = classify_payload(payload) else {
+            continue;
+        };
+        if !classified.records.is_empty()
+            || matches!(payload.get("encrypted_content"), Some(CanonValue::Str(value)) if !value.is_empty())
+        {
+            return true;
+        }
+    }
+    false
+}
+
+struct AttachedCoordinates<'a> {
+    session_id: &'a str,
+    turn_key: Option<&'a str>,
+    line_ordinal: u32,
+    record_ordinal: u32,
+    history_index: Option<u32>,
+}
+
+fn absorb_attached_record(
+    result: &mut CodexAttachedProjection,
+    seen: &mut BTreeSet<String>,
+    coordinates: AttachedCoordinates<'_>,
+    payload: &CanonValue,
+) {
+    if payload.get("type").and_then(CanonValue::as_str) != Some("reasoning") {
+        return;
+    }
+    let record_id = payload
+        .get("id")
+        .and_then(CanonValue::as_str)
+        .filter(|id| !id.is_empty() && id.len() <= 1024);
+    if coordinates.history_index.is_some() && record_id.is_none() {
+        result.unsupported = result.unsupported.saturating_add(1);
+        return;
+    }
+    if let Some(id) = record_id
+        && (seen.len() >= MAX_FIELDS || !seen.insert(id.to_owned()))
+    {
+        result.unsupported = result.unsupported.saturating_add(1);
+        return;
+    }
+    if let Some(CanonValue::Str(value)) = payload.get("encrypted_content") {
+        if !value.is_empty() {
+            if result.fields.len() >= MAX_FIELDS {
+                result.unsupported = result.unsupported.saturating_add(1);
+            } else {
+                result.fields.push(CodexAttachedField {
+                    session_id: coordinates.session_id.to_owned(),
+                    turn_key: coordinates.turn_key.map(str::to_owned),
+                    record_id: record_id.map(str::to_owned),
+                    line_ordinal: coordinates.line_ordinal,
+                    record_ordinal: coordinates.record_ordinal,
+                    history_index: coordinates.history_index,
+                    value: value.clone(),
+                    availability: "unproven",
+                });
+            }
+        }
+    } else if payload
+        .get("encrypted_content")
+        .is_some_and(|value| !matches!(value, CanonValue::Null))
+    {
+        result.unsupported = result.unsupported.saturating_add(1);
+    }
+    if let Some(classified) = classify_payload(payload) {
+        result.unsupported = result.unsupported.saturating_add(
+            u32::try_from(classified.counts.unsupported_records).unwrap_or(u32::MAX),
+        );
+        for record in classified.records {
+            if let SemanticRecord::Reasoning { text, .. } = record {
+                if result.readable.len() >= MAX_FIELDS {
+                    result.unsupported = result.unsupported.saturating_add(1);
+                } else {
+                    result.readable.push(text.as_str().to_owned());
+                }
+            }
+        }
+    }
+}
 
 /// Closed helper data, never a native/source capability or durable metadata.
 /// Each already-redacted source line belongs to one attributed turn only.
@@ -707,6 +1061,30 @@ pub(crate) fn merge_sidecar_report(report: &mut serde_json::Value, sidecar: serd
 #[cfg(feature = "test-live-agent")]
 mod tests {
     use super::*;
+
+    #[test]
+    #[ignore = "operator-local Codex legacy source acceptance; never run in CI"]
+    fn codex_legacy_stored_turn_requires_bound_shape_and_real_reasoning() {
+        let header = br#"{"agent_kind":"codex","completeness":"complete","logical_turn_key":"turn-A","ordinal":0,"records":[],"schema_version":2}"#;
+        let reasoning = br#"{"type":"response_item","payload":{"type":"reasoning","id":"reason-A","encrypted_content":"OPAQUE"}}"#;
+        let source = [header.as_slice(), b"\n", reasoning.as_slice(), b"\n"].concat();
+        assert!(catalog_bound_stored_thinking_obtained(&source));
+        assert!(!catalog_bound_stored_thinking_obtained(reasoning));
+        let foreign = String::from_utf8(source.clone())
+            .expect("fixture UTF-8")
+            .replace("\"codex\"", "\"claude_code\"");
+        assert!(!catalog_bound_stored_thinking_obtained(foreign.as_bytes()));
+        let key_only = [
+            header.as_slice(),
+            b"\n",
+            br#"{"encrypted_content":"OPAQUE"}"#,
+            b"\n",
+        ]
+        .concat();
+        assert!(!catalog_bound_stored_thinking_obtained(&key_only));
+        let duplicate = [header.as_slice(), b"\n", br#"{"type":"response_item","payload":{"type":"reasoning","encrypted_content":"OPAQUE","encrypted_content":"OTHER"}}"#, b"\n"].concat();
+        assert!(!catalog_bound_stored_thinking_obtained(&duplicate));
+    }
 
     #[test]
     #[ignore = "operator-local Codex acceptance; never run in CI"]

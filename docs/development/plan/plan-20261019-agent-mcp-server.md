@@ -3378,7 +3378,7 @@ ER-01 至 ER-14 按模板原文对本计划全部任务生效（见 [`plan-templ
 
 **Task type:** `implementation`
 
-**Lifecycle / Acceptance:** `in-progress` / `locally-accepted`
+**Lifecycle / Acceptance:** `done` / `complete`（`v0.30.84` / `99a92c1`。release.yml 39642596203 八项 success，四平台产物 HTTP 200。codeql 39642505059 success。该提交的 base.yml 被后续 main 取消；含该提交的 `2b67073` 上 base.yml 39729493615 全部 success，codeql 39729493671 success。）
 
 **Description:** 自 MC-31 拆出（R28）。在 `src/command/mod.rs` 现有对象读取函数旁新增 helper `object_size(oid)`：loose 对象只解压到对象头；pack 非 delta 条目读条目头；pack **delta** 条目（`OFS_DELTA`/`REF_DELTA`）解压 delta 数据开头、读取其中的目标对象尺寸 varint（不重建对象），因此小 delta 展开成大对象时也得到真实尺寸，解压字节数 ≤ 64 KiB。工作树侧的有界读取由 MC-36 承接。现有读取函数与 CLI 行为不变。唯一行为轴：「对象尺寸」。
 
@@ -3660,7 +3660,7 @@ ER-01 至 ER-14 按模板原文对本计划全部任务生效（见 [`plan-templ
 
 **Task type:** `implementation`
 
-**Lifecycle / Acceptance:** `pending` / 空
+**Lifecycle / Acceptance:** `in-progress` / `locally-accepted`
 
 **Description:** 自 MC-32 拆出（R29）。在 `src/command/mod.rs` 的 `read_worktree_blob_bytes`（`:359`）旁新增 `read_worktree_blob_bytes_bounded(path, limit)`，与现有函数**同一 blob 语义**：路径为符号链接时返回链接目标字节、绝不跟随（Unix 以 `O_NOFOLLOW` 打开、遇链接改为 `read_link`；Windows 以 `FILE_FLAG_OPEN_REPARSE_POINT`）；其余情形先以不跟随方式**打开一次**句柄，此后分类（`fstat` 判定普通文件）与普通文件正文读取都只使用**这同一个句柄**（LFS 跟踪路径的句柄交给 MC-39 的指针生成）：普通文件从该句柄读取至多 `limit + 1` 字节，超过即返回 `TooLarge`。因此打开之后路径被替换（含替换为指向外部的符号链接）不会改变读取的对象，消除增长/替换竞态。上限对实际返回的那种表示（链接目标、指针或正文）生效。现有 `read_worktree_blob_bytes` 与 CLI 不变。唯一行为轴：「工作树 blob 有界读取」。
 
@@ -3675,17 +3675,17 @@ ER-01 至 ER-14 按模板原文对本计划全部任务生效（见 [`plan-templ
 
 **Acceptance criteria:**
 
-- [ ] AC-1 2 MiB 普通文件、上限 1 MiB 时返回 `TooLarge`。
-- [ ] AC-2 同一调用从句柄读取的字节数 ≤ 1048577。
-- [ ] AC-3 竞态门：文件在打开前为 512 KiB、打开后（`LIBRA_TEST=1` 暂停点）被追加到 3 MiB 时，返回 `TooLarge`。
-- [ ] AC-4 指向仓库外 2 MiB 文件的符号链接返回链接目标路径字节（与 `read_worktree_blob_bytes` 相同），而非目标文件内容。
+- [x] AC-1 2 MiB 普通文件、上限 1 MiB 时返回 `TooLarge`。
+- [x] AC-2 同一调用从句柄读取的字节数 ≤ 1048577。
+- [x] AC-3 竞态门：文件在打开前为 512 KiB、打开后（`LIBRA_TEST=1` 暂停点）被追加到 3 MiB 时，返回 `TooLarge`。
+- [x] AC-4 指向仓库外 2 MiB 文件的符号链接返回链接目标路径字节（与 `read_worktree_blob_bytes` 相同），而非目标文件内容。
 
 **Verification:**（本卡特有判据，计入 G-03；`--exact` 门按 GC-MC-07 执行）
 
-- [ ] AC-1：`source .env.test && cargo test --lib command::tests::bounded_read_rejects_large_file -- --exact`（new）
-- [ ] AC-2：`source .env.test && cargo test --lib command::tests::bounded_read_large_file_reads_at_most_limit -- --exact`（new）
-- [ ] AC-3：`source .env.test && cargo test --lib command::tests::bounded_read_rejects_concurrent_growth -- --exact`（new）
-- [ ] AC-4：`source .env.test && cargo test --lib command::tests::bounded_read_symlink_returns_target_bytes -- --exact`（new）
+- [x] AC-1：`source .env.test && cargo test --lib command::tests::bounded_read_rejects_large_file -- --exact`（new）
+- [x] AC-2：`source .env.test && cargo test --lib command::tests::bounded_read_large_file_reads_at_most_limit -- --exact`（new）
+- [x] AC-3：`source .env.test && cargo test --lib command::tests::bounded_read_rejects_concurrent_growth -- --exact`（new）
+- [x] AC-4：`source .env.test && cargo test --lib command::tests::bounded_read_symlink_returns_target_bytes -- --exact`（new）
 
 **Full-suite trigger:** `T-1: GC-02 意义上的共享工作树读取 helper`
 

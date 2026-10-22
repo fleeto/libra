@@ -42,6 +42,8 @@ pub mod event;
 // OpenCode export-bridge job coordination (plan-20260713 DR-04b, ADR-DR-11).
 pub mod export_job;
 // Conversation history datastructures (compaction, persistence, replay).
+pub mod commit_journal;
+pub mod commit_recovery;
 pub mod history;
 // `refs/libra/traces` persistence API (plan-20260920 RC-02).
 pub mod traces;

@@ -1,4 +1,61 @@
+> **最新事实前沿（2026-10-22 22:47:54 UTC为本轮事实正式写入起始秒，实际apply收据 `/tmp/fix06_A_smoke_final_fact_apply_actual_20261023/receipt.json`）：** FIX06批量生产实现及测试已应用，累计24个新增测试、当前批量来源新增13个；正式8AC/8VER及canonical限定不变。执行合同R3 actual70980/exit0/chunk7b76dc为真实Claude/Codex双PASS（含VER2_MAPPING），仅合同资格；新产品A actual13933/exit0/chunk7bb0e2十门真实通过：fmt/clippy/release各exit0，VER1/2/3/5分别4/13/4/7通过，VER6_7_capture另1通过，traces24，api433通过/1原ignored。84次native查询，32次清理信号发送有完整journal，remaining_owned={}。root已具名判定当前源码VER4/6/7/8手工证据PASS，VER2+VER5跨选择器映射按两门实际通过共同消费。新smoke执行合同86711/exit0/chunkcd70d8真实Claude/Codex双PASS；产品smoke81644/exit0/chunk7be561实际18通过、0失败，runtime OpenAPI HTTP200/3.1.0/30 paths，7个owned containers和10项fixture清理成功，host清理0信号/0错误、remaining_owned={}。本次事实同步B、自身ER05、完整C/D及提交/推送/版本发布仍未完成。 A与手工原件位置见Mega2 FIX-MTR-06 Current evidence；旧FAIL/STOP/缺失/取消和各历史pending原文保留，不能回填为当时通过。AC勾选、Lifecycle/Acceptance、Dependencies/I/R/独立发布边界不改；Libra13本地文档不提前push，MTR95仍独立阻塞。
+
+> **执行事实更新（2026-10-22 22:01:45 UTC，本次写入时点）：** FIX06批量源码及测试已应用，实际产品A尚未启动。执行合同R1 session92123/exit1与R2 session24301/exit1均为Claude PASS、Codex FAIL；R2确认两项P1关闭，清理journal及独立观察连接P2正在前滚修复，未以评审次数耗尽停止。前两次准备实际64055/78353共扣72秒，原首个A claim未创建，后续准备继续累计；旧FAIL/STOP与FIX3/LTR00取消不变。VER2的owner预占零tree证据明确由VER5具名用例补充，必须两门真实通过；此映射澄清待下一轮双审，8AC/8VER、原命令/覆盖/期限、依赖与发布边界均不变。H0既成PASS仅为计划采纳；FIX06新A/自身ER05/C/D、提交与推送均未完成，Libra13笔本地文档不得提前push，MTR95独立阻塞保留。R2原件 `/tmp/fix06_batch_A_execution_review_r2_20261023/root-terminal.json` SHA `ca767f9eaaad960097ca08b1b42598276f80c7056c010dd48b837c8e3d6cedf0`。
+
+> **最新结果登记（2026-10-22 21:26:53 UTC，root实际终态判定时点，非候选生成/未来写入时间）：** H0 R2真实session81653/exit0/chunkf7fd06，Claude与隔离Codex对H0_GOVERNANCE及FIX06_PLAN_ADOPTION均明确PASS；root已核同一manifest `b6d576d9af90cfbf678bf62f951ad58c798abfafeae3f95dd9df35b36dc1b181` 与全部冻结输入并完成P0/P1关闭、具名P2处置。仅准当前8AC/8VER+canonical计划采纳与H0前置闭合；FIX06批量源码、新A/B、自身ER05及完整C/D尚未完成。Libra52474来源资格仍仅限域carry（full10757/21ignored/1flaky、15focused及具名三门；network3；余1093），13笔本地文档不得提前push；MTR95的move/rebind/Native intermediate风险仍独立阻塞。R1 actual81582 ClaudeFAIL/CodexPASS、全部旧FAIL/STOP/missing/取消及审前pending保留为各自历史时点。root终态 `/tmp/fix06_joint_H0_final_review_r2_20261023/root-terminal.json` SHA256 `4338a0aac40b068a01663301c3a01d5d0d86ccaf333a804db7c98c92d404da28`；本登记不改变AC/Lifecycle/Dependencies或发布边界。
+
 # Agent MCP 服务端计划（2026-10-19）
+
+> **现行执行前沿（原8文档正式写入：2026-10-22 21:00:20 UTC；非本次新采纳或评审PASS时间）：Libra选定f966来源资格限域接受，FIX06的8AC/8VER与canonical采纳仍待本轮共同H0。** 新恢复方案84664/exit0/chunk8f6dc7真实Claude与隔离Codex双PASS后，actual52474/exit0/chunkac9169完成原network3通过/0ignored/0重试、42条命令全部exit0且owned清理为空；新各boundary源码inventory与VCS身份一致。仅具名继承旧fmt/strict clippy/product CLI build、15focused及full10757最终通过/21原ignored/1flaky；不把旧22040/31114 STOP、missing终态、迁移者UNKNOWN或非连续审计改写成通过。root终态 `/tmp/libra_f966_cwd_recovery_actual_after31114_20261023/root-terminal.json` SHA256 `3fb07e4b14bb915b6dbf1de6cbcb5e75f3f9656e33d94f972ea4f3456ad8c77d`绑定本地430b1cae/上游f966548/版本0.30.86。inner185.297950秒不是最终预算记账；outer188.596712秒加1秒launcher余量扣190，7200累计6107、剩余1093秒（不是1097），无自动新尝试授权。H0尚未PASS；FIX06批量实现、新A/B、自身ER05及完整C/D未完成，LTR卡未完成，13笔本地文档不得提前push。以下旧“当前/待资格/运行中”等段均按各自时点保留。 原实际写入由 `/tmp/fix06_H0_governance_apply_actual_20261023/receipt.json` SHA256 `6dd403e4bbd18ecbd6ba2c920d691dc18ef2e0a2533982aef6ef4b5bb56fcb0f`绑定；此前20:59:30为候选生成时间，H0 R1 actual81582/exit1/chunk061e55为Claude FAIL/Codex PASS，此次仅订正登记，仍待复审。
+
+
+> **2026-10-23 更新执行前沿：Libra 31114启动前STOP，剩余1283秒，恢复与共同H0仍待。** actual31114/exit1/chunk899531因root从 `/media/eli/data/mega2` 启动，与冻结cwd `/media/eli/data/libra` 不符而在入口断言STOP；未启动native或产品命令，inner输出目录/claim/终态均不存在，不补造。外部一次launch已消费；实际观测32.762631秒及1秒launcher余量共扣34，原7200累计5917、剩余1283秒。root终态 `/tmp/libra_31114_cwd_stop_20261023/root-terminal.json` SHA256 `160ed68426886d37066f4e139eb1b6b3d34ddd0e2b5b29535e68968b09119f9b`不授权自动重试或新增窗口；修正启动cwd的新恢复仍待审及真实执行终态。以下22040的STOP、限定15focused/full10757最终通过/21ignored/1flaky及当时1317余额逐字保留为历史；network未取得资格通过。FIX06仍8AC/8VER及合法canonical存储状态等价/异常路径Err整txn回滚限定，批量实现未启动，当前采纳差异及两仓H0仍pending，不继承旧8/5设计PASS。无新增提交、push、tag、Release或CI/D；旧FAIL/STOP及FIX3/LTR00取消不变。
+
+
+> **本次共同H0待审采纳差异：** 批量恢复仅对合法canonical存储状态声明静态等价。锁后inactive行须严格验证存储路径为canonical；异常路径返回Err并由外层事务rollback，不能silent normalize或顺手修DB。该防御归既有AC-5错误回滚与VER-2错误覆盖，不新增AC/VER，仍8AC/8VER；R2旧8/5设计PASS不覆盖本差异。
+
+
+> **2026-10-23 当前执行前沿：Libra 22040实际STOP，FIX06采纳稿8AC/8VER待共同H0。** Libra actual22040/outer exit1/chunk9c321b：15focused全部exit0，full实际exit0、10757最终通过/21旧ignored/1flaky；随后固定0.30.69 CLI的rev-parse HEAD因数据库schema2026102201超过支持的2026101902而exit128，network未启动。full-after源码inventory与入场逐项相同，但不覆盖活仓VCS DB；原full-after-vcs及terminal-inputs缺失不可补造，迁移触发者UNKNOWN。整窗3214.211489秒扣3215，原7200累计5883、剩余1317秒；来源资格未完成、不构成H0/C/D或LTR完成。root仅登记1317余额内匹配0.30.86工具的新恢复方案，待新真实双审，未预授carry或执行PASS。FIX06方案R1 actual8843/exit1的Claude FAIL/Codex PASS保留；R2 actual15527/exit0/chunkbfc3c6真实双PASS仅覆盖旧8AC/5VER设计（manifest c1b9e7f8af1f6969819ec56e3c622303e8c19438ccad47e2a1cd4c8ccc1bec50、62输入核同）。当前采纳稿按G-03将SQL锁对象、唯一索引、fallible解析分列VER6/7/8，总8AC/8VER、无余量，尚待共同H0真实审查；批量实现、新A/B、自身ER05及完整C/D未启动。旧7/4与8/5证据和以下全部旧“当前/运行中”段按各自时点保留。Libra13笔本地文档仍不得提前push；Mega6/109、Libra0/26不变。
+
+
+> **2026-10-23 FIX06同轴批量恢复v2待复审终态：** 当前候选新增AC-8/VER-5，粒度为8AC/5VER、四生产文件/三落点/M，行为轴、Dependencies、I/R及independent patch/self发布边界不变。拟将逐目标SQL改为排序分块锁定、分块owner查询、按层批取tree和受唯一约束保护的分块激活；批量实现尚未启动，新A/B、自身ER05和完整C/D均未执行。旧7AC/4VER输入的A10886与smoke78803只归历史源码，不覆盖未来批量树。方案层R1真实session8843/exit1/chunk68d34d为Claude FAIL/Codex PASS、整体FAIL，manifest `db813099268253c1998e032260e928f52a9d45dc2bd914734e27c78b7e9a0627`原件保留。v2以七项精确修订补齐跨chunk错误整txn回滚、owner四时点竞争、空ID仍验证root/Q1、root歧义、原无全表锁/无新增timeout重试、schema guard及borrowed txn计数正控制；新真实复审终态待，不预记PASS，也不以旧Performance文字澄清豁免GC-10。Libra22040仍在完整测试，最终资格和共同H0待实际终态审定。
+
+
+> **2026-10-23 当前前滚控制恢复已双审、资格执行中：** 固定Libra来源430b1cae/f966548/0.30.86不变。56333控制STOP、已消费claim、0产品cases及缺失终态inventory继续保留，不补造旧终态。具名前滚控制恢复R1 actual37040/exit1为Claude PASS、Codex BLOCKED（越过可读allowlist），不是双PASS；read_guard修复后R2 actual10179/exit0/chunkcaf5d4真实双PASS，manifest `328049a5f61c4dfffad2c95b1cd9daf2baa03c3981986790041cd15304931d7b`，仅覆盖恢复执行安全及覆盖。准备2314/exit0耗7.012474秒扣8，原累计余额4540降为4532秒；新增时间0，审查轮次不重置旧测试/诊断预算。一次新执行22040已启动，当前没有实际终态，不能记产品资格通过或倒填最后退出、计数、清理及输入一致性。H0、FIX06自身/Performance/完整C/D、95独立风险及LTR01发布边界仍待；Libra13笔本地文档不提前push，Mega6/109、Libra0/26不变。下面56333段落是其原时点历史记录。
+
+
+> **2026-10-23 56333时点历史资格STOP与恢复待审：** Libra固定整合来源 `430b1cae5a165adfc0f70858805bb480c085b737` / 上游 `f96654855d59455604b7b64669ba036b7b452ef7` / 0.30.86；13笔本地Traces文档重放、签名/DCO及上游产品树保留是既有整合事实，未提前push。listing恢复16996实际exit0，full10757 selected/21 ignored、network3/0，111条差异归属与6项未消费范围保留。最终执行合同R1为Claude PASS/Codex FAIL（binary privacy），R2 actual96103/exit0双PASS仅覆盖执行合同。产品资格 actual56333/exit1 STOP：53.788156秒扣54，账面余额4540秒，claim已消费，focused/full/network产品cases为0；缺失原terminal inventory，不能声称终态全树未漂移。确定的控制器缺陷是JSON list与runtime tuple比较误拒；两行修复及51项保存数据控制fixture已有原件，只是候选，不是产品/H0通过。root登记一次前滚恢复，仍从原7200累计余额扣账，旧claim/STOP不重置，须新真实双审与独立入口。H0、FIX06自身ER05/Performance及完整C/D、MTR95独立风险、LTR10的H1/WRITERS/LIVE和LTR01唯一发布边界均未解除；完成数Mega6/109、Libra0/26不变。以下旧“当前/待执行”均保留其原时点，不改旧失败、取消或预算。
+
+
+> **2026-10-22 当前 Traces 前沿：** Libra 已将13个本地计划提交原生重放至最新上游 `f96654855d59455604b7b64669ba036b7b452ef7`（0.30.86），当前HEAD `430b1cae5a165adfc0f70858805bb480c085b737`；逐个DCO/签名及上游产品树保留已核，四份脏文档保留、index空、未推送。旧MC32四处格式候选已被上游吸收，旧R7只覆盖旧树；新整合源资格/当前治理双审待。完整复验按用户既有rebase重测授权具名执行，旧FAIL/STOP预算保留。FIX06自身/H0/C/D、MTR95独立风险及Libra H1/LTR01尚待，正式Mega6/109、Libra0/26不变。详见[日期计划当前执行前沿](plan-20261015.md#当前执行前沿libra-最新源整合2026-10-22)；以下旧“当前”按其原时点理解。
+
+## 双评审迭代规则（2026-10-22 用户授权，当前生效）
+
+用户原话：“请修改计划,双评审可以多次,直到双评审可以通过”。适用于 Mega2/Libra 两份 Traces 计划及其当前阻塞修复（含 FIX06、MC-32）的计划、源码和验收脚本双评审。root 可在处理本轮问题后继续发起后续轮次，直到真实 Claude 与独立上下文 Codex 对同一最终冻结输入均明确 `VERDICT: PASS`；不再设“双方各一次后必须重新申请”的总轮数限制，也不因上一轮 FAIL 或既有审查次数用完而重复询问这类评审授权。
+
+每轮均保留独立原件、输入摘要、实际退出与终态；先修复问题或具名核清事实，再冻结新输入复审，不以重复请求施压取得 PASS。P0/P1 必须关闭，P2 按模板具名责任与条件处置。PASS 仅覆盖对应输入及审查范围；两人隔离审查，root 核实实际终态后才记双 PASS。每轮保留最多30分钟的进程看护上限；该上限不作为后续修复评审轮次的总预算。provider/MCP 等技术故障仍按 ER-10 分类及有界退避，真实凭据、额度或服务不可用须报告，不能伪造成功或静默空转。
+
+本条只前滚调整双评审的轮次授权；历史 R1/R2/R3 FAIL、STOP、截止和原件原样保留，其“各一次/后续须另授权”只描述当时规则，不再限制本条生效后的审查。产品诊断、A/B/C 测试次数与窗口、旧 FIX-MTR-03/LTR-00 预算、验收标准、提交签名及发布边界仍分别按原任务卡执行；本条不授予新的产品测试次数或提前发布权限。解析器fixture通过不替代产品资格，当前修复版正式双审可直接按本条开展。
+
+## 当前双审迭代：R6 终态与 v11/v12 修复（2026-10-22）
+
+R6 实际 session24950 / exit1，Claude PASS、Codex FAIL；原件 `/tmp/libra_mc32_recovery_review_r6_20261022/`，manifest `e7cc6f3f5047901490c4cce45d9bdfaa0e6c871e7e43c59d5fc5ea387abc7a3f`。两方认可多轮评审规则及v10 flaky/leaky可观察边界；新的 `P1-R6-OUTCOME-METADATA` 是JUnit outcome只核非空type、console对账只核成功/失败，可能接受执行错误、普通失败、超时或recap类别矛盾。v11候选按固定producer严格核tag/type组合和每attempt的共同可观察类别；失败case主outcome是第1attempt、rerun按序，flaky事件对应成功前失败；recap对console规范化标签一致，不猜JUnit未给出的信号号码。未知type、不兼容tag/type、类别错配及recap矛盾均STOP。首轮纯解析671/671、exit0原件保留（chunk bd87a0，`/tmp/libra_mc32_junit_v11_parser_validation_actual_20261022/`）；随后补齐已知LEAK-FAIL但summary省略附计数的拒绝，最终纯解析676/676、exit0（chunk474cc7，原件 `/tmp/libra_mc32_junit_v11_parser_validation_r2_actual_20261022/`），最终候选run SHA `ae6c8fa177dbef0ad8c0c92f500057a9a6b18b964e5785a16f83407f45cc7e11`；原397名称保留，其中`final-error`错误接受预期改为拒绝，旧helper错误type及无JUnit stub输入修正另列清单，原397历史原件不改。五组旧v10错误接受/新v11拒绝对照成立；这是解析检查，尚待最终冻结后的真实双审，不是产品资格。
+
+v12随后仅收紧本机Linux普通失败退出码为1..255：executor先把0归成功，排除信号后由Rust/libc WEXITSTATUS取低8位；无效0/负数/>255不能以普通failure type通过。独立LEAK-FAIL的error文本code0语义保持。实际纯解析760/760、exit0（chunk52149f，原件 `/tmp/libra_mc32_junit_v12_parser_validation_actual_20261022/`），原676项同名同判定、15组v11错误接受/v12拒绝；最终候选run SHA `97a28b7004f128b250060442dcb2fa9ff840fbf2bbe692e25be4b416be63f0c5`，待R7真实双审。
+
+R6 P2具名处置（owner=root）：finalize前核产品授权原话及hash与多轮评审授权不同；产品启动前特别检查冻结`.pi`临时文件对应写者，记录不可见进程及点时观察限制，不停止用户写者、不豁免inventory；若实际hardstop exit124且缺terminal，外层仍记录真实退出、清理状态与已消费claim。继承R5允许新增selected全部执行、零删除/ignored变化，GC-MC-07五exact具名退出/集合/日志收据，execfail不一致STOP且不自动重跑。后续评审仍按用户持续授权，不另申请轮次。历史FAIL/STOP不改；FIX06自身/H0、MC32产品资格与C/D仍待，无新增产品运行、提交、推送或发布。下方旧“当前”均为原时点记录。
+
+## 当前双审迭代：R5 终态与 v10 修复（2026-10-22）
+
+R5 实际 session41138 / exit1，Claude PASS、Codex FAIL；原件 `/tmp/libra_mc32_recovery_review_r5_20261022/`，manifest `0f2f67cf5bffbcdb9644ae105f6fdb23db24913f55d5939f85cb4e2324da014c`。v9信号映射已受核；本轮 `P1-R5-FLAKY-LEAK` 是nextest重试成功即使泄漏也只打印 `TRY n PASS`、summary却同时计入flaky/leaky，旧脚本误拒合法结果。v10按固定nextest源码核对显式成功泄漏数K、无显式泄漏身份的成功flaky候选数F与实际summary泄漏数L，要求K≤L≤K+F，持久记录真实L、已知身份、候选集合和差值；不臆造具体flaky用例的泄漏身份。该日志/JUnit不能独立证伪区间内少报，明确保留此信息限制，其它逐case/summary/exit一致性仍严格检查。实际纯解析397/397、exit0（chunk d50c3f，原件 `/tmp/libra_mc32_junit_v10_parser_validation_actual_20261022/`），原363项同名同判定，三组v9 RED/v10 GREEN保留；最终修复仍待真实双审，不是产品资格。
+
+R5 P2具名处置（owner=root）：相对旧资格基线的selected新增允许记录并全部执行，selected删除和ignored增删仍为零；本轮源码/config/env冻结，实际listing/JUnit身份精确一致，本条不减少覆盖。产品finalize须另绑定一次7200秒明确产品授权原话，禁止复用多轮评审授权；启动前只读检查`.pi`写者并记录不可见进程限制，不停止用户写者、不豁免输入。R4的GC-MC-07外层具名收据、五exact退出/集合/日志绑定和execfail不一致即STOP义务继承。继续双审无需另问次数；历史FAIL/STOP不改，FIX06自身/H0、MC32产品资格及C/D尚未完成。本轮无产品运行、提交、推送或发布。下方旧“当前”均为原时点记录。
+
+## 当前双审迭代：R4 终态与 v9 修复（2026-10-22）
+
+R4 实际 session78924 / exit1，Claude PASS、Codex FAIL；原件 `/tmp/libra_mc32_recovery_review_r4_20261022/`，manifest `08c59cc99bd88df39d9b6db28ba6f91d6238c8156534ff35fcd5c601c1bd14d3`。两方认可本页多轮双评审规则，R3捕获输出问题已在v8受核；整体仍FAIL，因为 `P1-R4-SIGNAL-STATUS`：pinned nextest 的重试信号缩写（如SEGV/KILL）会被旧解析拒绝。root按既有用户授权修复并继续下一轮，不另申请评审次数。v9候选精确补齐该版本信号/短状态映射，首轮纯解析实际363/363、exit0（chunk dbc0be，原件 `/tmp/libra_mc32_junit_v9_parser_validation_actual_20261022/`），原139项保留；候选最终输入与后续真实双审另行绑定，未记产品资格或P1最终闭合。
+
+R4 P2具名处置（owner=root）：① finalize前须绑定与“多轮双评审”不同、明确授予一次7200秒产品运行的用户原话，并在外层收据引用；② 本次补齐MC-32 R2/R3/v8/用户授权/R4修订历史；③ 启动产品验收前只读核查`.pi`写者，不停止用户写者、不豁免冻结输入；④ execfail显示内容与JUnit描述不一致时记“full failed、metadata STOP、network未收集”，不自动重跑；⑤ 最终外层收据须具名GC-MC-07等价执行方式，并绑定五条原exact实际退出、结果集合、日志摘要。全部旧FAIL/STOP及产品预算保留；本次没有产品运行、提交、推送或发布，FIX06自身/H0与MC32 C/D仍未完成。下方旧轮次状态是原时点记录。
 
 **模板版本:** `v2.14`（整份按 v2.14 新建；见 [`plan-template.md`](plan-template.md)）
 
@@ -137,6 +194,13 @@
 
 | 时间 | 触发 | 变更内容 | 原卡 → 新卡 | 受影响的引用 |
 |---|---|---|---|---|
+| 2026-10-22 | MC32恢复R6 actual24950：Claude PASS / Codex FAIL | v11严格tag/type、attempt类别和recap一致性；671纯检查及旧错误预期具名纠正，真实双审待；多轮规则获认可 | MC-32 → MC-32；原AC/VER不变 | 两仓计划/索引、MC32规范、R6原件 |
+| 2026-10-22 | MC32恢复R5 actual41138：Claude PASS / Codex FAIL | v10修复flaky/leaky汇总歧义；纯解析397通过保留原363，新增选择完整执行、P2具名；后续双审持续授权 | MC-32 → MC-32；原AC/VER不变 | 两仓计划/索引、MC32规范、R5原件 |
+| 2026-10-22 | MC32恢复R4 actual78924：Claude PASS / Codex FAIL | 记录signal short-status P1；v9精确映射候选与首轮纯解析363通过，产品未执行；P2责任具名、下一轮双审按用户持续授权 | MC-32 → MC-32；5AC/5VER不变 | MC32规范、两仓协调索引、原件R4 |
+| 2026-10-22 | 用户明确“请修改计划,双评审可以多次,直到双评审可以通过” | 可在修复/事实核清后多轮独立双审至同一输入双PASS，无总轮数限制；不倒改原失败、不重置产品预算 | 不增卡/依赖/发布权限 | 文首迭代规则、两Traces计划及索引 |
+| 2026-10-22 | R3 actual8661整体FAIL；v8修复 | 原R3捕获输出P1保留，v8同case/attempt JUnit界定输出帧，纯解析139/139及原81保留，R4对该修复受核；不当产品资格 | MC-32 → MC-32 | 验收脚本、R3/R4原件、当前状态 |
+| 2026-10-22 | R2 actual17424整体FAIL | 保留retry/JUnit/XML/JSON状态P1和exact P2；v6纯解析79检查有FAIL、v7原81通过均留档，后续R3发现不被抹除 | MC-32 → MC-32 | 严格metadata规范、R2原件及修复链 |
+| 2026-10-22 | 本机恢复R1实际22920：Claude PASS / Codex FAIL，overall FAIL | MC-32恢复规则在新冻结前直接入本卡：逐G/完整命令/五exact/严格metadata与仅full合法100后network一次；新增授权仍pending；上游历史与本机状态分列，三Traces文档列协调集，保留全部旧STOP；runtime P1另随同新输入审查 | MC-32 → MC-32（不增卡/AC/VER） | MC-32本机恢复规范、三Traces协调摘要；新审待 |
 | 2026-10-19 08:01:54 UTC | 成稿 | 按 v2.14 新建计划，7 张卡 MC-01..MC-07（未提交草稿） | N/A | 全文 |
 | 2026-10-19 10:38:26 UTC | Codex R1 FAIL（18×P1、4×P2）与用户批准 G-03 门族型豁免 | 重排为 12 张卡：输出脱敏、写会话、checkpoint 目标派生、commit/restore 拆卡、workspace 读/lease 拆卡、legacy HTTP 版本头、移除 `2025-03-26`、HTTP 按请求头路由、Windows 不开放 HTTP、错误分层、性能门、客户端联调；登记 EX-MC-01..06、DEP-MC-03..05 | 草稿 MC-01..07 → MC-01..12 | 全文 |
 | 2026-10-19 11:01:16 UTC | Codex R2 FAIL（10×P1、2×P2） | 重排为 15 张卡（草稿未发布，编号整体重排）：MCP 改用独立表集 `agent_mcp_*`（不再放宽 Harness CHECK，两个 source 主键空间独立）；`operation_id` 对写工具必填；崩溃收敛改为「checkpoint 确定性收敛 + commit/restore 显式 quarantined」并新增崩溃窗口卡；renew/release 复核当前工作树；协议核心与 `libra_status` 拆卡、diff 的 checkpoint 模式移到 checkpoint 读卡；AC 一行一个谓词并重新计数；新增公开工具的卡改为 `M`；lib 测试改用完整路径并新增 GC-MC-06「恰好 1 个用例通过」执行规则；新增旧二进制兼容门；MC-15 改为记录子进程 PID；EX-MC-01..06 改挂到新编号（协议核心 MC-01、分表 MC-03、写会话 MC-05、trace MC-12、HTTP MC-13、modern MC-14），豁免范围与用户批准时一致 | MC-01..12 → MC-01..15 | 全文 |
@@ -3380,6 +3444,20 @@ ER-01 至 ER-14 按模板原文对本计划全部任务生效（见 [`plan-templ
 
 **Lifecycle / Acceptance:** `done` / `complete`（`v0.30.84` / `99a92c1`。release.yml 39642596203 八项 success，四平台产物 HTTP 200。codeql 39642505059 success。该提交的 base.yml 被后续 main 取消；含该提交的 `2b67073` 上 base.yml 39729493615 全部 success，codeql 39729493671 success。）
 
+**上游历史状态说明：** 上述字段仅记录上游历史来源状态，不代表本机恢复终态。
+
+**本机资格恢复状态：** `blocked` / 无新 PASS；原首次资格与 R1/R2/R3 审查失败保留；R3捕获输出问题已在R4受核；v9信号问题已在R5受核；v10泄漏信息边界已在R6受核；当前P1-R6-OUTCOME-METADATA待最终v12正式双审闭合。用户已授权修复后多轮双审直至双PASS，无需逐轮重获授权；明确新增产品运行授权仍待。
+
+**当前 MC-32 恢复审查 STOP（R3 实际终态，2026-10-22）：** session8661 / exit1；Claude PASS、Codex FAIL，root overall FAIL，未关闭项为 `P1-R3-LOG-FRAMING`。v7 把 nextest 捕获的测试 stdout/stderr 当作控制记录，并对整个日志拒绝 ANSI；合法重试或真实 full 失败的子输出若含 `Starting`、`Summary`、状态行或 ANSI，会误触 metadata STOP，阻止应允许的 network 收集。root 采纳 Codex 的 P1 定级，不能以 Claude 对同一问题的 P2-1 定级豁免。root 已保存 v8 控制记录/捕获输出边界修复候选，runner SHA `6203d38170b5392ac5ac394f7817c8298d00bac36b985ba5342dbdf7468989d5`；实际纯解析139/139、exit0（tool chunk21281a，原件 `/tmp/libra_mc32_junit_v8_parser_validation_r2_actual_20261022/`），保留原81项和三项v7 RED/v8 GREEN。候选以同case/同attempt JUnit输出划定捕获帧，控制对账不弱化；未知变换仍STOP。原R3 P1保留为该受审树的失败，v8尚待新的真实双审，不视为产品资格或P1正式闭合。
+
+**阶段与授权分账：** 四处 fmt-only 源码修复及 MC-32 现行恢复规范已经应用；产品后继完整资格尚未运行、未创建新产品 claim，一次7200秒产品窗口仍未获授权。原77621格式失败与已消费claim、R1/R2/R3失败、v6纯解析79项exit1及v7纯解析81项exit0均保留；81项只证明已检查的解析形态，不是产品资格，也不关闭本次P1。本次R3仅审查阶段已使用Claude/Codex各一次并因FAIL停止，不以剩余时间自动重开；原R1/R2绝对截止和各原预算作为历史保留；当时“后续审查须另授权”的限制已由本页顶部2026-10-22用户多轮双评审授权前滚替代，产品运行授权仍单独记账。
+
+**R3具名后置义务（owner=root）：** P2-2要求在实际启动前只读核查`.pi`等冻结域写者；不把runner作为向该仓写元数据的pi任务启动，不要求用户让出写窗，不擅停其写者、不豁免`.pi`或放宽inventory；发现冲突/漂移即STOP。P2-3由本次前滚标识当前终态、把旧“当前R1”说明标为历史，旧正文保留。P2-4要求将`GC-MC-07`等价执行方式具名写入最终外层验收收据，绑定五条原exact命令的实际子退出、完整结果集合及日志哈希，并由最终真实审查确认；不能只凭runner内部scope字符串代替该收据。
+
+**证据与边界：** R3原件 `/tmp/libra_mc32_recovery_review_r3_20261022`，manifest SHA `2a08cc88555a51c7a76cdb027563203caa1cf4964947c506e03897ac1034bd5e`；Claude raw SHA `ad30a2389735c06fc04ce7194c62f1a1dda199c80f67afb8da7275d4304aac59`，Codex raw SHA `b724f87bde609a9a5dc036ab91a05367947de74c91251233efcadf54def4cd62`。root/effective及两provider实际终态均保留；外层工具只保存metadata、完整输出留在原工具会话，不把这份失败原件消费为PASS证据。MC-32原5AC/5VER、I/R、依赖及independent/patch/self边界不变；三Traces文档仍为协调集，13本地Traces提交不得借MC-32发布。H0继续仅消费历史SSOT `e274439`，本机资格真实终态前不更新新SSOT绑定；H1/LTR-01、branch-force OPEN及无push边界保持。
+
+**历史 R2 实际审查终态（2026-10-22）：** session17424 / exit1，Claude PASS、Codex FAIL，overall FAIL。三个 P1 是日志与 JUnit 重试/终态未逐例对账、未知 XML 属性未拒绝、listing 重复键与未知排除状态未拒绝；P2 是五个 exact 的额外结果行未穷举排除。root 在原审查阶段内准备严格解析修复，未新增产品运行/claim、未获新的7200秒次数授权，不把纯解析器检查当源码资格。原件 `/tmp/libra_mc32_recovery_review_r2_20261022`，manifest SHA `22b51041ad40c91e11753b090586abb4272e0ecf13dc80c7bd2f36d9ab59fa18`；原 R1/R2 FAIL、77621 格式失败与旧预算全部保留。原审查阶段绝对截止 `2026-10-21T19:45:53.123538+00:00`，不得自动延长。
+
 **Description:** 自 MC-31 拆出（R28）。在 `src/command/mod.rs` 现有对象读取函数旁新增 helper `object_size(oid)`：loose 对象只解压到对象头；pack 非 delta 条目读条目头；pack **delta** 条目（`OFS_DELTA`/`REF_DELTA`）解压 delta 数据开头、读取其中的目标对象尺寸 varint（不重建对象），因此小 delta 展开成大对象时也得到真实尺寸，解压字节数 ≤ 64 KiB。工作树侧的有界读取由 MC-36 承接。现有读取函数与 CLI 行为不变。唯一行为轴：「对象尺寸」。
 
 **Out of scope:** 工作树侧有界读取（由 MC-36 承接）；MCP diff 的有界入口与行数上限（由 MC-31 承接）；CLI 的读取路径（不变）。
@@ -3392,7 +3470,7 @@ ER-01 至 ER-14 按模板原文对本计划全部任务生效（见 [`plan-templ
 | pack delta 条目头只给出 delta 数据尺寸 | Git pack 格式（delta 数据以基对象尺寸与目标对象尺寸两个 varint 开头） |
 | 本地门 | 五个 `--exact` 门均 ok。loose 只解压到对象头；pack 非 delta 读条目头；delta 只读目标尺寸 varint，解压不超过 64 KiB |
 
-**Acceptance criteria:**
+**Acceptance criteria:**（ER-10 格式恢复不新增或削弱原五项谓词；以下勾选为上游历史，本机恢复资格仍待。）
 
 - [x] AC-1 loose 2 MiB blob 的 `object_size` 返回 2097152。
 - [x] AC-2 同一调用的解压字节数（debug 计数器）≤ 65536。
@@ -3400,7 +3478,7 @@ ER-01 至 ER-14 按模板原文对本计划全部任务生效（见 [`plan-templ
 - [x] AC-4 pack 中以小 delta 存储、目标为 2 MiB 的 blob，`object_size` 返回 2097152。
 - [x] AC-5 同一 delta 调用的解压字节数 ≤ 65536（不重建对象）。
 
-**Verification:**（本卡特有判据，计入 G-03；`--exact` 门按 GC-MC-07 执行）
+**Verification:**（原五门保留，AC=5/8、VER=5/8；格式恢复新增的全局 fmt/完整资格不计入 G-03；原 `--exact` 门按 GC-MC-07 执行。）
 
 - [x] AC-1：`source .env.test && cargo test --lib command::tests::object_size_loose_blob -- --exact`（new）
 - [x] AC-2：`source .env.test && cargo test --lib command::tests::object_size_loose_inflates_header_only -- --exact`（new）
@@ -3414,11 +3492,13 @@ ER-01 至 ER-14 按模板原文对本计划全部任务生效（见 [`plan-templ
 
 **Deliverables:** N/A
 
-**Implementation write set:** `src/command/mod.rs`（新增 `object_size`）
+**Implementation write set:** `src/command/mod.rs`（对象尺寸 helper 与既有内联单测；当前恢复仅实际 fmt 四处格式）；本卡随附治理 `docs/development/plan/plan-20261019-agent-mcp-server.md`。
+
+**Coordination write set（root）：** `docs/development/plan/plan-20261015.md`、`docs/development/plan/plan-status.md`、`docs/development/plan/plan-long.md`；仅同步本机资格与跨计划发布限制，不属于 MC-32 产品 I 或独立发布 slice，不随 MC-32 搬运 Traces 本地提交。
 
 **Release write set:** `Inherited`
 
-**Files likely touched:** 同 `Implementation write set`
+**Files likely touched:** 上述 Implementation 与 Coordination 两写集逐文件 before/after hash 冻结；产品发布范围仍仅本卡 Implementation 必要内容。
 
 **Docs and compatibility impact:** N/A——新增内部 helper，CLI 读取路径、参数与输出不变；`COMPATIBILITY.md`、命令文档、网站页、`docs/error-codes.md` 均无变化
 
@@ -3438,7 +3518,74 @@ ER-01 至 ER-14 按模板原文对本计划全部任务生效（见 [`plan-templ
 
 **C/D coverage from:** `self`
 
-**Granularity:** `type=implementation; axis=对象尺寸（delta 感知、不重建对象）; recovery=immutable-release，发新版本修复; complete=yes; self-contained=yes; AC=5/8; VER=5/8; landing=1; prod-files=1; scope=M; deps=MC-35,DEP-MC-03; writeset=序列化于 MC-35; release=independent; split-from=MC-31; exception=N/A`
+**Granularity:** `type=implementation; axis=对象尺寸（delta 感知、不重建对象）; recovery=immutable-release，发新版本修复; complete=yes; self-contained=yes; AC=5/8; VER=5/8; landing=1; prod-files=1; scope=M; deps=MC-35,DEP-MC-03; writeset=序列化于 MC-35，恢复仅本文件四处fmt与具名治理随附集、root串行; release=independent; split-from=MC-31; exception=N/A`
+
+**本机资格恢复候选（未批准、未执行；保留全部历史）：** selected upstream `99a92c155d0ac705fdecd4abcc2d45a8ca78b225` / local HEAD `57fb4accac009e4f09a76e466a32ef239a09d354`（source `0.30.84`）首次资格实际 session `77621` / exit `1`，66.1187009520363 秒后 STOP。preclaim 服务/负载检查通过且原一次 claim 已创建；`cargo +nightly fmt --all --check` exit `1`，仅 `src/command/mod.rs` 四处格式差异（原行 492、577、991、1103）。strict clippy、CLI build、full、network 及两次 listing 均未执行，不存在当前树全量 PASS。原一次 7200 秒窗口已耗尽，未使用时长不转为新机会，不删除原 claim，不自动重试。
+
+**归属与后续条件：** 四处格式差异仅属于 MC-32 对象尺寸 helper 及其既有单元测试，可由 MC-32 按 ER-03/ER-10 具名同轴修复：I 仍为 `src/command/mod.rs`，不改变对象尺寸算法、断言、忽略项、branch-force 行为或卡片 5 AC / 5 VER。上游卡现有 `in-progress/locally-accepted` 和五项勾选保留为上游历史，不能作为这次本机恢复验收；本机资格/恢复处于 blocked / 无新 PASS。新补丁须精确限于上述四处格式，before SHA 与实际 fmt 原件绑定；可先完成可逆应用/准备/新树双审，新的具体一次验收授权仅在finalize/运行前要求；现文本不授予新增运行次数/预算。
+
+> **历史 R1 冻结输入（由下述本卡现行恢复规范替代，不作为执行规则）：** **恢复候选门（未运行）：** 得到明确新次数/总时限后，在冻结的最终源码、工具、env、Docker 服务、配置、三文档及 inventory 上重做真实 preclaim readiness；遵循原命令及断言，重新执行 nightly fmt、strict clippy、CLI build、fresh full/network listing、双 env 完整 nextest（retries 2）和 network 三例门（retries 0）。fresh listing/JUnit/退出码/原始日志核验，不预填测试总数；五个 MC-32 原 exact oracle 必须在实际 selected/JUnit 中具名出现，card 自身 A 组要求保留，不能用 suite 计数代替逐项归属。T-1 与当前整体资格的显式全量要求不削减。原卡五条 focused 执行已明确纳入本次7200秒总预算，不另加窗口。任何新增确定性失败停止并归属，不自动追加恢复次数。
+
+**发布边界：** 本候选只准备本地修复和资格恢复，未取得 MC-32 C/D，也未授予 push。MC-32 仍为 independent / patch / self；若修复需对外发布，必须在经核验的上游来源隔离发布树上仅携带本修复、MC-32 必要治理和其规范版本面，按当时真实最新版本前滚发布并取得实际 C/D。不得从含 13 个 Traces 本地文档提交的 main 推送来搬运这些提交；Traces 三文档保持本地，唯一发布点 LTR-01 不变。当前 `.84` 字符串、上游五个 focused 勾选、其它 MC 卡的 D 成功都不证明 MC-32 已发布完成；实际 remote/tag/Release/D 必须在后续发布决策单独核验。SOURCE-LIBRA-99-BRANCH-FORCE 保持 OPEN，阻塞 LTR-01 与受影响产品消费，不由格式修复或 suite PASS 关闭。
+
+**原始收据：** `/tmp/libra_99_qualification_actual_20261022/{terminal.json,root-terminal.json,actual-tool-terminal.json,fmt.log,fmt-process-terminal.json,readiness-terminal.json,terminal-cleanup.json}`；精确 SHA 列于本次私有候选 manifest，未新建仓库证据目录。
+
+> **历史 R1 冻结输入（由下述本卡现行恢复规范替代，不作为执行规则）：** **具体恢复合同（候选，新增次数尚未授权）：** 申请后继 session77621 的一次完整验收，总计7200秒含readiness/两listing/原五门/原卡五条exact单元VER/清理，network不额外加时；原五命令、nextest retries2/network retries0/超时/umask022/CARGO_BUILD_JOBS1不变。29个full与3个network必含选择保留；MC32五oracle除实际入选/JUnit通过外，原卡五条cargo test --lib完整名 -- --exact须在本次7200内真实各1passed/0failed/0ignored，不以full替代。原STOP与claim保留，新claim具名后继；root可先精确应用/实际采集/prepare重冻结新树并真实Claude/Codex双审；只有finalize和实际runner必须另有用户明确新增次数授权，绑定该manifest与spec。旧R3不能覆盖新源/治理输入。所有未来终态、源码资格与C/D均待，不预填PASS。逐G核与精确执行机制在本次私有候选 CONTRACT.md，待root采纳时把有效规范写入当前计划；不新增仓库证据目录。
+
+> **MC-32恢复环境入口v4候选：** 原prepare session32089/exit1因旧父环境stable摘要不符而STOP，未创建新claim/未执行产品测试；原STOP保留，不新增测试机会。现root实际chunk6d7adc/exit0取得fresh父环境（cwd=/media/eli/data/mega2，stable189a4c0c…及逐键value摘要、代理presence/hash、完整limits）。旧32d535…无完整逐键历史，差异原因UNKNOWN，不归因PWD/代理；源码、双env文件和34个外部工具/配置仍须逐项等旧，limits不放宽。v4绑定新环境而不宣称旧环境等同；新真实双审及新增一次7200授权仍待，后者仅在finalize/runtime要求。
+
+#### MC-32 本机恢复执行规范（本次前滚修订；新增运行授权 pending）
+
+本节把原私有候选中的有效执行规则直接登记在任务卡，取代上方已标历史的 R1 候选门/合同条款；不再把规范写入推迟到新审查或 finalize 之后。本节连同四处源码格式修复及协调文档须先形成最终字节、真实采集并重新冻结，再取得真实 Claude 与隔离 Codex 双 PASS。此前 R1 实际 session22920 / exit1、Claude PASS / Codex FAIL / overall FAIL（3P1）保留，不构成准入。源码对象尺寸轴、原5AC/5VER、MC-35/DEP-MC-03依赖、卡数及发布边界不变；P1-RUN-01 的执行器修复须在同一新审输入中实际审查，不能凭本节文本视为已关闭。
+
+**逐 G 核定（由新审确认，非 PASS 收据）：**
+
+| 条款 | 本次处理 |
+|---|---|
+| G-01 | 对象尺寸唯一轴；immutable-release 前滚。四fmt hunk无算法、断言或第二产品行为变更。 |
+| G-02 | 同卡格式恢复、原五oracle与必要文档闭环，不另造无行为格式卡。 |
+| G-03 | AC=5/8、VER=5/8保持；全局fmt/clippy/build/listing/full/network/readiness是资格机制，不增加第六行为谓词。 |
+| G-04 | 原1落点/1生产文件、M不变；本卡计划为随附集，三Traces文档为root协调集。 |
+| G-05 | 精确四hunk前后SHA、原命令、五个完整测试名和真实结果可核；不依赖旧口头PASS。 |
+| G-06 | MC-35、DEP-MC-03不变；不新增卡/依赖，不把LTR-01作为MC-32发布承载。 |
+| G-07 / G-07a | independent / patch / self保持；当前只做本地资格，不是发布完成，不准batch免bump。 |
+| G-08 | 不组成family，不借其它卡C/D。 |
+| G-09 | 同轴恢复与失败事实登记，编号/卡数/原AC/VER不变。 |
+| G-10 | root协调精确写集；不要求用户让出独占窗口，不宣称没有并发writer；冻结域任何漂移立即STOP。 |
+| G-11 | implementation身份保持，不改成docs规避验收。 |
+
+Libra现行v2.14粒度规范止于G-11（含G-07a），不引入Mega G-12/G-13例外。
+
+**新增窗口与授权顺序：** 拟申请一次新的完整恢复，总计不超过7200秒，从runner main入口计时，包含校验、真实readiness、五exact、两listing、五资格门、所有原件写入及清理；network无额外预算。保留60秒收尾预留、每readiness命令30秒上限、原nextest单测超时，`CARGO_BUILD_JOBS=1`及测试shell `umask 022`。不提高超时、变更断言、删减覆盖或增加ignore。新claim具名后继77621，原claim/STOP永久保留，未使用时长不转为新机会。当前**新增次数授权 pending**：root可先完成可逆修改、采集、prepare和新树双审；只有真实双PASS后，用户明确授予新增一次7200秒、原指令与root归属绑定新manifest/spec，finalize才可生成可执行配置，runtime必须再次核验。普通“继续”、准备/审查PASS、原R3或原未用时长都不授予该次数。失败不自动追加尝试；来源未知或尚缺实际终态即STOP。
+
+**完整执行顺序与命令：** preclaim真实readiness通过后才创建新claim；按下表串行执行，五exact属于原VER，不额外获得窗口。源码/配置/工具/环境/资源/输入守卫及owned进程清理在每个边界核验。记录每门真实退出、日志、计数、metadata、输入摘要和最终root/tool终态。
+
+| 顺序 | 命令 / 核验 |
+|---|---|
+| 1 fmt | `cargo +nightly fmt --all --check` |
+| 2 clippy | `cargo clippy --all-targets --all-features -- -D warnings` |
+| 3 CLI build | `cargo build --bin libra` |
+| 4 原VER-1 | `source .env.test && cargo test --lib command::tests::object_size_loose_blob -- --exact` |
+| 5 原VER-2 | `source .env.test && cargo test --lib command::tests::object_size_loose_inflates_header_only -- --exact` |
+| 6 原VER-3 | `source .env.test && cargo test --lib command::tests::object_size_packed_full -- --exact` |
+| 7 原VER-4 | `source .env.test && cargo test --lib command::tests::object_size_packed_delta_reports_target_size -- --exact` |
+| 8 原VER-5 | `source .env.test && cargo test --lib command::tests::object_size_packed_delta_does_not_reconstruct -- --exact` |
+| 9 fresh full listing | `source .env.test && source .env.live-test && umask 022 && cargo nextest list --all --message-format json` |
+| 10 fresh network listing | `source .env.test && umask 022 && cargo nextest list --features test-network --test network_remotes_test --message-format json` |
+| 11 full | `source .env.test && source .env.live-test && umask 022 && cargo nextest run --all --no-fail-fast --retries 2` |
+| 12 network | `source .env.test && umask 022 && cargo nextest run --features test-network --test network_remotes_test --no-fail-fast --retries 0` |
+
+**五exact判定：** 每条必须真实exit0，只有一条指定完整名的 `test ... ... ok`、一处 `running 1 test` 和 `1 passed; 0 failed; 0 ignored; 0 measured` 汇总，拒绝其它测试名/多条/零条/ignored/failed。原始日志保留；runner直接捕获实际子进程退出并对整行完整名、唯一计数进行精确校验，与GC-MC-07的pipefail/tee/grep目的等价，不以无pipefail的管道退出替代真实cargo退出，不以full覆盖或手写summary替代五条真实命令。此等价性必须由实际最终审查确认并在验收收据具名记录。
+
+**fresh listing / JUnit / retry 严格一致性：** 必含29个full与3个network用例保持，五个MC32原完整名必须包含在full必选集合、fresh listing和真实JUnit通过集合。完整full仍运行全部实际selected集合，不能只跑29条或预填总数。两listing必须真实exit0、JSON完整可解析，按binary/test完整身份记录selected/ignored并核重复/缺失/额外项；相对旧资格基线的selected新增允许、逐项记录且全部执行；selected删除、ignored新增或删除均STOP。本轮源码、配置及环境冻结，运行期间变化仍STOP；当前listing与JUnit必须精确同集合，不把新增项排除在验收外。JUnit须把root、每suite计数与逐testcase最终结果相互核对，测试身份唯一，case级failure/error/skipped与聚合计数不得矛盾；应运行selected case不能以`<skipped/>`冒充passed，缺失结果、非预期结果、重复结果、坏XML或未关联终态均STOP。原本不运行的ignored必须与listing一致单独记账，不当作pass。failed/errors/ignored/flaky/retry均分别记录，不只看root summary。每个full用例额外retry不得超过2、network必须0；合法历史重试表示只用于记录对应case的失败尝试，必须与最终结果及实际runner记录一致，不能吞掉无来源或互相矛盾事件。最终计数来自实际集合与原件，不作先验PASS。 本轮严格消费冻结的默认profile及其原JUnit配置，不启用 `flaky-result=fail`；其它配置可产生的 `failure(type="flaky failure")` 加 `flakyFailure`/`flakyError` 形态本轮不接受，遇到即STOP，不能误记PASS或自动启用新配置。已有成功用例的合法flaky历史最多2次仍分别记账；普通成功加rerun、非flaky失败加flaky等不一致仍STOP。
+
+**唯一失败后继续收集例外：** 只有步骤11 full的实际进程退出恰为`100`、且fresh listing、完整JUnit/逐case/重试/退出语义已经严格核为**合法测试失败**，同时输入/环境/资源/清理/剩余同窗预算全部合格时，允许在同一个已授权claim内执行步骤12 network**一次**，仅补齐原计划的独立网络证据。它不是重跑full、不是第二恢复机会、不得额外加时；即使network全PASS，整体资格仍STOP/FAIL，full失败必须具名归属。此前任一门（含任一exact/listing）失败、full退出非0/100、退出与结果矛盾、任何metadata缺失/畸形/漂移/超时/清理不确定均立即STOP，不进入network。full正常exit0也须全部元数据一致才允许network；network失败后立即STOP，不重试。只有所有五资格门exit0、五exact通过、两listing及所有严格一致性门/清理/总时限均通过，才可记本地资格PASS；仍不是MC32 C/D或Traces完成。
+
+**输入与并发边界：** 运行冻结Libra实际source/config/env/tool/inventory；仅四hunk `src/command/mod.rs` 与本卡计划/三Traces协调文档是本次登记允许差异，源字节必须恰等候选，原13笔Traces提交和其它上游源码保留。原七项Mega live依赖通过明确映射转为字节相同的不可变历史快照；SSOT `e274439` 是本次原H0上下文，不要求Mega正在进行的FIX06新源码或治理不变，也不给其验收结论。root/工具实际native HEAD/index/status、CLI .69、源env文件和34项外部工具/祖先配置的存在性/mode/symlink/bytes均核；不在测试流程调用新Libra二进制操作真实仓库数据库。`.pi`若在本次原冻结域内仍严格守卫；不承诺无writer、不擅自停用户写者、也不擅自豁免该目录，任何变化STOP，无自动重试。
+
+**新环境基线：** 以已记录root实际cwd `/media/eli/data/mega2`、稳定环境摘要`189a4c0c2550001bb76fae0333fc0ba9c6b2de25c69e82b0a9138e1efeec1cb8`及逐键value SHA、代理presence/hash、LIBRA_INTERNAL禁令和全部RLIMIT为入口；只排除CODEX_TOOL_CALL_ID/SHLVL/_。prepare/runtime及运行边界精确核验；不改PWD/env/limits、不输出环境值。旧`32d535…`缺逐键历史，差异原因UNKNOWN，`old_environment_equivalence=false`；旧session32089入场STOP完整保留，不伪造旧全环境hash。须从相同真实root环境运行，若变化则STOP而不是放宽比较。Docker只使用既有具名服务并保留真实readiness，owned清理不停止共享daemon。不保证7200一定够；预算到期停止，不由历史耗时推定PASS或授予再试。
+
+**发布与状态：** 上游`in-progress/locally-accepted`与原勾选是来源历史；本机恢复保持`blocked`/无新PASS直到新实际结果核齐。本次仅恢复本地资格，不bump、安装、commit、push、tag或Release；独立MC32最终C/D仍按其模板、GC-MC-09等实际完整门另行完成，不能拿本次nextest资格替代本计划其它强制C门。对外发布前先fresh核最新远端，在仅上游来源的隔离发布树带本卡精确修复/必要治理/规范版本面，rebase并重测，不携带13个本地Traces提交或三Traces协调header。Traces唯一LTR-01发布点、H1/branch-force OPEN及其它历史STOP/取消记录均不变；原`.84`字面和suite PASS不证明已发布。
 
 ### Task MC-33: status 的有界收集（供 MCP 使用）
 

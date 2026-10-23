@@ -23,6 +23,14 @@ Merge commits 默认跳过。当 revision range 解析为零个提交时，命�
 | `--root` | | 包含 root commit 和所有可达的非 merge ancestors | false |
 | `--output-directory <DIR>` | `-o` | 将 patch 文件写入 `DIR` | 当前目录 |
 | `--stdout` | | 将所有 patches 打印到 stdout | false |
+| `--no-numbered` | `-N` | 去掉文件名的 `0001-` 序号前缀以及主题中的 `n/m` 计数 | 关闭 |
+| `--rfc[=<text>]` | | 在主题前缀中加入 `RFC`（`[RFC PATCH]`）；给出值时用该文本替代（`--rfc=WIP` → `[WIP PATCH]`）。值必须用 `=` 紧跟，避免吞掉版本参数 | 关闭 |
+| `--no-rfc` | | 取消此前的 `--rfc`（后写者生效） | 关闭 |
+| `--filename-max-length <N>` | | 将输出文件名截断到最多 `N` 字节（包含 `0001-` 前缀与后缀）；必要时可只保留序号，截断点与 Git 一致 | 不限制 |
+| `--commit-list-format <FMT>` | | 封面信的提交列表。默认（或 `short`）为 Git 的按作者分组 shortlog（`Name (N):` 加 72 列换行的主题）；`modern` 渲染 `[i/N] subject`；其他值按 pretty-format 解析，支持 `%h`、`%H`、`%s`、`%an`、`%ae`、`%n`、`%%`（不支持的转换会报 `'<fmt>' is not a valid format string`） | `short` |
+| `--relative[=<path>]`（不支持） | | 仅为明确缺口而接受：Libra 没有针对导出补丁的相对路径过滤，命令以 128 退出并返回 `LBR-UNSUPPORTED-001` | — |
+| `--all`（不支持） | | 仅为明确缺口而接受：Libra 的版本语法没有 all-refs 选择器，请显式写分支范围（如 `main..topic`） | — |
+| `--no-base` | | 不输出 `base-commit:` 尾注，覆盖 `--base`（Libra 没有 `format.useAutoBase` 配置可重置） | 关闭 |
 | `--numbered` | `-n` | 以开头序号命名文件（`0001-subject.patch`） | false |
 | `--start-number <N>` | | 从 `N` 开始编号 | 1 |
 | `--subject-prefix <PREFIX>` | | 在 Subject: 行使用 `PREFIX` 而不是 `PATCH` | `PATCH` |

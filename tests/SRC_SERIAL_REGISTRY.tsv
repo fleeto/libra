@@ -124,6 +124,7 @@ src/command/merge_rename_content_test.rs	binary_fold_without_a_regular_original_
 src/command/merge_rename_content_test.rs	non_file_rename_without_an_original_refuses_the_invalid_helper_contract	lane:cwd+env+hash_kind	five-key;callees:non_file_rename_without_an_original_refuses_the_invalid_helper_contract,entry
 src/command/merge_rename_content_test.rs	outer_binary_content_selection_preserves_mode_and_mode_conflicts	lane:cwd+env+hash_kind	five-key;callees:outer_binary_content_selection_preserves_mode_and_mode_conflicts,entry
 src/command/merge_rename_content_test.rs	symlink_fold_restores_the_complete_original_and_remains_unclean	lane:cwd	five-key;cwd;callees:symlink_fold_restores_the_complete_original_and_remains_unclean,entry,merge
+src/command/mod.rs	bounded_read_rejects_concurrent_growth	lane:env	pauses a bounded worktree read under LIBRA_TEST and grows the file
 src/command/mod.rs	object_size_loose_blob	lane:hash_kind+cwd+env	sets the hash kind, initializes a repository, and changes cwd to measure a loose object
 src/command/mod.rs	object_size_loose_inflates_header_only	lane:hash_kind+cwd+env	sets the hash kind, initializes a repository, and changes cwd to measure header inflation
 src/command/mod.rs	object_size_packed_delta_does_not_reconstruct	lane:hash_kind+cwd+env	sets the hash kind, initializes a repository, and changes cwd to measure delta inflation

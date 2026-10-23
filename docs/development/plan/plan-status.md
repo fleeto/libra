@@ -1,3 +1,25 @@
+> **最新事实前沿（2026-10-22 22:47:54 UTC为本轮事实正式写入起始秒，实际apply收据 `/tmp/fix06_A_smoke_final_fact_apply_actual_20261023/receipt.json`）：** FIX06批量生产实现及测试已应用，累计24个新增测试、当前批量来源新增13个；正式8AC/8VER及canonical限定不变。执行合同R3 actual70980/exit0/chunk7b76dc为真实Claude/Codex双PASS（含VER2_MAPPING），仅合同资格；新产品A actual13933/exit0/chunk7bb0e2十门真实通过：fmt/clippy/release各exit0，VER1/2/3/5分别4/13/4/7通过，VER6_7_capture另1通过，traces24，api433通过/1原ignored。84次native查询，32次清理信号发送有完整journal，remaining_owned={}。root已具名判定当前源码VER4/6/7/8手工证据PASS，VER2+VER5跨选择器映射按两门实际通过共同消费。新smoke执行合同86711/exit0/chunkcd70d8真实Claude/Codex双PASS；产品smoke81644/exit0/chunk7be561实际18通过、0失败，runtime OpenAPI HTTP200/3.1.0/30 paths，7个owned containers和10项fixture清理成功，host清理0信号/0错误、remaining_owned={}。本次事实同步B、自身ER05、完整C/D及提交/推送/版本发布仍未完成。 A与手工原件位置见Mega2 FIX-MTR-06 Current evidence；旧FAIL/STOP/缺失/取消和各历史pending原文保留，不能回填为当时通过。AC勾选、Lifecycle/Acceptance、Dependencies/I/R/独立发布边界不改；Libra13本地文档不提前push，MTR95仍独立阻塞。
+
+> **执行事实更新（2026-10-22 22:01:45 UTC，本次写入时点）：** FIX06批量源码及测试已应用，实际产品A尚未启动。执行合同R1 session92123/exit1与R2 session24301/exit1均为Claude PASS、Codex FAIL；R2确认两项P1关闭，清理journal及独立观察连接P2正在前滚修复，未以评审次数耗尽停止。前两次准备实际64055/78353共扣72秒，原首个A claim未创建，后续准备继续累计；旧FAIL/STOP与FIX3/LTR00取消不变。VER2的owner预占零tree证据明确由VER5具名用例补充，必须两门真实通过；此映射澄清待下一轮双审，8AC/8VER、原命令/覆盖/期限、依赖与发布边界均不变。H0既成PASS仅为计划采纳；FIX06新A/自身ER05/C/D、提交与推送均未完成，Libra13笔本地文档不得提前push，MTR95独立阻塞保留。R2原件 `/tmp/fix06_batch_A_execution_review_r2_20261023/root-terminal.json` SHA `ca767f9eaaad960097ca08b1b42598276f80c7056c010dd48b837c8e3d6cedf0`。
+
+> **最新结果登记（2026-10-22 21:26:53 UTC，root实际终态判定时点，非候选生成/未来写入时间）：** H0 R2真实session81653/exit0/chunkf7fd06，Claude与隔离Codex对H0_GOVERNANCE及FIX06_PLAN_ADOPTION均明确PASS；root已核同一manifest `b6d576d9af90cfbf678bf62f951ad58c798abfafeae3f95dd9df35b36dc1b181` 与全部冻结输入并完成P0/P1关闭、具名P2处置。仅准当前8AC/8VER+canonical计划采纳与H0前置闭合；FIX06批量源码、新A/B、自身ER05及完整C/D尚未完成。Libra52474来源资格仍仅限域carry（full10757/21ignored/1flaky、15focused及具名三门；network3；余1093），13笔本地文档不得提前push；MTR95的move/rebind/Native intermediate风险仍独立阻塞。R1 actual81582 ClaudeFAIL/CodexPASS、全部旧FAIL/STOP/missing/取消及审前pending保留为各自历史时点。root终态 `/tmp/fix06_joint_H0_final_review_r2_20261023/root-terminal.json` SHA256 `4338a0aac40b068a01663301c3a01d5d0d86ccaf333a804db7c98c92d404da28`；本登记不改变AC/Lifecycle/Dependencies或发布边界。
+
+> **现行执行前沿（原8文档正式写入：2026-10-22 21:00:20 UTC；非本次新采纳或评审PASS时间）：Libra选定f966来源资格限域接受，FIX06的8AC/8VER与canonical采纳仍待本轮共同H0。** 新恢复方案84664/exit0/chunk8f6dc7真实Claude与隔离Codex双PASS后，actual52474/exit0/chunkac9169完成原network3通过/0ignored/0重试、42条命令全部exit0且owned清理为空；新各boundary源码inventory与VCS身份一致。仅具名继承旧fmt/strict clippy/product CLI build、15focused及full10757最终通过/21原ignored/1flaky；不把旧22040/31114 STOP、missing终态、迁移者UNKNOWN或非连续审计改写成通过。root终态 `/tmp/libra_f966_cwd_recovery_actual_after31114_20261023/root-terminal.json` SHA256 `3fb07e4b14bb915b6dbf1de6cbcb5e75f3f9656e33d94f972ea4f3456ad8c77d`绑定本地430b1cae/上游f966548/版本0.30.86。inner185.297950秒不是最终预算记账；outer188.596712秒加1秒launcher余量扣190，7200累计6107、剩余1093秒（不是1097），无自动新尝试授权。H0尚未PASS；FIX06批量实现、新A/B、自身ER05及完整C/D未完成，LTR卡未完成，13笔本地文档不得提前push。以下旧“当前/待资格/运行中”等段均按各自时点保留。 原实际写入由 `/tmp/fix06_H0_governance_apply_actual_20261023/receipt.json` SHA256 `6dd403e4bbd18ecbd6ba2c920d691dc18ef2e0a2533982aef6ef4b5bb56fcb0f`绑定；此前20:59:30为候选生成时间，H0 R1 actual81582/exit1/chunk061e55为Claude FAIL/Codex PASS，此次仅订正登记，仍待复审。
+
+> **2026-10-23 更新执行前沿：Libra 31114启动前STOP，剩余1283秒，恢复与共同H0仍待。** actual31114/exit1/chunk899531因root从 `/media/eli/data/mega2` 启动，与冻结cwd `/media/eli/data/libra` 不符而在入口断言STOP；未启动native或产品命令，inner输出目录/claim/终态均不存在，不补造。外部一次launch已消费；实际观测32.762631秒及1秒launcher余量共扣34，原7200累计5917、剩余1283秒。root终态 `/tmp/libra_31114_cwd_stop_20261023/root-terminal.json` SHA256 `160ed68426886d37066f4e139eb1b6b3d34ddd0e2b5b29535e68968b09119f9b`不授权自动重试或新增窗口；修正启动cwd的新恢复仍待审及真实执行终态。以下22040的STOP、限定15focused/full10757最终通过/21ignored/1flaky及当时1317余额逐字保留为历史；network未取得资格通过。FIX06仍8AC/8VER及合法canonical存储状态等价/异常路径Err整txn回滚限定，批量实现未启动，当前采纳差异及两仓H0仍pending，不继承旧8/5设计PASS。无新增提交、push、tag、Release或CI/D；旧FAIL/STOP及FIX3/LTR00取消不变。
+
+> **本次共同H0待审采纳差异：** 批量恢复仅对合法canonical存储状态声明静态等价。锁后inactive行须严格验证存储路径为canonical；异常路径返回Err并由外层事务rollback，不能silent normalize或顺手修DB。该防御归既有AC-5错误回滚与VER-2错误覆盖，不新增AC/VER，仍8AC/8VER；R2旧8/5设计PASS不覆盖本差异。
+
+> **2026-10-23 当前执行前沿：Libra 22040实际STOP，FIX06采纳稿8AC/8VER待共同H0。** Libra actual22040/outer exit1/chunk9c321b：15focused全部exit0，full实际exit0、10757最终通过/21旧ignored/1flaky；随后固定0.30.69 CLI的rev-parse HEAD因数据库schema2026102201超过支持的2026101902而exit128，network未启动。full-after源码inventory与入场逐项相同，但不覆盖活仓VCS DB；原full-after-vcs及terminal-inputs缺失不可补造，迁移触发者UNKNOWN。整窗3214.211489秒扣3215，原7200累计5883、剩余1317秒；来源资格未完成、不构成H0/C/D或LTR完成。root仅登记1317余额内匹配0.30.86工具的新恢复方案，待新真实双审，未预授carry或执行PASS。FIX06方案R1 actual8843/exit1的Claude FAIL/Codex PASS保留；R2 actual15527/exit0/chunkbfc3c6真实双PASS仅覆盖旧8AC/5VER设计（manifest c1b9e7f8af1f6969819ec56e3c622303e8c19438ccad47e2a1cd4c8ccc1bec50、62输入核同）。当前采纳稿按G-03将SQL锁对象、唯一索引、fallible解析分列VER6/7/8，总8AC/8VER、无余量，尚待共同H0真实审查；批量实现、新A/B、自身ER05及完整C/D未启动。旧7/4与8/5证据和以下全部旧“当前/运行中”段按各自时点保留。Libra13笔本地文档仍不得提前push；Mega6/109、Libra0/26不变。
+
+> **2026-10-23 FIX06同轴批量恢复v2待复审终态：** 当前候选新增AC-8/VER-5，粒度为8AC/5VER、四生产文件/三落点/M，行为轴、Dependencies、I/R及independent patch/self发布边界不变。拟将逐目标SQL改为排序分块锁定、分块owner查询、按层批取tree和受唯一约束保护的分块激活；批量实现尚未启动，新A/B、自身ER05和完整C/D均未执行。旧7AC/4VER输入的A10886与smoke78803只归历史源码，不覆盖未来批量树。方案层R1真实session8843/exit1/chunk68d34d为Claude FAIL/Codex PASS、整体FAIL，manifest `db813099268253c1998e032260e928f52a9d45dc2bd914734e27c78b7e9a0627`原件保留。v2以七项精确修订补齐跨chunk错误整txn回滚、owner四时点竞争、空ID仍验证root/Q1、root歧义、原无全表锁/无新增timeout重试、schema guard及borrowed txn计数正控制；新真实复审终态待，不预记PASS，也不以旧Performance文字澄清豁免GC-10。Libra22040仍在完整测试，最终资格和共同H0待实际终态审定。
+
+> **2026-10-23 当前前滚控制恢复已双审、资格执行中：** 固定Libra来源430b1cae/f966548/0.30.86不变。56333控制STOP、已消费claim、0产品cases及缺失终态inventory继续保留，不补造旧终态。具名前滚控制恢复R1 actual37040/exit1为Claude PASS、Codex BLOCKED（越过可读allowlist），不是双PASS；read_guard修复后R2 actual10179/exit0/chunkcaf5d4真实双PASS，manifest `328049a5f61c4dfffad2c95b1cd9daf2baa03c3981986790041cd15304931d7b`，仅覆盖恢复执行安全及覆盖。准备2314/exit0耗7.012474秒扣8，原累计余额4540降为4532秒；新增时间0，审查轮次不重置旧测试/诊断预算。一次新执行22040已启动，当前没有实际终态，不能记产品资格通过或倒填最后退出、计数、清理及输入一致性。H0、FIX06自身/Performance/完整C/D、95独立风险及LTR01发布边界仍待；Libra13笔本地文档不提前push，Mega6/109、Libra0/26不变。下面56333段落是其原时点历史记录。
+
+> **2026-10-23 56333时点历史资格STOP与恢复待审：** Libra固定整合来源 `430b1cae5a165adfc0f70858805bb480c085b737` / 上游 `f96654855d59455604b7b64669ba036b7b452ef7` / 0.30.86；13笔本地Traces文档重放、签名/DCO及上游产品树保留是既有整合事实，未提前push。listing恢复16996实际exit0，full10757 selected/21 ignored、network3/0，111条差异归属与6项未消费范围保留。最终执行合同R1为Claude PASS/Codex FAIL（binary privacy），R2 actual96103/exit0双PASS仅覆盖执行合同。产品资格 actual56333/exit1 STOP：53.788156秒扣54，账面余额4540秒，claim已消费，focused/full/network产品cases为0；缺失原terminal inventory，不能声称终态全树未漂移。确定的控制器缺陷是JSON list与runtime tuple比较误拒；两行修复及51项保存数据控制fixture已有原件，只是候选，不是产品/H0通过。root登记一次前滚恢复，仍从原7200累计余额扣账，旧claim/STOP不重置，须新真实双审与独立入口。H0、FIX06自身ER05/Performance及完整C/D、MTR95独立风险、LTR10的H1/WRITERS/LIVE和LTR01唯一发布边界均未解除；完成数Mega6/109、Libra0/26不变。以下旧“当前/待执行”均保留其原时点，不改旧失败、取消或预算。
+
+> **2026-10-22 当前 Traces 前沿：** Libra 已将13个本地计划提交原生重放至最新上游 `f96654855d59455604b7b64669ba036b7b452ef7`（0.30.86），当前HEAD `430b1cae5a165adfc0f70858805bb480c085b737`；逐个DCO/签名及上游产品树保留已核，四份脏文档保留、index空、未推送。旧MC32四处格式候选已被上游吸收，旧R7只覆盖旧树；新整合源资格/当前治理双审待。完整复验按用户既有rebase重测授权具名执行，旧FAIL/STOP预算保留。FIX06自身/H0/C/D、MTR95独立风险及Libra H1/LTR01尚待，正式Mega6/109、Libra0/26不变。详见[日期计划当前执行前沿](plan-20261015.md#当前执行前沿libra-最新源整合2026-10-22)；以下旧“当前”按其原时点理解。
+
 > **2026-10-22 Codex 全卡本机正式验收与 rebase 后复验：** CX **31/31** 均 `done/complete`。main 实现提交 `57eeb0e`、网站 cf `ea1c41b` 已推送，新文档在线可见；最终树双环境完整 Nextest 各 **10718/10718 PASS**（各 23 skipped；env1 1 flaky，env2 3 leaky），格式、严格 Clippy、Windows GNU 生产库/CLI、网站门和源码/网站审查 PASS；额外 `--all-targets` 在未改动的 `compat_mail_am_basic` Unix 专用测试上编译失败，属独立遗留项。系统 Codex 0.163.0 使用新编译 Libra 在全新隔离仓库实现 TUI 贪吃蛇，12/12 trusted hooks，两个自动 committed checkpoint 的 ordinary export 与源 4 段 reasoning 逐值相等（9952 字符 opaque 值、480 UTF-8 bytes 可读摘要）；doctor 修复两条 revision 缺口后 0 findings、2/2 ref 可达。CX-28 审计 GO，CX-25 分页 legacy revision 与真实修复通过。真实 Codex 验收以本机为准，新测试仅本机 feature+ignored 运行、不进入 CI；主离线 CI 仍在运行，发布另记。Claude/Pi/Hermes 卡不计入 CX 分母，详见 [plan-20260904.md](plan-20260904.md)。
 
 > **2026-10-22 Codex 当前进展：** CX-27、CX-20、CX-29 本机正式验收 `done/complete`，累计 **28/31**，剩余 CX-06、CX-28、CX-25。durable journal 11/11、commit 1/1、recovery 2/2 本机 ignored 专项及双环境完整 Nextest 各10714/10714 PASS；严格 Clippy/fmt、Windows GNU、网站门和源码/网站审查 PASS。后继 thinking 与 legacy 修订仍在开发，须重新完成其专项和最终全量。Codex 真实验收以本机为准，新 Codex 测试不进 CI。详见 [plan-20260904.md](plan-20260904.md)。
@@ -252,13 +274,262 @@
 
 # 计划执行状况总表（plan-status.md）
 
+## 双评审迭代规则（2026-10-22 用户授权，当前生效）
+
+用户原话：“请修改计划,双评审可以多次,直到双评审可以通过”。适用于 Mega2/Libra 两份 Traces 计划及其当前阻塞修复（含 FIX06、MC-32）的计划、源码和验收脚本双评审。root 可在处理本轮问题后继续发起后续轮次，直到真实 Claude 与独立上下文 Codex 对同一最终冻结输入均明确 `VERDICT: PASS`；不再设“双方各一次后必须重新申请”的总轮数限制，也不因上一轮 FAIL 或既有审查次数用完而重复询问这类评审授权。
+
+每轮均保留独立原件、输入摘要、实际退出与终态；先修复问题或具名核清事实，再冻结新输入复审，不以重复请求施压取得 PASS。P0/P1 必须关闭，P2 按模板具名责任与条件处置。PASS 仅覆盖对应输入及审查范围；两人隔离审查，root 核实实际终态后才记双 PASS。每轮保留最多30分钟的进程看护上限；该上限不作为后续修复评审轮次的总预算。provider/MCP 等技术故障仍按 ER-10 分类及有界退避，真实凭据、额度或服务不可用须报告，不能伪造成功或静默空转。
+
+本条只前滚调整双评审的轮次授权；历史 R1/R2/R3 FAIL、STOP、截止和原件原样保留，其“各一次/后续须另授权”只描述当时规则，不再限制本条生效后的审查。产品诊断、A/B/C 测试次数与窗口、旧 FIX-MTR-03/LTR-00 预算、验收标准、提交签名及发布边界仍分别按原任务卡执行；本条不授予新的产品测试次数或提前发布权限。解析器fixture通过不替代产品资格，当前修复版正式双审可直接按本条开展。
+
+## 当前双审迭代：R6 终态与 v11/v12 修复（2026-10-22）
+
+R6 实际 session24950 / exit1，Claude PASS、Codex FAIL；原件 `/tmp/libra_mc32_recovery_review_r6_20261022/`，manifest `e7cc6f3f5047901490c4cce45d9bdfaa0e6c871e7e43c59d5fc5ea387abc7a3f`。两方认可多轮评审规则及v10 flaky/leaky可观察边界；新的 `P1-R6-OUTCOME-METADATA` 是JUnit outcome只核非空type、console对账只核成功/失败，可能接受执行错误、普通失败、超时或recap类别矛盾。v11候选按固定producer严格核tag/type组合和每attempt的共同可观察类别；失败case主outcome是第1attempt、rerun按序，flaky事件对应成功前失败；recap对console规范化标签一致，不猜JUnit未给出的信号号码。未知type、不兼容tag/type、类别错配及recap矛盾均STOP。首轮纯解析671/671、exit0原件保留（chunk bd87a0，`/tmp/libra_mc32_junit_v11_parser_validation_actual_20261022/`）；随后补齐已知LEAK-FAIL但summary省略附计数的拒绝，最终纯解析676/676、exit0（chunk474cc7，原件 `/tmp/libra_mc32_junit_v11_parser_validation_r2_actual_20261022/`），最终候选run SHA `ae6c8fa177dbef0ad8c0c92f500057a9a6b18b964e5785a16f83407f45cc7e11`；原397名称保留，其中`final-error`错误接受预期改为拒绝，旧helper错误type及无JUnit stub输入修正另列清单，原397历史原件不改。五组旧v10错误接受/新v11拒绝对照成立；这是解析检查，尚待最终冻结后的真实双审，不是产品资格。
+
+v12随后仅收紧本机Linux普通失败退出码为1..255：executor先把0归成功，排除信号后由Rust/libc WEXITSTATUS取低8位；无效0/负数/>255不能以普通failure type通过。独立LEAK-FAIL的error文本code0语义保持。实际纯解析760/760、exit0（chunk52149f，原件 `/tmp/libra_mc32_junit_v12_parser_validation_actual_20261022/`），原676项同名同判定、15组v11错误接受/v12拒绝；最终候选run SHA `97a28b7004f128b250060442dcb2fa9ff840fbf2bbe692e25be4b416be63f0c5`，待R7真实双审。
+
+R6 P2具名处置（owner=root）：finalize前核产品授权原话及hash与多轮评审授权不同；产品启动前特别检查冻结`.pi`临时文件对应写者，记录不可见进程及点时观察限制，不停止用户写者、不豁免inventory；若实际hardstop exit124且缺terminal，外层仍记录真实退出、清理状态与已消费claim。继承R5允许新增selected全部执行、零删除/ignored变化，GC-MC-07五exact具名退出/集合/日志收据，execfail不一致STOP且不自动重跑。后续评审仍按用户持续授权，不另申请轮次。历史FAIL/STOP不改；FIX06自身/H0、MC32产品资格与C/D仍待，无新增产品运行、提交、推送或发布。下方旧“当前”均为原时点记录。
+
+## 当前双审迭代：R5 终态与 v10 修复（2026-10-22）
+
+R5 实际 session41138 / exit1，Claude PASS、Codex FAIL；原件 `/tmp/libra_mc32_recovery_review_r5_20261022/`，manifest `0f2f67cf5bffbcdb9644ae105f6fdb23db24913f55d5939f85cb4e2324da014c`。v9信号映射已受核；本轮 `P1-R5-FLAKY-LEAK` 是nextest重试成功即使泄漏也只打印 `TRY n PASS`、summary却同时计入flaky/leaky，旧脚本误拒合法结果。v10按固定nextest源码核对显式成功泄漏数K、无显式泄漏身份的成功flaky候选数F与实际summary泄漏数L，要求K≤L≤K+F，持久记录真实L、已知身份、候选集合和差值；不臆造具体flaky用例的泄漏身份。该日志/JUnit不能独立证伪区间内少报，明确保留此信息限制，其它逐case/summary/exit一致性仍严格检查。实际纯解析397/397、exit0（chunk d50c3f，原件 `/tmp/libra_mc32_junit_v10_parser_validation_actual_20261022/`），原363项同名同判定，三组v9 RED/v10 GREEN保留；最终修复仍待真实双审，不是产品资格。
+
+R5 P2具名处置（owner=root）：相对旧资格基线的selected新增允许记录并全部执行，selected删除和ignored增删仍为零；本轮源码/config/env冻结，实际listing/JUnit身份精确一致，本条不减少覆盖。产品finalize须另绑定一次7200秒明确产品授权原话，禁止复用多轮评审授权；启动前只读检查`.pi`写者并记录不可见进程限制，不停止用户写者、不豁免输入。R4的GC-MC-07外层具名收据、五exact退出/集合/日志绑定和execfail不一致即STOP义务继承。继续双审无需另问次数；历史FAIL/STOP不改，FIX06自身/H0、MC32产品资格及C/D尚未完成。本轮无产品运行、提交、推送或发布。下方旧“当前”均为原时点记录。
+
+## 当前双审迭代：R4 终态与 v9 修复（2026-10-22）
+
+R4 实际 session78924 / exit1，Claude PASS、Codex FAIL；原件 `/tmp/libra_mc32_recovery_review_r4_20261022/`，manifest `08c59cc99bd88df39d9b6db28ba6f91d6238c8156534ff35fcd5c601c1bd14d3`。两方认可本页多轮双评审规则，R3捕获输出问题已在v8受核；整体仍FAIL，因为 `P1-R4-SIGNAL-STATUS`：pinned nextest 的重试信号缩写（如SEGV/KILL）会被旧解析拒绝。root按既有用户授权修复并继续下一轮，不另申请评审次数。v9候选精确补齐该版本信号/短状态映射，首轮纯解析实际363/363、exit0（chunk dbc0be，原件 `/tmp/libra_mc32_junit_v9_parser_validation_actual_20261022/`），原139项保留；候选最终输入与后续真实双审另行绑定，未记产品资格或P1最终闭合。
+
+R4 P2具名处置（owner=root）：① finalize前须绑定与“多轮双评审”不同、明确授予一次7200秒产品运行的用户原话，并在外层收据引用；② 本次补齐MC-32 R2/R3/v8/用户授权/R4修订历史；③ 启动产品验收前只读核查`.pi`写者，不停止用户写者、不豁免冻结输入；④ execfail显示内容与JUnit描述不一致时记“full failed、metadata STOP、network未收集”，不自动重跑；⑤ 最终外层收据须具名GC-MC-07等价执行方式，并绑定五条原exact实际退出、结果集合、日志摘要。全部旧FAIL/STOP及产品预算保留；本次没有产品运行、提交、推送或发布，FIX06自身/H0与MC32 C/D仍未完成。下方旧轮次状态是原时点记录。
+
+> **当前 MC-32 恢复审查 STOP（R3 实际终态，2026-10-22）：** session8661 / exit1；Claude PASS、Codex FAIL，root overall FAIL，未关闭项为 `P1-R3-LOG-FRAMING`。v7 把 nextest 捕获的测试 stdout/stderr 当作控制记录，并对整个日志拒绝 ANSI；合法重试或真实 full 失败的子输出若含 `Starting`、`Summary`、状态行或 ANSI，会误触 metadata STOP，阻止应允许的 network 收集。root 采纳 Codex 的 P1 定级，不能以 Claude 对同一问题的 P2-1 定级豁免。root 已保存 v8 控制记录/捕获输出边界修复候选，runner SHA `6203d38170b5392ac5ac394f7817c8298d00bac36b985ba5342dbdf7468989d5`；实际纯解析139/139、exit0（tool chunk21281a，原件 `/tmp/libra_mc32_junit_v8_parser_validation_r2_actual_20261022/`），保留原81项和三项v7 RED/v8 GREEN。候选以同case/同attempt JUnit输出划定捕获帧，控制对账不弱化；未知变换仍STOP。原R3 P1保留为该受审树的失败，v8尚待新的真实双审，不视为产品资格或P1正式闭合。
+
+> **阶段与授权分账：** 四处 fmt-only 源码修复及 MC-32 现行恢复规范已经应用；产品后继完整资格尚未运行、未创建新产品 claim，一次7200秒产品窗口仍未获授权。原77621格式失败与已消费claim、R1/R2/R3失败、v6纯解析79项exit1及v7纯解析81项exit0均保留；81项只证明已检查的解析形态，不是产品资格，也不关闭本次P1。本次R3仅审查阶段已使用Claude/Codex各一次并因FAIL停止，不以剩余时间自动重开；原R1/R2绝对截止和各原预算作为历史保留；当时“后续审查须另授权”的限制已由本页顶部2026-10-22用户多轮双评审授权前滚替代，产品运行授权仍单独记账。
+
+> **R3具名后置义务（owner=root）：** P2-2要求在实际启动前只读核查`.pi`等冻结域写者；不把runner作为向该仓写元数据的pi任务启动，不要求用户让出写窗，不擅停其写者、不豁免`.pi`或放宽inventory；发现冲突/漂移即STOP。P2-3由本次前滚标识当前终态、把旧“当前R1”说明标为历史，旧正文保留。P2-4要求将`GC-MC-07`等价执行方式具名写入最终外层验收收据，绑定五条原exact命令的实际子退出、完整结果集合及日志哈希，并由最终真实审查确认；不能只凭runner内部scope字符串代替该收据。
+
+> **证据与边界：** R3原件 `/tmp/libra_mc32_recovery_review_r3_20261022`，manifest SHA `2a08cc88555a51c7a76cdb027563203caa1cf4964947c506e03897ac1034bd5e`；Claude raw SHA `ad30a2389735c06fc04ce7194c62f1a1dda199c80f67afb8da7275d4304aac59`，Codex raw SHA `b724f87bde609a9a5dc036ab91a05367947de74c91251233efcadf54def4cd62`。root/effective及两provider实际终态均保留；外层工具只保存metadata、完整输出留在原工具会话，不把这份失败原件消费为PASS证据。MC-32原5AC/5VER、I/R、依赖及independent/patch/self边界不变；三Traces文档仍为协调集，13本地Traces提交不得借MC-32发布。H0继续仅消费历史SSOT `e274439`，本机资格真实终态前不更新新SSOT绑定；H1/LTR-01、branch-force OPEN及无push边界保持。
+
+> **历史 R2 实际审查终态（2026-10-22）：** session17424 / exit1，Claude PASS、Codex FAIL，overall FAIL。三个 P1 是日志与 JUnit 重试/终态未逐例对账、未知 XML 属性未拒绝、listing 重复键与未知排除状态未拒绝；P2 是五个 exact 的额外结果行未穷举排除。root 在原审查阶段内准备严格解析修复，未新增产品运行/claim、未获新的7200秒次数授权，不把纯解析器检查当源码资格。原件 `/tmp/libra_mc32_recovery_review_r2_20261022`，manifest SHA `22b51041ad40c91e11753b090586abb4272e0ecf13dc80c7bd2f36d9ab59fa18`；原 R1/R2 FAIL、77621 格式失败与旧预算全部保留。原审查阶段绝对截止 `2026-10-21T19:45:53.123538+00:00`，不得自动延长。
+
+> **历史 R1 恢复审查终态及当时前滚候选：** 实际 session22920 / exit1，Claude PASS、Codex FAIL、overall FAIL（3P1）；新运行未启动、新次数授权仍 pending。当前前滚候选将失败继续收集的唯一例外及逐G/完整命令/五exact/严格metadata规则直接写入 [MC-32任务卡](plan-20261019-agent-mcp-server.md#task-mc-32-对象尺寸-helperdelta-感知不重建对象)，runtime校验修复及新树双审尚待，不以旧R3或本摘要放行。三Traces文档是root协调写集，不属于MC-32产品发布slice；原13个本地提交、LTR-01发布边界、branch-force OPEN与旧FAIL/STOP/claim不变。本次H0仍引用已冻结的历史SSOT `e274439` 上下文，未把Mega FIX06进行中源码或新SSOT资格移交给Libra；资格真实终态前不更新该H0。
+
+> **历史首次本机资格 STOP 与当时恢复候选（77621）：** selected99 / 本地 `57fb4acc` / source `.84` 的首次资格 session77621 实际 exit1；preclaim readiness 已通过、原一次 claim 已消费，nightly fmt 因 MC-32 `src/command/mod.rs` 四处纯格式差异失败（66.1187s），其余四门与两次 listing 未执行。原 7200 秒窗口不重置，拟申请后继一次完整7200秒（原五门/两listing/原29+3必含集，含readiness与清理），新增次数尚未获许可；MC-32 同轴格式修复候选、独立审查和恢复授权均待。上游 MC-32 原 locally-accepted 与五项 focused 勾选保留为历史，不证明这台机器当前源码已通过或已发布。13 个 Traces 本地文档提交不得借 MC-32 发布搬运；LTR-01、H1 与已登记 branch-force 风险均未关闭。详情见 [MC-32](plan-20261019-agent-mcp-server.md#task-mc-32-对象尺寸-helperdelta-感知不重建对象) 的本机恢复候选段。
+
+
+## 当前99固定整合树前沿（2026-10-21T18:10:31.027815+00:00；新联合治理待审）
+
+MTR100完整C/D与后置收口已完成，Mega6/109、Libra0/26不变。Libra13笔签名文档与上游MCP三行/原dirty治理精确保留，HEAD `57fb4accac009e4f09a76e466a32ef239a09d354` / upstream99a92c1、版本.84；新五门首次资格7200一次/29必选未执行，旧f0入口90973 STOP、0测试/0claim保留。FIX06仍pending，原7AC/4VER/4生产/3落点/M及SSOT e274439不变，联合双审待；branch-force独立交付阻塞、95具名风险、H1/LTR01与不push边界保持。发布前fresh整合重测，后续远端观察不追溯取消固定树真实结果。详见[日期计划](plan-20261015.md)。
+
+## 历史f0候选前沿（2026-10-21T17:45:12.316323+00:00；本轮治理待双审）
+
+MTR100及后置七文档已实际双审/提交，Mega main为9149149；.60完整C/D保持done/complete。Libra13笔文档已精确重放到f0ea585，本地HEAD f733ba7d83e84b191c244c75d8988ae2a1461738，新.83全量资格待、未push。FIX06按ER03待审4生产文件/3落点/M及六P2处置，新SSOT e274439未发布；7AC/4VER/独立patch不变，95其余具名风险仍阻塞。完成数Mega6/109、Libra0/26；历史失败/取消/STOP/预算不变。此次治理由FIX06与LTR01分别承载，不能继承旧.60覆盖新字节。完整事实与单次资格合同见[日期计划](plan-20261015.md)。
+
+## 当前实际发布前沿（2026-10-21T16:49:06.220390+00:00；新增文档待提交）
+
+MTR100源码、A/B、自身与最终双审、0.42.60完整C、签名提交、main/tag/人工Release及适用D已实际闭合：done/complete。Mega6/109（活动6/108）、Libra0/26（活动0/25），联合6/135（活动6/133）。DEBT-MTR-01仅disabled HTTP94+SSH100拒绝边界closed；enabled/H1/LTR01仍待。 下一前沿FIX06仍需ER01/02/03；MTR39等13，93来源限制与既有P2不变。Libra.83资格待、仅本地无push。本次文档新B/双审/精确收口另待。详见[Mega实际.60发布与D原件](../../../../mega2/docs/plan/plan-20261015.md)。
+
+
+## 历史当前本地C前沿（2026-10-21T16:07:04.807973+00:00；提交/发布/D待）
+
+MTR100源码、恢复树九门A/18项smoke、自身ER05及0.42.60本地完整五门C已核；仍in-progress / locally-accepted，最终交付双审、精确签名提交、main/tag/人工Release与适用D待。完成数仍Mega5/109（活动5/108）、Libra0/26（活动0/25）。 真实C session46316 exit0、20目标2985通过/3原有ignored；本次新增事实B与最终交付双审另待。Libra.83资格/H1/LTR01、DEBT-MTR-01仍未闭合。详见[Mega最终本地C原件](../../../../mega2/docs/plan/plan-20261015.md)。
+
+
+## 历史当前版本入口前沿（2026-10-21T15:08:59.857205+00:00；完整C/D待）
+
+MTR100恢复树A/smoke与原后置文档B已核，自身ER05 R2真实双PASS；0.42.59→0.42.60版本入口已实际完成，现in-progress / locally-accepted。0.42.60完整C、精确签名提交、推送/tag/Release及适用D仍待；完成数保持Mega5/109、Libra0/26。 实际生产落点仅ssh.rs，server.rs仅I允许未改；原523链接B已PASS，本次新事实B另待。R1 Claude PASS/Codex BLOCKED与前驱补件保留；Libra.83资格/H1/LTR01仍待、无push。详见[Mega自身审查与版本入口原件](../../../../mega2/docs/plan/plan-20261015.md)。
+
+
+## 历史当前实际A前沿（2026-10-21T14:17:51.396714+00:00；自身ER05与C/D待）
+
+FIX08已done/complete；Mega完成5/109（活动5/108），Libra0/26（活动0/25）。MTR100恢复后的新组合树九门A及完整18项smoke/运行时OpenAPI已据实际终态核验，现in-progress / locally-accepted；自身ER05、0.42.60完整C、提交/推送/Release与适用D均待。 Libra0.30.83新树资格仍待，H1/LTR01仍阻塞、未push；当前SSOT18327为未发布WIP。readiness R1的Claude PASS/Codex FAIL与R2双PASS均保留，新事实七文档静态B待；详见[Mega实际A证据与剩余边界](../../../../mega2/docs/plan/plan-20261015.md)，本索引不复制执行合同。
+
+
+## 历史当前恢复前沿（2026-10-21T13:10:22.615922+00:00；待审）
+
+FIX08已done/complete，Mega完成5/109（活动5/108）、Libra0/26（活动0/25）。MTR100六非Cargo路径已恢复，现in-progress；locally-accepted仅保留历史A/B输入资格，新组合树九门A及完整18项smoke未执行，新自身Review与0.42.60完整C/D待。 Mega HEAD/main6361830；restore6实际88081 exit0，SSOT18327为未发布WIP。Libra本地 `0dd5b4e842b59eb91588a399a23a523097cd22a7` 已整合 `27a72b3a1acc0dbb765b100995c706b76966f8ba`、实际 `0.30.83` 资格待、未push，H1/LTR01仍阻塞。9A拟7200、smoke另拟总7200（内含1800清理）、.60 C独立既登记7200；旧工具链原件不足不carry，旧FAIL/STOP/claim保留。详见[Mega恢复入口与证据合同](../../../../mega2/docs/plan/plan-20261015.md)；A与smoke同一readiness双审待，新A/Review/C/D未取得。
+
+
+## 历史FIX08实际发布与D收口（2026-10-21T12:17:08.506230+00:00）
+
+FIX08已完成源码、A/B、真实ownER05与最终交付审查、本地五门C、精确签名+DCO提交、main/tag/人工Release及适用D：done/complete。Mega正式完成5/109（活动5/108）、Libra仍0/26（活动0/25）。MTR100仅其FIX08发布前驱解除，可按受保护前像精确恢复六个非Cargo路径；恢复尚未在本收据执行，MTR100自身输入/Review/0.42.60完整C/D仍待，不能据此标本卡完成。
+
+Mega signed commit `42137d6dbcffe9e906bb325bd17a8ae7846bc65c`，父 `c52bf4a99486e9f766192b5bb69a020d8ce83165`；Libra精确文档signed commit `076c24ab662ee88b12dde5c9cc905243c90a0acf`仅本地、不push，且不是新上游产品资格。两者实际GPG VALIDSIG/DCO及root工具终态均已核。main实际ref等Mega commit；标注 `v0.42.59` 对象 `973297f03a0a1c675531e959566c5af9c5474db3` peeled等同提交；人工Release https://github.com/gitmono-dev/mega2/releases/tag/v0.42.59。
+
+Docker run 39595847652：两个原生架构job及manifest、所有关键发布step实际success；main Harbor run 39595506466：实际success。D实际root终态及完整API/ZIP原件由本次生成manifest逐项绑定，生成器不发起网络查询或workflow。
+
+最终交付审查manifest `77e6b385c47de991648e1dc654a3f5db341dc494f96c1bb13d2dd54f7d1ee94b`，真实两方单项PASS；本卡0.42.59本地五门20目标2981/0/3既有ignored已核。此次七份收口文字是发布后的事实增量，仍待root静态B/必要真实审查与精确文档收口提交；不倒记为已包含在上述发布commit中，不新bump/tag/Release，也不扩大后续卡发布权限。
+
+MTR100恢复只能六非Cargo路径，旧59失败版本前像保留不套回；Cargo须后续独立前滚60。本收据不运行恢复。H1/LTR01、来源受限条件及其他前驱仍按卡执行；Libra不提前发布。D1/历史C失败、旧C2未知、STOP/已消费claim/取消记录均保留，FIX08真实socket修复与本轮成功不补认历史41555根因。
+
+
+## 历史FIX08最终本地C实际收据（2026-10-21T11:31:34.696631+00:00）
+
+FIX08源码、六门A/B及ownER05双PASS已核；0.42.59最终五门本地C实际通过（session68149 exit0，20目标2981通过/0失败/3原有ignored/0过滤/0measured，fmt/strict clippy及双build零warning/error）。Lifecycle=in-progress、Acceptance=locally-accepted；尚未提交/推送/tag/人工Release/D，不能done/complete。MTR100 WIP仍受保护；Libra仍待新上游资格/H1/LTR01。
+
+最终C合同审查实际session80476 exit0，Claude/Codex各一项PASS；manifest SHA256 `cbea41bbfa0dd265cf65ee8c30804edbf99533f008ebe9b7d6b6234a7179db90`。ownER05原件另在 `/tmp/fix_mtr08_er05_review_r1_20261021`（manifest `8c4d9c34971af3a832f9774202543a04651ec36f5ee313cc63c906f27d1a14ee`），不把本地C当提交/远端D。C receipt SHA256 `a01444d82f0a1ef41d9f387e9bb83cea6324c5d35f82c5ec54e76128d915ce6f`，root实际工具终态SHA256 `65e90fda2da4646203fa510bc85cafa1bc9a220edac14bc37f41ad798230bbb3`。
+
+| 门 | 原命令 | 实际子exit | 原日志SHA256 |
+|---|---|---|---|
+| fmt | `cargo +nightly fmt --all --check` | 0 | `e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855` |
+| clippy | `cargo clippy --all-targets --all-features -- -D warnings` | 0 | `320e25669939ab3661e08d5109c8067ce0675703b776974c6b29a4df02751c36` |
+| full-test | `source .env.test && cargo test --all` | 0 | `d7439bba06b744d1cc9d0aa770eeaf2c3e5798a219da5ac5771e0b3989fac956` |
+| build | `cargo build` | 0 | `1e320dfea6b333a03198a10b4d055b739e9cf966042f51d69dc45d0a7e3c1bd5` |
+| build-tests | `cargo build --tests` | 0 | `0d6adee6320c697164cf8b91c1b425a33f222f8158fe9af6aadf0b46db70287c` |
+
+完整目标逐case与MTR94 C4原日志闭包一致，仅新增两项本卡harness测试；三个既有ignored逐名核同，未跳过/弱化/增加超时或自动重跑。最终输入及各门边界一致，owned host清理为空；不声明共享daemon全局恢复。当前SSOT仍是已发布94的7794字节，18327 SSH说明仍仅受保护MTR100 WIP。
+
+待精确signed+DCO提交、实际签名验证、fresh远端ref核验、main/tag/人工Release及适用CI/D全部终态；此前不放行MTR100 WIP恢复或0.42.60新C。Mega完成数仍4/109、Libra0/26。D1入口STOP/已消费claim、MTR100初始C失败及全部旧取消/FAIL/STOP保留；本卡结果不证明41555或旧C2根因。
+
+
+## 历史FIX08 ownER05与版本入口实际收据（2026-10-21T10:39:42.328334+00:00）
+
+FIX08 in-progress/locally-accepted；2AC/3VER及六门A/B已核，自身ER05真实Claude/Codex双PASS（session82523 exit0）；版本入口实际session25405 exit0，58→59两面一致。完整C尚未启动；签名提交、推送/tag/Release/D均待。MTR100 WIP继续受保护，未恢复；Mega完成仍4/109、Libra0/26。
+
+ownER05 manifest SHA256 `8c4d9c34971af3a832f9774202543a04651ec36f5ee313cc63c906f27d1a14ee`；claude raw `c74a1d27802a24bd99378e890d9986ef32c162e3247a23e3b9812a7d943dd0b7` / terminal `dec58bc8399bec6224fce204c7ce3b1d07828887d132ff1bcce9d4507f01b431`；codex raw `8d4ef2faa7f267e32ec9e97f620aacd1e0f07071f3ddc25625d2a62f83a3334b` / terminal `802fc22ca1fb3335d68b8098d977ca749c413e9fc48197759acda96c7a7c778b`。两个review实际exit0/单PASS，P0/P1=0，root已具名接受P2。此审查不代后置版本最终C，旧治理/AB/FAIL/STOP原件保留。
+
+版本入口原件 `/tmp/fix_mtr08_version_entry_actual_20261021`；receipt SHA256 `b1f713eddcdbe002818b0ca015199b49d25f9ea1e6e1e192f5a4ece73391ffd2`，root terminal SHA256 `df9dad6433f1d801115f91db177ef1a28aac0f337501ad213040834b6e67fc3f`。`cargo check -p mega2`与`cargo metadata --format-version 1 --no-deps --locked`实际均exit0，只有Cargo.toml/Cargo.lock自身版本58→59；受保护MTR100原59失败树未重用。入口owned host清理为空，不声明共享daemon恢复。该入口不是五门C或build验收。
+
+当前SSOT `7794d82f6a34eb7741fc2f17eeeb6789464db29a405c506ffdfe36544d0fb4b4` 是已发布94；`18327a4f3277f028350ab03c231570261ae54785e8c5900816a1b5a6f4cb8fec` 仅为受保护SSH WIP。D1入口STOP/已消费claim、MTR100初始C失败、全部旧取消与预算保持，不认定41555或旧C2历史原因。
+
+Codex P2：本轮修正FIX08测试矩阵陈旧pending文字，保留旧行快照；最终C输入还须绑定原C4 raw log与实际target推导原件。root须完成本次后置文档静态B并冻结最终C输入；完整C/D实际通过后才恢复MTR100六非Cargo路径并独立0.42.60发布，Libra仍待自身新上游资格/H1/LTR01。
+
+
+## 历史FIX08 A/B终态与治理采纳收据（2026-10-21T10:23:18.538031+00:00）
+
+FIX08六门A/B原件已核（2026-10-21T10:23:18.538031+00:00）：in-progress/locally-accepted，2AC/3VER已核；ownER05、版本bump、完整C、签名提交、推送/tag/Release/D均未执行。MTR100 blocked/locally-accepted，受保护WIP尚未恢复；完成计数仍Mega4/109（活动4/108）、Libra0/26（活动0/25）。
+
+治理R1真实Claude/Codex各PASS，root实际session59044 exit0；manifest SHA256 `f72e00e3f59f865ca01e236a8a57cd5a5afd1fdb32af2749aeb7566a0607a517`。此为治理/执行方案审查，非本卡实现后的ownER05。D1入口STOP/claim及MTR100初始完整C失败保持，不认定41555或旧C2原因。
+
+当前SSOT为已发布94字节 `7794d82f6a34eb7741fc2f17eeeb6789464db29a405c506ffdfe36544d0fb4b4`；SSH disabled说明 `18327a4f3277f028350ab03c231570261ae54785e8c5900816a1b5a6f4cb8fec` 仅在受保护MTR100 WIP，未恢复/未发布。FIX08仅测试harness，无生产/协议语义变化。
+
+| 门 | 实际命令 | 子进程exit | 原日志实际计数 | 日志SHA256 | 外部工具终态 |
+|---|---|---|---|---|---|
+| red | `source .env.test && cargo test -p mega2 --test integration_api_write_trunk service_readiness_rejects_tcp_self_connection -- --exact --test-threads=1` | 101 | `{"failed": 1, "filtered": 74, "ignored": 0, "measured": 0, "passed": 0}` | `4a6e7b17b04a74c679b34ada27ed904f258883fc77d46b158675977d05e4cfc8` | root session59654 exit0 |
+| green | `source .env.test && cargo test -p mega2 --test integration_api_write_trunk service_readiness_rejects_tcp_self_connection -- --exact --test-threads=1` | 0 | `{"failed": 0, "filtered": 74, "ignored": 0, "measured": 0, "passed": 1}` | `4dbe4409231cdc8a62f7c60b88a0da53f2c5b022b340b6d20204c5d071509f7f` | root session79419 exit0 |
+| positive | `source .env.test && cargo test -p mega2 --test integration_api_write_trunk service_readiness_accepts_real_listener_connection -- --exact --test-threads=1` | 0 | `{"failed": 0, "filtered": 74, "ignored": 0, "measured": 0, "passed": 1}` | `0736f132568916edc04c9fc4fbe085a4d8945fe7881ae318427d6b1272592671` | root session17258 exit0 |
+| target | `source .env.test && cargo test -p mega2 --test integration_api_write_trunk` | 0 | `{"failed": 0, "filtered": 0, "ignored": 0, "measured": 0, "passed": 75}` | `2a47afe7f08c39648c9f7de670495ffe6f3d81893186cb24fc44a458d68a2013` | root session7847 exit0 |
+| fmt | `cargo +nightly fmt --all --check` | 0 | `{"failed": 0, "filtered": 0, "ignored": 0, "measured": 0, "passed": 0}` | `e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855` | root session42739 exit0 |
+| clippy | `cargo clippy --all-targets --all-features -- -D warnings` | 0 | `{"failed": 0, "filtered": 0, "ignored": 0, "measured": 0, "passed": 0}` | `e2e61bfe5e5d676e24160850c50b58da817d7a45fd0125782f1e549eac1fe9da` | root session75657 exit0 |
+
+RED exit101仅为AC1旧语义预期失败；GREEN、正常listener和完整原并发target分别有独立实际终态。完整target逐名对应原73+新增2，未过滤/未新增ignore；fmt与strict clippy零warning/error。受审输入前后同一、owned host清理为空，不声明共享daemon全局恢复。原始依据 `/tmp/fix_mtr08_ab_actual_20261021`，此次动态核验摘要见生成器输出manifest。
+
+待root执行文档B及本卡实现真实Claude/隔离Codex ownER05；通过后才可在独立版本面上执行FIX08完整C/D。FIX08实际D前不恢复MTR100六非Cargo路径，不放行其0.42.60完整C，不提前Libra发布。
+
+
+## 历史FIX-MTR-08采纳前候选（原冻结文字保留；后续实际状态见文首收据）
+
+FIX08采纳候选待双审；Mega109/活动108、Libra26/活动25、联合135/活动133；完成仍4/109与0/26。D1入口STOP、未运行测试且claim已消费；MTR100 blocked/locally-accepted，独立FIX08完整C/D前不放行。
+
+- **D1实际终态：** 原件`/tmp/mtr100_trunk_diagnostic_actual_20261021/{receipt,observer-errors,queries,actual-outer-tool-terminal}.json`；root实际session52522 exit1、28.303519521秒，claimed=true、launched=false、leader exit=null、0个服务。Libra `status --porcelain` 查询20秒TimeoutExpired触发入口STOP；原73例目标未启动，test_result=UNKNOWN、root_cause=UNPROVEN，不能记为产品测试FAIL、未复现、根因或完整C。D1 claim保留且不得重开。R3真实Claude/Codex各单PASS，actual session97178 exit0；原件及effective/root/tool terminal位于`/tmp/mtr100_diagnostic_plan_review_r3_20261021`，manifest SHA256 `363ba5317bd4253327ffc47b16c33c287d508cbca526f9f16f3183690b1d771a`，root实核3253审查项/3264取证项一致；P2具名处置已记录。此PASS只覆盖D1方案，随后入口STOP不追认为目标运行。
+- **候选依赖：** `MTR-94 + DEP-TR-SERVICES → FIX-MTR-08 → MTR-100 → FIX-MTR-06 → MTR-95`；其后原宏链、H0～H6及LTR01唯一发布边界不变。FIX08只修测试TCP自连接假就绪，不补认41555、旧MTR94 C2或FIX3 C2历史原因。FIX08 pending/空、2AC/3VER、landing=1/prod-files=0/S；MTR100原5AC/1VER不削减，旧A/B/审查保留原输入限定。
+- **WIP隔离实际入口：** fresh fetch actual26898 exit0，HEAD=origin/main=`c52bf4a99486e9f766192b5bb69a020d8ce83165`。8非plan路径独立WIP/HEAD原字节与SHA保存在`/tmp/fix_mtr08_wip_protection_20261021`；精确native stash actual96785 exit0，OID `cfacd14da3bf980ddf7c0f451e3632044a75e604`，保留不pop。隔离核验actual13225 exit0：883个非plan跟踪文件逐blob匹配发布HEAD，index空，工作区仅4计划，版本0.42.58；首轮只读核验因不支持refs/stash语法失败保留，改用原生JSON查询核明stash身份。现行SSOT SHA256 `7794d82f6a34eb7741fc2f17eeeb6789464db29a405c506ffdfe36544d0fb4b4`；`18327a4f3277f028350ab03c231570261ae54785e8c5900816a1b5a6f4cb8fec`仅为受保护MTR100 WIP历史输入，SSH改动不在本卡验收树。沿用原工作区，无shared-worktree/reset/force；实际harness尚未修改。
+- **独立发布顺序（待审）：** FIX08 A/B（含旧语义确定性RED及同oracle GREEN）、自身真实双审后，亲自bump0.42.58→0.42.59并执行完整五门C、签名+DCO、本卡main/tag/人工Release及全部适用D；其D实际闭合后，仅从前像精确恢复MTR100六个非Cargo路径，保留stash，Cargo另按新基线前滚至0.42.60。MTR100必须重核输入/依赖/自身Review并独立完整C/D，不继承FIX08对其SSH WIP的覆盖。原MTR100失败树0.42.59和claim永久保留，不倒改为0.42.60。
+- **新恢复授权与预算（治理待双审）：** 用户最新明确指令为“请分析 C 失败的原因并修复,然后重新启动完整的验收,继续推进计划完成”；root据此登记本次必要独立修复及后继验收，不复用此前一次120分钟claim。FIX08 A/B六门RED→GREEN→正常连接→完整trunk→nightly fmt→strict clippy，各仅一次，单门≤30分钟、总墙钟≤120分钟（含RED/GREEN切换）；源码修复后FIX08自身完整五门C一次≤120分钟，再在其C/D闭合及MTR100恢复/验收/审查后，MTR100自身完整五门C另一次≤120分钟，三者独立claim、首非预期失败STOP、无自动重试。两个完整C均保留原fmt/clippy/full/all-build覆盖与全部断言/原超时；本轮治理审查须核此分立范围。新A/B执行器及具体冻结清单另绑定本轮最终输入，C执行器须在各自最终版本树启动前再冻结双审；不借治理PASS省略自身ER05。
+- **跨仓与证据承载：** Mega四计划为FIX08 I的附随治理；Libra三计划仅MTR01既有文档治理写集、C/D仍待LTR01，不允许Libra提前push。SSOT和两仓生产契约不改；Libra新上游资格待验、旧28来源卡blocked、53风险、取消验收和全部历史FAIL/STOP不变。本轮新增治理尚未双审，不借旧108/26或D1的PASS覆盖。新卡采纳、源码、验收、审查、提交、推送、CI/发布各阶段分别记账。
+
+
+> **历史MTR100恢复R3待审（2026-10-21）：** D1方案R2为真实Claude FAIL/Codex PASS，actual session17407 exit1；v4已关闭旧三P1，另有adopted orphan误STOP和持有服务日志未copy两P1。v5保守处置已准备、待新双审；D1仍未执行/claim未创建，原完整C失败及已消费120分钟保留。当前一次30分钟完整trunk取证、其后ER03归属修复及新完整C授权有效；不减覆盖/断言/超时，不重开FIX3/LTR00旧预算。Mega源码未修，MTR100 blocked/locally-accepted；Libra已整合fc5至0c1613da、新上游资格待验；未提交/推送/CI发布，FIX06/H1/LTR01仍阻塞。
+
+> **历史MTR100恢复R2待审（2026-10-21）：** 当前诊断方案R1真实Claude PASS/Codex FAIL，actual session9416 exit1；三P1为祖先身份、退出码归属及两仓冻结不完整。v4候选已修并待新真实双审；尚未执行D1、claim未创建，旧C失败与已消费120分钟不变。用户已授权分析/修复/新完整验收：D1仍仅一次30分钟完整trunk目标取证，原命令/覆盖/超时/并发不改；之后先独立归属修复及自身验收/Review，再新完整C。Mega c52bf4a、Libra已整合fc5至0c1613da，源码未修/新测试未启动；MTR100 blocked/locally-accepted，DEBT open、FIX06和H1/LTR01仍阻塞，未提交/推送/CI发布。
+
+> **历史MTR100恢复R1待审（2026-10-21）：** 用户现授权分析当前C失败、修复并重新完整验收。初始C session21819 exit1/120分钟claim已消费；失败事实审查session24412真实Claude/Codex双PASS仅覆盖失败记账。现提出一次30分钟完整trunk目标取证，须新最终输入双审及实际终态后启动；根因尚未证明，未修源码、未重跑C。后续修复需ER03归属及自身验收/审查，再以新claim执行一次最多120分钟原五门完整C；不复用旧预算。MTR100仍blocked/locally-accepted、DEBT open、FIX06未开工；提交/推送/tag/Release/D均未执行。Libra已获取fc5eafc新上游，保留其Worktree/MCP成果及Traces本地历史，新上游源码资格待验，LTR01不提前发布。
+
+> **历史MTR100完整C失败（2026-10-21T07:23:46.242313+00:00）：** MTR100初始完整C已实际FAIL/STOP：controller session21819 exit1，fmt/严格clippy exit0；原`source .env.test && cargo test --all` exit101，已到5目标合计2775通过/1失败/3原有ignored/0过滤，后续目标及双build未执行。失败为`delete_entry_reject_traversal_400`夹具seed阶段Git clone连接本地41555端口被拒绝，未到400业务断言，服务退出/端口归属原因尚未证明。一次120分钟claim已消费（1416.872秒），不自动重跑或复用余时；0.42.59已bump而未提交/推送/tag/Release/D。卡现blocked/locally-accepted，原A/B及R4源码/执行器双PASS保留其限定输入，不覆盖C失败。DEBT open、FIX06未开工，Libra仍本地e938c05，H1/LTR01边界不变。
+
+> **历史MTR100入口资格（2026-10-21T06:24:32.425312+00:00）：** R3真实Claude/隔离Codex对源码/A/治理及v5控制器均两项PASS，actual session84473 exit0、541输入核同，原健康探针P1关闭。版本入口随后两次preflight STOP：SSH22 banner超时（443严格既有key认证与原生origin查询成功）及PG缺省HostConfig.Init直接取值报错；均未改版本、未消费entry/C claim。v6只修可选Init读取，真实三容器精简查询exit0，Git仍强制Init=true；待新R4双审后另用新入口路径。0.42.58、locally-accepted、完整C/提交/发布/D待和Libra仅本地边界不变。
+
+> **历史MTR100控制器修订（2026-10-21T05:52:19.021295+00:00）：** MTR100源码/A及关联治理在R2仍获真实Claude、隔离Codex双PASS；C执行器v4为Claude FAIL/Codex PASS，root实际session31967 exit1，421输入核同。P1为Docker健康探针临时ExecID导致误STOP，禁止执行v4。root正在独立修订v5并安排新双审；用户继续测试授权有效，初始完整C一次120分钟尚未启动/未消费claim，版本仍0.42.58。5AC/1VER与locally-accepted保留，提交/推送/CI-D未执行，DEBT open；Libra只本地，旧失败/取消/预算不重开。
+
+> **历史MTR100审查阶段（2026-10-21T05:35:07.494545+00:00）：** MTR100本地A/B保持通过；R1真实Claude与隔离Codex对自身实现/验收及两仓关联/C合同各给两项PASS，actual session52532 exit0、398输入终态同一，P0/P1=0。root具名接收5项P2并修订过期H0摘要与ignored标签；C执行器须另审。未执行v2控制器，静态修为v4：按本仓doctest=false允许空doc集合、只核本轮Running产物、只读VCS schema漂移门及精确Docker资格。新v4和本轮事实同步待R2真实双审；0.42.58仍未bump，完整C/提交/推送/D未执行，DEBT仍open，Libra仍仅本地。
+
+> **历史MTR100本地验收（2026-10-21T05:23:55.973928+00:00）：** MTR100最终SSH禁用拒绝实现及A/B已通过：VER1 G3为2/2，完整Traces24/24，SSH29/29、HTTP8/8、server39/39、API433通过/0失败/1原有ignored；nightly fmt、严格clippy、fresh release build均exit0、零warning/error。新Docker Git/LFS原18项矩阵及运行时OpenAPI、owned清理已通过。现in-progress/locally-accepted，自身与两仓联合真实双审尚待；版本仍0.42.58，独立patch0.42.59及完整C/D未执行，未提交/推送本卡。RED、首轮夹具FAIL和clippy首轮FAIL保留；93/94 done及来源限94/100拒绝路径不变，Libra本地e938c05、H1/LTR01阻塞与不push边界不变，DEBT-MTR-01仍open。
+
+> **历史MTR100阶段（2026-10-21T04:49 UTC）：** disabled SSH源码候选与专有VER1已真实2/2通过、0失败/ignored，807输入稳定，服务退出；首轮旧码RED与夹具URL编码FAIL保留。现继续fmt/clippy、SSH单元、完整Traces target、HTTP/server/API及原18项Git smoke；全A/B、自身双审、版本及完整C/D尚未取得，仍in-progress/空。93/94完整闭环、Libra仅本地且待H1/LTR01的边界不变。
+
+> **历史MTR100候选复验状态（2026-10-21T04:43 UTC）：** MTR100旧源码RED已真实0通过/2失败（disabled仍广告capabilities），修复候选已落一生产文件；首次候选验证仍0通过/2失败，定位新增Git SSH URL正对照未转义字面%，传到服务端的是保留根而非预期普通路径。保留FAIL并只修夹具URL编码后重验，生产守卫/断言/超时不放宽；5AC/1VER尚未验收，自身双审与独立patch完整C/D待。MTR93/94 done/complete、Mega main c52bf4a/Libra本地e938c05和LTR01发布边界不变，旧FIX3/LTR00及MTR94 C4预算不重开。
+
+> **历史开工状态（2026-10-21T04:23:33.853724+00:00）：** MTR94完整C/D及最终D事实双审已核；Mega文档收口c52bf4a已推main，Libra对应signed e938c05仅本地。93/94 done/complete，01仅Mega侧覆盖，Libra仍待LTR01；MTR100于2026-10-21T04:22:24.959231+00:00完成ER01/02/03，现in-progress/空，准备实现disabled SSH拒绝。5AC/1VER未验收、自身双审与独立patch完整C/D未执行；不开放enabled数据面，不重启旧FIX3/LTR00或C4窗口。
+
+> **历史94收口跨仓终态（2026-10-21T04:02:51.712358+00:00）：** MTR94源码/A-B及自身真实双审、C4五门（2979通过/0失败/3原有ignored）、signed04c42e1、main/标注v0.42.58/人工Release已核；版本Docker run39539957757的amd64/arm64/manifest三job全部success，main Harbor run39539882313亦success。root于2026-10-21T04:00:24.847557+00:00重新取得原始API并核同提交/ref/Release。94现done/complete；93原signed2320e95精确树获94 C/D覆盖，done/complete，来源资格仍仅94/100拒绝路径；01本增量Mega覆盖已取得，Libra侧仍待LTR01，整卡不done。MTR100仍pending，须重新ER01/02/03后开工；本次D事实文档自身B/双审及精确提交待，不倒记为版本预发布字节。
+
+> **历史94收口本仓状态（2026-10-21T04:02:51.712358+00:00）：** Libra选定上游3b1200a/0.30.69，full10658/network3资格已核，21既有ignored、1 flaky、future-incompat警告保持；已签名本地文档checkpoint b157396f5c1aacbbaf5071b23ef34d9184f968e6（父9314a17），未push。H1/LIVE/WRITERS与Worktree冻结、LTR01唯一发布点不变。Mega正式完成4/108（活动4/107），Libra0/26（活动0/25）；其余旧blocked不批量改判。
+
+> **历史D待定发布事实（2026-10-21T03:43:53.672324+00:00）：** MTR94源码/A-B、自身R2及C4后置最终真实Claude/Codex双PASS已核；C4五门exit0、编译0警告/错误，full2979通过/0失败/3原有ignored（20目标）。精确13路径signed+DCO提交`04c42e10ba88ed45b830d509407d5732f4f17845`已推main；标注`v0.42.58`及人工Release已核。版本Docker run39539957757与main Harbor run39539882313均已触发，最后观察运行中，D尚待；94为in-progress/remote-pending，93覆盖及100前驱未闭合，100未开工。
+
+> **历史D待定跨仓事实（2026-10-21T03:43:53.672324+00:00）：** Libra选定上游`3b1200a80e00e8d1a8866ab07aa790c27f8a17a9`、0.30.69资格保留：full10658与network3实际PASS，21原有ignored、1 flaky及future-incompat警告不隐去；三份计划文档精确signed+DCO提交`9314a17348aceb0c631139715fd213ead73ed90c`已验签，仅本地未push。H1/LIVE/WRITERS与Worktree发布冻结、LTR01唯一发布点均不变，formal0/26。
+
+
+> **历史提交前资格与本地提交（2026-10-21T03:14:24.621527+00:00）：** Libra选定上游3b1200a、本地2332823f1a2841a4e3121b164965dea25dea98fc/0.30.69；新树fmt/clippy/CLI build/full10658/network3实际exit0，21原有ignored、1 flaky与proc-macro-error2 future-incompat警告保留；后置三文档最终R2真实双PASS，signed+DCO2332823及精确3路径/签名已核，仅本地。此次两仓新事实文档另作B/双审；H1/LIVE/WRITERS与Worktree发布冻结不变，LTR01唯一发布点、formal0/26，未push。
+
+> **历史提交前跨仓发布状态（2026-10-21T03:14:24.621527+00:00）：** MTR94源码/A-B及自身R2真实双PASS保留；新授权C4一次120分钟已实际执行，0.42.58最终源码树五门均exit0、编译0警告/0错误；full20目标2979PASS/0FAIL/3原有ignored、无过滤。窗口2082.320秒，98530输入终态同一，owned host为空/Git容器已停。当前in-progress/locally-accepted；后置文档最终双审、精确签名提交、main/tag/Release和实际D待，未填done/complete。原C2/C3 FAIL/STOP、消耗claim及历史C2原因未知保留；不复用剩余时间。 93→94→100及H1发布依赖仍待，未授LTR01发布。
+
+> **历史整合入场快照（2026-10-20T16:56:43.319120+00:00）：** 已原生整合选定最新远端3b1200a80e00e8d1a8866ab07aa790c27f8a17a9（含e3eaff1源码变更），本地HEAD 3eec95934e5862f2528c6fb181fcd5da3b7a4ab3；5本地文档提交逐条重放重签、DCO/GPG核同，源与上游相同仅3计划文档本地差异。版本四面0.30.69；新CLI/新树完整资格待，不继承旧10636集合。原e4d树022恢复16/full10636/network3真实PASS及后置双审签名870aec0保留为历史选定树资格。未push/tag/Release/D，H1/LIVE/LTR01仍待。 Mega94原一次120分钟C3已FAIL/STOP并消费claim：fmt/clippy0、lib1349PASS/1337FAIL/3ignored，build未到；源码/A-B/R2双PASS保留，blocked/locally-accepted。新C4仅修正执行启动资源parity，实际15类入口/每gate child限制拒绝门，另一次7200秒候选，真实双审与新用户授权待；不自动重跑、不重用剩余时间，旧C2因果仍未证。
+
+> **历史发布执行状态（2026-10-20T15:45:39.735347+00:00）：** MTR94源码/A-B及修复后自身R2双PASS保留；最终C2失败、原因未证，blocked/locally-accepted。C3条件方案R3 Claude PASS/Codex FAIL，输入路径集合与超时进程清理两P1待修；新候选未获审、更未获用户60分钟窗口，禁止执行。未提交/push/tag/Release/D，93覆盖与100前驱仍待。
+
+> **历史跨仓事实（2026-10-20T15:45:39.735347+00:00）：** Libra原full exit100（10620通过/16失败/21既有ignored）、network exit0（3/3）不变。恢复R3对Libra v3单项实际双PASS；组合总体Claude PASS/Codex FAIL（Mega脚本两P1），未执行。现拆为独立Libra恢复R4审查与入口，脚本v3不改、只按本次精确manifest绑定。H1/LIVE仍缺，LTR01与Worktree发布边界保持。 SSOT当前SHA256 `7794d82f6a34eb7741fc2f17eeeb6789464db29a405c506ffdfe36544d0fb4b4`。
+
+> **历史执行事实（2026-10-20T14:32:22.290875+00:00）：** Libra已整合选定上游e4d843d至e2509aa，source与上游一致，四份本地文档patch重签/GPG/DCO核同；0.30.68新CLI已构建。原full仍以umask0002/单build job执行10636项，已有五项终次FAIL（原三次尝试保留），原network按既定命令续行，均不能称PASS。三项文件mode断言实际0775≠0755；标准umask022仅为待终态归属后的环境恢复候选，尚未改变或重跑。21skipped全部ignored且上游既有，具名审计保存。H1/LIVE未交付，LTR10/11/12与LTR01不跳前驱；Worktree发布冻结、COV/OG及旧取消/STOP不变。
+
+> **历史Mega输入/联合审查：** MTR94的LFS原URI同轴修复已完成；新真实HTTP3/3、HTTP单元8/8、server39/39、API433通过/0失败/1既有ignored，fmt/严格clippy、release构建、完整Git/SSH/LFS18/18及运行时OpenAPI均通过。原LFS RED与R1 Claude PASS/Codex FAIL保留；修复后R2自身/联合双审尚待，完整bump树C/D未开始，未提交/push/tag/Release。93仅94/100来源资格、C/D94待；100未开工。 唯一SSOT当前SHA256 `8160b5b9036d0ca7f6c240ea8d0f05294bdd453f0007d82a637a5b9ab9929210`；修复后新字节R2双审待，旧4d4df/R1结论不覆盖当前字节。
+
+> **历史联合审查状态（2026-10-20T13:48:54.964226+00:00）：** MTR94首轮自身审查Claude PASS/Codex FAIL；LFS重写可丢失原保留定位符P1尚待修复/真实回归，禁止进入C。原A结果保留限定覆盖，AC4/5/6和VER1待补证；root已在原轴/I内完成ER03复核，未bump/commit/push。Libra新CLI0.30.68实际构建/version/SHA核验通过，新树full/network待。 本次MTR01联合新字节Review未双PASS，Libra三文档不提交；H1/LTR01边界保持。
+
+> **历史执行事实（2026-10-20T13:37:27.007033+00:00；MTR01三文档跟进自身审查待）：** Libra已按真实上游e4d843d整合四份本地文档提交，HEAD e2509aa91f51434399156c0a2be2b29c4a4fdab0；4条逐补丁核同且重新GPG验签/DCO通过，源码与上游一致。fmt与strict clippy退出0（保留依赖future-incompat提示）；新树full/network及0.30.68 CLI构建仍待，未push/tag/Release。Mega94源码及A/B已通过（HTTP3/3、模块8/8、API433/0/1既有ignored、release smoke17/17），自身双审与C/D待；93已自身双PASS及签名source-qualified仅94/100，C/D94待。H1/LIVE未交付，LTR10/11/12及LTR01不能跳前驱。
+
+> **历史契约输入：** `4d4df6cd32ee5e476f6f1fc6cdfac3aad108fea9196c3cc945409da47f3dde2a`，仅同步Mega HTTP disabled实现；HTTP/SSH enabled数据面与H1未交付。旧FAIL/STOP、取消、COV/OG及Worktree发布冻结保留。
+
+> **MTR93历史审查终态（2026-10-20T12:21:45.754218+00:00）：** 17AC/17VER及文档B已PASS；本卡自身真实Claude/Codex均exit0、VERDICT: PASS，67冻结输入核同，P0/P1=0，root具名接受Claude五P2（见日期计划末尾）。Libra三文档事实跟进自身ER05亦双PASS。精确signed+DCO本地交接与验签仍待，核实后才开94；本轮只准94/100禁用拒绝路径，95及后续身份消费仍受47/06风险阻断。93保持in-progress/locally-accepted，C/D94待；LibraC/D仍LTR01，无push/tag/Release。下面较早时点的审查/B待属于先前阶段。
+
+> **MTR93文档B终态（2026-10-20T12:12:48.467071+00:00）：** 134卡/223依赖边无环、467相对文件链接零缺失；两仓native diff check均exit0、暂存为空，只有已登记4+3文档变更。实际收据`/tmp/mtr93_start_20261020/B-receipt.json`；17项audit核验及本次B均PASS，自身真实双审和source签名交接待。以下较早时点的“B待”保留为先前阶段，不作当前阻塞；C/D仍待94/LTR01。
+
+<!-- traces-forward-93-100-20261020 -->
+> **历史前滚登记（2026-10-20 12:05:48 UTC；两仓治理amendment已签名本地提交，93自身B已PASS/ER05待）：** MTR-38/MTR-91已done/complete；MTR-01的Mega旧输入已获C/D、Libra三文档仍待LTR-01，整卡未完成；LTR-10仍pending/缺H1与LIVE。Mega2总108/活动107；Libra总26/活动25、正式完成0/26、活动正式完成0/25；联合总134/活动132。Mega2 `eca629866fb9763f2c8126ca858c43732bf6a44e` / `v0.42.57`；annotated tag对象`01473a9c1b58eca860d8d59aa54994e2ad512b2a`解引用同提交；Release https://github.com/gitmono-dev/mega2/releases/tag/v0.42.57 。tag Docker run `39405703760` 的arm64 job `118570980098`、amd64 job `118570980580`、manifest job `118577609288`均success；main Harbor run `39405661929` / job `118570839354`亦success。本轮108/26治理R2真实Claude与隔离Codex均exit0、VERDICT: PASS；联合H0与MTR01本治理增量自身ER05均PASS，P0/P1=0；两仓精确signed+DCO本地amendment已提交并实际验签；MTR93已正式核17AC/17VER，自身B/ER05及signed source提交待，只提出94/100拒绝路径受限资格候选。旧R5a及91/01/38自身审查只保留原输入归属。Libra不提前push。
+
+> **历史选定树快照（2026-10-20 13:37 UTC；现态见顶部）：** 当前Libra本地HEAD=`e2509aa91f51434399156c0a2be2b29c4a4fdab0`，已获取origin/main=`e4d843d1c6591f7064c9e1a8478e046f503c1978`。共享唯一契约当前源码说明SHA256=`7794d82f6a34eb7741fc2f17eeeb6789464db29a405c506ffdfe36544d0fb4b4`；MTR94修复后R2自身/联合双PASS已取得；GET/POST文案澄清后的最终元数据补审待。历史771fb/R2双PASS只绑定旧治理字节，协议语义及卡依赖/发布边界未改。
+
+> **历史治理绑定：** Libra当前本地HEAD=`c2c76b3e1f926ebfaa8dd3d276b564adbbeecf3b`（父`3433d7703752a581355293ec2d361a09b232e2c4`），已获取origin/main=`5f0e80823b6994575af33eacf9946df55bcc6648`；实际整合/重放映射、签名、复测及远端核验见下列具名收据；不以重放前旧签名代替新提交验签。共享唯一契约SHA256=`771fb2807909aa0b282fa11f3c4f51b8c7bf4b9998d5d4d6c0f3dc17920cecc6`。 本轮新增Mega治理C/D=94，Libra三文档C/D=LTR01。
+
+> **历史交接登记（由本轮现行合同替代）：** 2026-10-20 09:04:04 UTC：MTR01自身Claude/Codex均exit0、VERDICT: PASS，P0/P1=0；Mega2五文档签名提交1385f58604f4bdb46419231edf9344dc1e0dafbd、Libra三文档签名提交32287f7e1633db0301a80d09e07f78e65ff0bc33均DCO和GPG验签通过，现source-qualified。91/01均locally-accepted、未C/D；MTR38已按新前驱开始源码实现，验收/Review/发布尚待。Libra LTR10仍等H1/LIVE，无提前push。
+
+> **历史执行登记：** 当前 2026-10-20 08:43:28 UTC：H0 R5a真实Claude/Codex双PASS；MTR-91自身双PASS、签名+DCO本地提交`3723200180b914f20af7152968438009cac373fe`已核，source-qualified；MTR-01本轮A/B已核、in-progress/locally-accepted，自身ER05及两仓精确本地提交待取得，之后才放行MTR-38。91/01均未C/D完成；Libra已原生快进141de9ab，LTR-10仍等H1/LIVE。
+
+> **plan-20261015 历史前滚（2026-10-20 08:12:36 UTC；由本轮合同替代）：** 两仓root现行治理H0前滚R1 Claude FAIL/Codex PASS、R2 Claude PASS/Codex FAIL、R3/R4 Claude FAIL/Codex PASS，谓词计数及承载方法修订后待现行冻结输入真实双审，MTR-01登记；取消的FIX3/LTR-00仍blocked/空，旧FAIL/STOP保留。Mega2当前路线MTR-91→MTR-01→MTR-38→11→40→13→39→92→12/H1；91/01各自A/B、自身双审、精确签名本地提交先交来源，Mega侧C/D由38承载；01的Libra治理文档由LTR-01承载，两仓各自精确签名/DCO本地提交、不提前push。Libra LTR-10的前驱改为H0/H1/逐卡WRITERS/LIVE，当前pending/缺H1，01仍等完整小家族。逐卡协调目标写集，不要求整仓永久让窗；G-10实际重叠禁止，live与完整C/D不减。Mega97/活动96、Libra26/活动25；基线74ce530d/6003a0c，未预填新PASS或发布。 MTR-92显式承接真实HTTP v0/v2/SSH discovery能力、scope/server_id与授权不泄漏黑盒门；91不提交唯一契约。 LTR-01/REL-LTR-PUSH具名承载01的Libra三文档C/D，root实获后回填Mega；91原生构造仅审计收据cached blob，01后提交余下治理。
+
+> **plan-20261015 历史取消处置（2026-10-20 07:20:41 UTC）：** FIX-MTR-03 与 LTR-00 的后续验收按用户指令取消，分别记 DEFER-TR-FIX3-AC / DEFER-LTR-06；两卡仍 blocked/空，旧 FAIL/STOP 与已发布事实保留。引用卡不自动解锁，替代依赖须另行 ER-03/G-09 两仓双审。Mega2 origin/main=74ce530d（原生 fetch 与只读 ref 一致）；Libra 原生 HTTPS fetch/快进后 main=origin/main=6003a0c（只读 ref 一致），上游 15 路径不含本轮三份计划文档。LTR-00 取消前 49 行 source pin 中三行随上游改变，现行静态脚本 exit1；不再作为当前验收。R4 双审 FAIL 已保留，R5 待审，不触发发布。
+
+> **plan-20261015 历史决议（2026-10-20）：** Libra main=origin/main `e24c2d4`；Mega2 本地 `74ce530d`，本轮远端 fetch 因 SSH `LBR-NET-002` 未获核实。用户确认原 C2 同源材料已不存在，停止原件依赖的新增诊断合同；FIX3 AC-1/VER-5、B8 FAIL、3/3 与 8/8 STOP 保留。LTR00 三条 pin 重绑但完整 B/AC-3/自身 ER-05 未闭，仍 blocked/空；LTR01 未开工。R15/R16/R17 双 FAIL 均保留；R18 冻结输入治理修订 Claude/Codex 双 PASS（仅治理）；Mega2 远端未核实，H0 仍未 PASS；现行 H0 未取得 PASS，不授新诊断、代码写集或发布资格；下方 03:44:17 为历史输入。
+
+> **plan-20261015 历史现场（2026-10-20 03:44:17 UTC）：** Libra 原生快进到 `fc56869d4ad33efea085f43747494c3a4841a62b`（保留上游 CC-00..08 done/complete），Mega2 `74ce530d333aa9caee07ab74e051b5539aff937c`。旧 `ec77730` 冻结字节的治理 R11 真 Claude `VERDICT: PASS`（JSON SHA `cd6152ead3e32c60f5b57a99a95f367aca5bc7809ee64dd2fcb4c072323cfd8c`）与隔离 Codex `VERDICT: PASS`（final SHA `659d252b8780db7b64e9a6ebc9ea1f4d58243b5ab6ab577e5290761c832e8ea4`）仅覆盖旧输入。用户确认没有交接包；原 C2 原件/MANIFEST 不可核，历史数据库机制和第四调用点身份仍 unknown。旧 B8 FAIL、3/3 诊断、8/8 A/B STOP 不变；无新增诊断/A-B/发布窗口。FIX3/FIX4/MTR-01/LTR-00 blocked/空，LTR-01 未开工；R13 Claude/Codex 双 `VERDICT: FAIL`：Mega2 H0 映射旧状态 P1 已修，Libra 交叉写者标题旧 HEAD P2 已修；R14 双审待取得。
+
+> **plan-20261015 历史现场（2026-10-20 03:39:25 UTC）：** Libra 原生快进到 `fc56869d4ad33efea085f43747494c3a4841a62b`（保留上游 CC-00..08 done/complete），Mega2 `74ce530d333aa9caee07ab74e051b5539aff937c`。旧 `ec77730` 冻结字节的治理 R11 真 Claude `VERDICT: PASS`（JSON SHA `cd6152ead3e32c60f5b57a99a95f367aca5bc7809ee64dd2fcb4c072323cfd8c`）与隔离 Codex `VERDICT: PASS`（final SHA `659d252b8780db7b64e9a6ebc9ea1f4d58243b5ab6ab577e5290761c832e8ea4`）仅覆盖旧输入。用户确认没有交接包；原 C2 原件/MANIFEST 不可核，历史数据库机制和第四调用点身份仍 unknown。旧 B8 FAIL、3/3 诊断、8/8 A/B STOP 不变；无新增诊断/A-B/发布窗口。FIX3/FIX4/MTR-01/LTR-00 blocked/空，LTR-01 未开工；R12 Claude `VERDICT: FAIL`（Mega2 两索引仍把旧 00:38 标当前的 P1）、隔离 Codex `VERDICT: PASS`；P1 与具名 P2 已前滚，R13 待双审。
+
+> **plan-20261015 历史现场（2026-10-20 03:31:42 UTC）：** Libra 原生快进到 `fc56869d4ad33efea085f43747494c3a4841a62b`（保留上游 CC-00..08 done/complete），Mega2 `74ce530d333aa9caee07ab74e051b5539aff937c`。旧 `ec77730` 冻结字节的治理 R11 真 Claude `VERDICT: PASS`（JSON SHA `cd6152ead3e32c60f5b57a99a95f367aca5bc7809ee64dd2fcb4c072323cfd8c`）与隔离 Codex `VERDICT: PASS`（final SHA `659d252b8780db7b64e9a6ebc9ea1f4d58243b5ab6ab577e5290761c832e8ea4`）仅覆盖旧输入。用户确认没有交接包；原 C2 原件/MANIFEST 不可核，历史数据库机制和第四调用点身份仍 unknown。旧 B8 FAIL、3/3 诊断、8/8 A/B STOP 不变；无新增诊断/A-B/发布窗口。FIX3/FIX4/MTR-01/LTR-00 blocked/空，LTR-01 未开工；现行 H0 重新双审待取得。
+
+> **plan-20261015 历史现场（2026-10-20 00:38:10 UTC）：** Libra `main=ec77730a`、Mega2 `main=74ce530d`；R10 Claude FAIL/Codex PASS：两计划正文 DEP-TR-H0 行仍以旧 R6 为当前的 P1 已前滚，R11 终态由本字节的真实隔离双审输出裁定，不预填 PASS。FIX3 原 B8 FAIL/3+8 STOP 与 C2 原件缺失不变；FIX3/FIX4/MTR-01/LTR-00 blocked/空，LTR-00 AC-3/自身 ER-05 未过、formal 0/26，LTR-01 未开工；零新增诊断/A-B 窗或发布。
+
+> **plan-20261015 历史增量记录（截至 2026-10-20 00:34 UTC）：** Libra 已原生快进到 `ec77730a43efab02ed47462f31d1d20226796b9e`，Mega2 仍为 `74ce530d333aa9caee07ab74e051b5539aff937c`；上游 6 提交及 worktree 索引增量已与本地 H0 文档合并。新 HEAD 的静态预检为 121 卡/123 边、444 相对链接零缺失；旧 49 路径 source pin 在首次检查有 8 条失效（exit1）；加入当前摘要后共重绑 9 条，同一静态脚本复核 exit0，49 行有效（输出 SHA256 `9ab2beb0e6e6bd94c2f566d8dfca19afb3703b9cc2d299c196ad0d2b80dba970`）。FIX3 原 B8 FAIL、3/3 诊断、8/8 A/B STOP 及原 C2 包缺失不变；LTR-00 自身 ER-05 双 FAIL、AC-3 未勾和交叉写者未让出，formal 0/26，LTR-01 不开工。此为同步/预检，不是新验收窗口、卡完成或发布。 旧治理 R7 冻结输入的 Claude/Codex 均明确 PASS（Claude JSON SHA `66c5fd2e85af482f4b2236b61b25a67f6e53d0ee7e44361134ec1462bcd9f1e1`、Codex final SHA `63933b2fb0f1127c44c1b69b7f909fb39305054e9bac44b00f4d806933d91e23`）；新 HEAD 整合治理 R8 首轮 Claude/Codex 均 FAIL：现行 WD 写者登记及 LTR-00 VER-1 的 441/444 当前口径两项 P1。R9 隔离 Codex PASS（final SHA `bbd9e722d31933e2f5d3ea39db522a924ba14593102afa5804a7fb0b085b9c91`）、Claude FAIL（JSON SHA `6249776b3ccf6d4e8b84bf4cc0f01feb98f4818c9ba68647b9012051c3c1cf7a`）：索引仍以旧 18:34 作当前及两计划缺 2026-10-20 修订行两项 P1；已前滚修订，R10 待最终字节双审，旧 FAIL 均保留。
+
 > **CX05 本机源交接（2026-10-19 18:39:18 UTC）：** 最终run30153f19实际10333/10333PASS（13slow/4leaky、23skip；849.843s；exit0），1864前后同一3acd1b23...；R4/R5 CODE PASS与本机97+6及质量/网站门有效。in-progress/locally-accepted，仅source-qualified交接CX16；自动live/import codec/version域和正式C/D仍未关闭。
 > **CX03 当前预检（2026-10-19 21:37:38 UTC）：** CX30只读source GO/locally-accepted：旧2升级隔离测试PASS6.10s、唯一Claude source GO无P0/P1/P2，原9public runtime与两入口/12events source不变量覆盖分别登记；无代码/CI/fixture变更，复用CX17最终10333/10333完整门与19fc6fef...同源。CX17源码/8专项/strict/网站及新full已通过（13slow/1leaky，23skip，849.468s，资源根因未证）。C03仅刷新IO owner与local测试预检，薄命令不直接写文件、原lifecycle CI只读；正式0/59、C/D暂停、真实模型未验、不签推发布与下次授权提交含三离线CI修复保持。
 
 
-> **Worktree 默认目录统一（2026-10-19）：** 用户已授权实施 [WD-01..08 与 WD-02G](plan-20261019-worktree-layout.md)，新建目录统一在 `.libra/worktree`，不迁移旧数据。上游 2026-10-21 最新发布 `v0.30.84`，用户“最新上游 patch + 1”规则使当前目标为 **`v0.30.85`**，不发布 `v0.31.1` 或未打标的旧 `.83` 候选。已保留 `branch -f` 安全修复并合入上游 `acebe35`；此前代码树完整 cargo 全量 10736 passed / 0 failed / 26 ignored，schema 4 无名条目回退说明的 Claude 跟进复审 PASS。网站同步包含上游 merge/op 的十二页，限定 drift=0、脚本 8/8、Vitest 11/11、typecheck/build 通过。合流最终树仍须验证。`v0.30.67` 起的二进制支持 2026101902 receipt，`0.30.66` 及更早版本拒绝已升级仓库。最终双全量、macFUSE、final-SHA CI、四平台/stable、网站新版上线待验，九卡正式 **0/9**。证据见计划正文。 用户要求保持并发 main 推送；WD-08 已改为冻结 53a5511 源码、独立 release/worktree-v0.30.85 候选全量 CI 验收，成功后打签名 tag 并合回 CI/计划修订，正式仍 0/9。 收口流程另增固定 integration 分支的真实合流 SHA 八作业/CodeQL 门；候选网络 TLS 失败仅重跑，九卡仍 0/9，未发布或部署。
+> **Worktree 默认目录统一（2026-10-19，2026-10-22 收口）：** 用户授权的 WD-01..08 与 WD-02G 已 **9/9 done/complete**；默认新建目录统一在 `.libra/worktree`，不迁移旧数据。按 v0.30.84 + patch 1 发布 [v0.30.85](https://github.com/libra-tools/libra/releases/tag/v0.30.85)，未发布 v0.31.1。发行候选 ac4fa9c 与真实合流 M=2b67073 的各八作业/CodeQL 全绿；本地 cargo 10735 passed、nextest 10715/10715、macFUSE 实挂载 16/16、旧版拒绝 9/9，Claude Code PASS。发行八作业、四平台完整哈希/签名 stable revision 180/默认安装通过；网站 cf dc46ffc 已签推部署，24 个生产页面内容通过。历史失败/取消、flaky/leaky/skipped、范围外三项通用网站 E2E 失败保留于[计划证据](plan-20261019-worktree-layout.md)。用户要求的并发 main 推送保留，最终纯文档自动 CI 按预登记 v2.14 在下一次例行状态同步补记。
 
-> **plan-20261015 现场（2026-10-19 15:30:59 UTC）：** Mega2 的 G-13 修复聚合已退出；FIX-MTR-03 和 FIX-MTR-01 各自发布，FIX-MTR-04 不发布。旧 B8 FAIL、8/8 STOP 与 FIX-MTR-03 AC-1/VER-5 未勾选保持原记录。Mega2 MTR-87 已完成 `v0.42.55` 的实际 Docker D；MTR-10 在工作区实施中，四条 focused VER 已在 Docker 测试服务下通过，完整 C/双审/发布仍待。Libra handoff `976091c` 已是远端 main 祖先；本地 17033b9、5e55635 两笔计划文档历史在本次合并中保留。LTR-00 仍 in-progress/locally-accepted，formal 0/26，LTR-01 未开工。本次整合本身不计功能验收、版本发布或新 D。
+> **plan-20261015 历史现场（2026-10-19 18:34 UTC）：** 新 FIX3 条件治理终态 R6 Claude/Codex 双 VERDICT: PASS（治理范围）；Claude 两项 P2 已具名修正：Libra R5 轮次加“新提案”限定、LTR00 B 静态摘要补 AC-4。旧失败/STOP、零新窗口及所有卡阻塞不变；本次纯文档修订的结论以隔离终态审查输出为准。 历史：**2026-10-19 18:30 UTC：** 新 FIX3 条件恢复治理 R5 Claude/Codex 双 VERDICT: PASS（冻结输入，仅治理）；收据与 H0/LTR00 B 静态限定已前滚记账，终态文档待独立复核。原 C2 包、精确诊断合同、新窗口及交叉写者让出仍缺；FIX3/MTR-01/FIX4/LTR00 blocked/空，无卡验收、提交或发布授权。 历史：**2026-10-19 18:25 UTC：** 新 FIX3 提案 R4 Claude/Codex 双 FAIL；LTR-00 现行 AC-1/AC-2/VER-2 曾写“待 R3”与已发生 R3 冲突，三处已改为不依赖轮次的“现行 H0 待双 PASS”；R5 待审。原 C2 包与精确诊断合同仍缺，零新诊断/A-B 授权，LTR-00 与 FIX3 链 blocked/空。 历史：**2026-10-19 18:21 UTC：** 新 FIX3 提案 R3 Claude FAIL/Codex PASS；Claude P1 为 Libra 生效计划总览仍以旧 18:08 作为当前，已修；审查 R4 待双审。恢复方案仍须原 C2 包与另审精确诊断合同；零新诊断/A-B 授权，LTR-00 与 FIX3 链 blocked/空。 历史：**2026-10-19 18:16 UTC：** 新 FIX3 提案 R2 Claude/Codex 均 FAIL；原全量约62分钟及连接压力与拟定60分钟诊断上限冲突、Mega2 活跃索引仍称旧 R6 当前，两项 P1 已前滚修订，R3 待审。旧 B8 FAIL、3/3、8/8 STOP 保留；零新诊断/A-B 授权，FIX3/MTR-01/FIX4 与 LTR-00 blocked/空。 历史：**2026-10-19 18:08 UTC：** FIX3 新恢复提案联合首轮 Claude PASS / 隔离 Codex FAIL，两项生效索引 P1 已修、第二轮待审；零新诊断/A-B 授权。LTR-00 自身首轮双 FAIL、AC-3 未勾、blocked/空；formal0/26。历史：**2026-10-19 18:02 UTC：** Mega2 FIX3 前滚恢复提案已写，新的两仓联合双审待取得，零新增诊断/A-B 授权；旧 H0 R6 只覆盖原冻结输入。LTR-00 自身首轮双 FAIL、交叉写者 P1 未闭，blocked/空、formal0/26；LTR-01 不开工。历史：**2026-10-19 17:58 UTC：** H0 R6 Claude/Codex 双 PASS；LTR-00 自身首轮 ER-05 Claude/Codex 双 FAIL，活跃交叉写者交接 P1 尚缺，现 `blocked/空`、AC-3 撤回，formal0/26；LTR-01 C/D 未启动。历史：**2026-10-19 17:39:15 UTC：** LTR-00 静态 A/B 候选曾记 `in-progress/locally-accepted`，该候选已由自身首轮审查否决。历史：**2026-10-19 17:33:08 UTC：** R5 Claude FAIL/Codex PASS；Mega2 日期索引旧下一卡P1已修、R6双审待取得。历史：**2026-10-19 17:28:37 UTC：** H0 R4 Claude FAIL/Codex PASS，Mega2 PT-17 主表旧下一卡已修，R5 双审待取得。Mega2 FIX3/MTR-01/FIX4 blocked/空，其他27张已发布依赖后继及MTR-10 blocked/complete；Libra LTR-00 blocked/空、formal0/26，LTR-01 不开工。
+
+> **plan-20261015 历史现场（2026-10-19 17:21:59 UTC）：** H0 R3 Claude FAIL/Codex PASS，Mega2 四项 P1 已前滚修订，R4 待双审；FIX3/MTR-01/FIX4 blocked/空，其他27张已发布依赖后继及MTR-10 blocked/complete。Libra LTR-00 blocked/空，旧 AC/VER 勾选撤回，formal0/26；LTR-01 不开工。
+
+> **plan-20261015 历史现场（2026-10-19 17:12:48 UTC）：** H0 R2 Claude/Codex 双 FAIL，Mega2 旧生效门、MTR-01 H0 勾选、FIX3 越界写集及两仓索引已前滚修订，R3 待审。Mega2 FIX3/MTR-01 blocked/空，其他27张已发布依赖后继及MTR-10 blocked/complete，MTR-10 Docker三job success。Libra LTR-00 blocked/空、formal0/26；M0/H0 已改为双审先于本卡源交接，LTR-01 不开工。
+
+> **plan-20261015 历史现场（2026-10-19 17:02:50 UTC）：** Mega2 MTR-10 的 `v0.42.56` Docker run `39288093340` 三 job success，当前 blocked/complete；FIX3 原 AC-1/VER-5 未证仍 blocked/空。H0 修订后联合双审待取得；Libra LTR-00 blocked/空、formal0/26，LTR-01 未开工。旧 B8 FAIL/STOP 与已发布远端事实保留。
+
+> **plan-20261015 历史现场（2026-10-19 17:00:10 UTC）：** H0 首轮 Claude/Codex 均 FAIL，Mega2 FIX3 原 AC-1/VER-5 未证，现 `blocked/空`；28张已取得自身/继承 C/D 的依赖后继 `blocked/complete`，MTR-10 已发布 `v0.42.56` 但 Docker D 仍执行且前驱阻断，现 `blocked/remote-pending`。Libra main=`cbee959c`，LTR-00 因新契约 hash/H0 重验待办回到 `blocked/空`，formal0/26；LTR-01 未开工。已发布 ref 与旧失败/STOP 保留，新 H0 双审待取得。
+
+> **plan-20261015 历史现场（2026-10-19 16:49:57 UTC）：** Libra 原生 main 已快进至最新远端 `cbee959c09f11e56342b86c124c63f7909c80fd2`，包含 handoff 合并 `380abd3` 与上游 COV/OG；工作区在本轮文档记账前干净。`380abd3` 的 CodeQL success，但 Check/Build/Test 因后续 main 取消，不记 D PASS。Mega2 MTR-10 已签名提交并推送 `74ce530d`、发布 `v0.42.56` 与手写 Release，tag Docker run `39288093340` 仍执行，故为 `remote-pending`。原 G-13 退出及 B8 FAIL/3+8 预算 STOP、FIX3 AC-1/VER-5 未勾选保持；本轮 H0 联合双审未取得，LTR-00 `in-progress/locally-accepted`、formal 0/26，LTR-01 未开工。
+
+> **plan-20261015 历史现场（2026-10-19 15:30:59 UTC）：** Mega2 的 G-13 修复聚合已退出；FIX-MTR-03 和 FIX-MTR-01 各自发布，FIX-MTR-04 不发布。旧 B8 FAIL、8/8 STOP 与 FIX-MTR-03 AC-1/VER-5 未勾选保持原记录。Mega2 MTR-87 已完成 `v0.42.55` 的实际 Docker D；MTR-10 在工作区实施中，四条 focused VER 已在 Docker 测试服务下通过，完整 C/双审/发布仍待。Libra handoff `976091c` 已是远端 main 祖先；本地 17033b9、5e55635 两笔计划文档历史在本次合并中保留。LTR-00 仍 in-progress/locally-accepted，formal 0/26，LTR-01 未开工。本次整合本身不计功能验收、版本发布或新 D。
 
 > **plan-20261015 历史快照（2026-10-16 04:11:08 UTC）：** 当时本地 main 位于 `deabb37`、Mega2 main 位于 `b784111`；FIX-MTR-03 恢复窗已执行而 AC-1 未勾选。当时 `0.30.50` 的本机验收不外推至目前上游版本。
 
@@ -393,12 +664,12 @@
 > **COV2-08 当前开工（2026-10-15）：** 前驱 COV2-22 已以 signed+DCO main `58b4c02e7ec372e5e9bfec13e108e0e68810c510` 实际 Push exit0、remote 同 SHA，指定 dcc 旧 writer / 当前 d188 完整全量 / 新增事实 reader QA 103 / 最终唯一 Claude PASS及root裁决均已核；COV2-22 source HOLD 已解除。当前 COV source **14/26=53.85%**、formal **0/26**，父 formal **59/71=83.10%**、source **61/71=85.92%**。本次只开工 COV2-08，四项新 VER/8 AC 在当前重基源仍未验收，不预计15。以下旧条件/索引历史由本条和本卡新收据覆盖；Source A、家族 C/D 与 native 同裸key边界不变。
 
 
-> **状态快照 2026-10-15 05:24:15 UTC — plan-20261015 LTR-00上游整合：** 用户授权本任务root接管窗口（首次核验2026-10-15 03:07:03 UTC）仍有效。原f306审计记录已实际signed+DCO本地提交 `3c3fb183bdb1222de3b1b95f56ae501a17edcb36`，未重写、未push；现由root原生merge整合 `58b4c02e7ec372e5e9bfec13e108e0e68810c510`，本段只解决本任务status相交冲突并保护上游新事实。原H0/ER05 PASS仍仅绑定其原输入，新整合窄A/B已实际核（fmt/32+1/strict/DAG及保护）；整合R2已真实五键合格双PASS；合并signed提交/push待root实际取得；LTR-00仍in-progress/locally-accepted、formal0/26、C/D待LTR-01。f306时点13/HOLD只保留历史，当前COV资格恢复严格采用下方58b新增声明/条件，旧OG24.3/frozen.2/SHARED-RETURN/Source A门不由本次整合放行。
+> **历史状态快照 2026-10-15 05:24:15 UTC — plan-20261015 LTR-00上游整合：** 用户授权本任务root接管窗口（首次核验2026-10-15 03:07:03 UTC）仍有效。原f306审计记录已实际signed+DCO本地提交 `3c3fb183bdb1222de3b1b95f56ae501a17edcb36`，未重写、未push；现由root原生merge整合 `58b4c02e7ec372e5e9bfec13e108e0e68810c510`，本段只解决本任务status相交冲突并保护上游新事实。原H0/ER05 PASS仍仅绑定其原输入，新整合窄A/B已实际核（fmt/32+1/strict/DAG及保护）；整合R2已真实五键合格双PASS；合并signed提交/push待root实际取得；LTR-00仍in-progress/locally-accepted、formal0/26、C/D待LTR-01。f306时点13/HOLD只保留历史，当前COV资格恢复严格采用下方58b新增声明/条件，旧OG24.3/frozen.2/SHARED-RETURN/Source A门不由本次整合放行。
 
 > **历史 WIP 迁移快照（2026-10-15 17:25:06 UTC；非计划发布）：** 仅WIP迁移检查点，目标分支`handoff/scoped-traces-20261016`；不合main、不发版、不宣称计划验收PASS。Mega2受控RED101/目标Elapsed后GREEN1/1、原用例1/1、模块8/8及fmt/strict exit0已取得，但第8次文档B于17:13:38→17:13:42 UTC exit1，原8次预算耗尽/STOP；完整A/B、own ER05、G13及FIX4仍未完成。Libra本地e98d41c与最新FETCH d1824ab未整合，当前ahead1/behind16；LTR-00仍locally-accepted/formal0/26，C/D仍待LTR-01。 详见[日期计划WIP交接段](plan-20261015.md#wip-migration-checkpoint-20261016)；原13:40:20 UTC快照原样保留为历史。
 
 
-> **状态快照 2026-10-15 13:40:20 UTC — plan-20261015 R3实际双审与本地规范交接：** R3实际H0与LTR00当前治理均已Claude/Codex分别PASS；root核195冻结输入及真实原始终态，FIX5全部19AC/19VER B已真实完成，规范源码已精确signed+DCO本地交接。LTR-00 仍 in-progress/locally-accepted、formal0/26，其余25卡pending，C/D仍由LTR-01承载。R3实际Claude与隔离Codex均十项literal PASS；root已核195冻结输入hash/mode、raw/final/session及真实完成终态，本轮H0与LTR00当前治理资格已通过。Mega2 FIX5规范源码已精确signed+DCO本地交接；FIX2 fresh双审/本地提交及FIX1新child源码交接仍待，FIX3 T3未启动、初始超时根因仍未知。95Mega/26Libra共121卡及原跨仓依赖不变；原5522458的push/13jobs仅证明旧source，本轮三治理文档尚未提交推送。旧C2 FAIL与已结束的120分钟窗口保留，不授重开、服务可用或新C/D。 详细原始收据及root P2处置仅见[日期计划当前R3收据](plan-20261015.md#r3-actual-review-receipt)，本索引不复制SHA/run计数。此前R2 FAIL及dated R3起草/B快照保留原时点。
+> **历史状态快照 2026-10-15 13:40:20 UTC — plan-20261015 R3实际双审与本地规范交接：** R3实际H0与LTR00当前治理均已Claude/Codex分别PASS；root核195冻结输入及真实原始终态，FIX5全部19AC/19VER B已真实完成，规范源码已精确signed+DCO本地交接。LTR-00 仍 in-progress/locally-accepted、formal0/26，其余25卡pending，C/D仍由LTR-01承载。R3实际Claude与隔离Codex均十项literal PASS；root已核195冻结输入hash/mode、raw/final/session及真实完成终态，本轮H0与LTR00当前治理资格已通过。Mega2 FIX5规范源码已精确signed+DCO本地交接；FIX2 fresh双审/本地提交及FIX1新child源码交接仍待，FIX3 T3未启动、初始超时根因仍未知。95Mega/26Libra共121卡及原跨仓依赖不变；原5522458的push/13jobs仅证明旧source，本轮三治理文档尚未提交推送。旧C2 FAIL与已结束的120分钟窗口保留，不授重开、服务可用或新C/D。 详细原始收据及root P2处置仅见[日期计划当前R3收据](plan-20261015.md#r3-actual-review-receipt)，本索引不复制SHA/run计数。此前R2 FAIL及dated R3起草/B快照保留原时点。
 
 > **COV2-22 资格恢复的最终事实（2026-10-15，当前两计划事实交付条件）：** 指定 dcc 真实旧 writer、独立 clean-b644 全量及当前 signed main `d188be90c1669ce7a36a185c0668584d96b841de` 的完整 2048 输入验收均已有实际终态。当前新增事实仍须本次唯一 Claude Code PASS、root 裁决和 signed+DCO main Push/remote 同一性；这些条件实际完成后，COV source 恢复 **14/26=53.85%**，此前仍 **13/26=50.00% HOLD**，formal **0/26**。父计划仍 formal **59/71=83.10%**、source **61/71=85.92%**，不提前计 OG24 `.3`。以下旧 HOLD/UNRUN/62及采用候选是各自日期的历史，不改原 8 AC/6 VER、I/R、DAG、Granularity、gold 或 Source A 门。
 
@@ -495,9 +766,9 @@
 | 计划 | 类别 | 状态 | 一句话进度（卡片状态） |
 |---|---|---|---|
 | [`plan-20261023-status-performance.md`](plan-20261023-status-performance.md) | 横切（status 性能） | 未启动 | 2026-10-23 06:58:52 UTC：修复准备草案，SP-01 普通 pack idx 查询、SP-02 单次 HEAD 快照复用均 `pending` / 空；无实现或正式评审 PASS。范围/实现授权、storage/status 写集交接待确认；网站路径本机不可用，交付前需补齐。原始计数证据与两卡验收见计划。 |
-| [`plan-20261019-agent-mcp-server.md`](plan-20261019-agent-mcp-server.md) | B（外部 Agent 标准 MCP 接入） | 实施中 | 41 卡（MC-01..MC-08、MC-10..MC-41、MC-43；MC-09 已撤销，MC-42 已并入 MC-06）。MC-01 `done` / `complete`（`v0.30.68`，tag `e418297`；main `e4d843d` 的 base.yml 39427673509 attempt 2 与 codeql 39427673357 成功）；MC-22 `done`（0.30.69）；MC-16 `done` / `complete`（`v0.30.71`）；MC-19 `done` / `complete`（`v0.30.72`）；MC-29 `in-progress`（`v0.30.79` 的 release.yml 39576472385 success；该 merge SHA 的 base/codeql 被后续 main 提交取消）；MC-35 `done` / `complete`（`v0.30.82` / `24fabae`；release.yml 39591913788 success；codeql 39591846433 success；含该提交的 `f0ea585` base.yml 39629633740 与 codeql 39629633747 success）；MC-32 `in-progress` / `locally-accepted`（发布候选 `0.30.84`）；其余 pending。`libra agent mcp` 标准 MCP 入口（stdio 供 WorkBuddy；loopback HTTP 经 HTTPS 终端供 Grok Bot 客户端工具——不是 Grok 模型），bridge 对外契约不变、只服务 DeepSeek Harness；计划级 review：Codex R64 PASS（R66 差异确认 PASS）。 |
-| [`plan-20261019-worktree-layout.md`](plan-20261019-worktree-layout.md) | 横切（worktree 默认目录与任务生命周期） | 实施中 | WD-01..08 与 WD-02G 已授权；正式 0/9。新建目录统一 `.libra/worktree`，旧数据不迁移。GitHub Latest `v0.30.84`，按用户最新 patch + 1 规则当前目标 `v0.30.85`，仍不发布 `v0.31.1`；branch 安全前滚聚焦 5/5、全组 52/52，最终树双全量、macFUSE、final-SHA CI、四平台资产/stable、网站新版上线和九卡收口待验。 |
-| [`plan-20261015.md`](plan-20261015.md) | B（外部Agent traces）+ 横切（Mega2 Agent 历史检索） | 实施中；Mega2 MTR-10 in-progress，Libra LTR-00 locally-accepted | 2026-10-19 15:38:49 UTC：Mega2 G-13 已退出，FIX-MTR-03/01 分别完成独立发布；FIX-MTR-04 不发布。旧 B8 FAIL、8/8 STOP 及 FIX-MTR-03 AC-1/VER-5 未勾选保持历史。MTR-87 `v0.42.55` Docker D 成功；MTR-10 四项专有 VER 通过，Git 协议 smoke 与双审仍待，本卡完整 C/D 未完成。Libra 合并候选保留 handoff 两笔文档提交及上游 COV/OG，当前 H0 尚未取得 PASS，待最新两仓联合复审；LTR-00 formal 0/26、LTR-01 未开工。原交接见[WIP 交接段](plan-20261015.md#wip-migration-checkpoint-20261016)。 |
+| [`plan-20261019-agent-mcp-server.md`](plan-20261019-agent-mcp-server.md) | B（外部 Agent 标准 MCP 接入） | 实施中 | 41 卡（MC-01..MC-08、MC-10..MC-41、MC-43；MC-09 已撤销，MC-42 已并入 MC-06）。MC-01 `done` / `complete`（`v0.30.68`，tag `e418297`；main `e4d843d` 的 base.yml 39427673509 attempt 2 与 codeql 39427673357 成功）；MC-22 `done`（0.30.69）；MC-16 `done` / `complete`（`v0.30.71`）；MC-19 `done` / `complete`（`v0.30.72`）；MC-29 `in-progress`（`v0.30.79` 的 release.yml 39576472385 success；该 merge SHA 的 base/codeql 被后续 main 提交取消）；MC-35 `done` / `complete`（`v0.30.82` / `24fabae`；release.yml 39591913788 success；codeql 39591846433 success；含该提交的 `f0ea585` base.yml 39629633740 与 codeql 39629633747 success）；MC-32 `done` / `complete`（`v0.30.84` / `99a92c1`；release.yml 39642596203 success；codeql 39642505059 success；含该提交的 `2b67073` base.yml 39729493615 与 codeql 39729493671 success）；MC-36 `in-progress` / `locally-accepted`（发布候选 `0.30.86`）；其余 pending。`libra agent mcp` 标准 MCP 入口（stdio 供 WorkBuddy；loopback HTTP 经 HTTPS 终端供 Grok Bot 客户端工具——不是 Grok 模型），bridge 对外契约不变、只服务 DeepSeek Harness；计划级 review：Codex R64 PASS（R66 差异确认 PASS）。 |
+| [`plan-20261019-worktree-layout.md`](plan-20261019-worktree-layout.md) | 横切（worktree 默认目录与任务生命周期） | 已完成 | WD-01..08 与 WD-02G **9/9 done/complete**。默认 `.libra/worktree`，旧数据不迁移；v0.30.85 已发布，未发布 v0.31.1。候选/合流各八作业及 CodeQL、双全量、真实 macFUSE 16/16、旧版拒绝 9/9、四平台签名 stable/安装与网站生产 24/24 均通过。失败/重试/范围外残留及 v2.14 终止链记录见正文。 |
+| [`plan-20261015.md`](plan-20261015.md) | B（外部Agent traces）+ 横切（Mega2 Agent 历史检索） | MTR100源码、A/B、自身与最终双审、0.42.60完整C、签名提交、main/tag/人工Release及适用D已实际闭合：done/complete。Mega6/109（活动6/108）、Libra0/26（活动0/25），联合6/135（活动6/133）。DEBT-MTR-01仅disabled HTTP94+SSH100拒绝边界closed；enabled/H1/LTR01仍待。 **历史索引：** FIX08已done/complete，Mega完成5/109（活动5/108）、Libra0/26（活动0/25）。MTR100六非Cargo路径已恢复，现in-progress；locally-accepted仅保留历史A/B输入资格，新组合树九门A及完整18项smoke未执行，新自身Review与0.42.60完整C/D待。 **历史索引：** FIX08已完成源码、A/B、真实ownER05与最终交付审查、本地五门C、精确签名+DCO提交、main/tag/人工Release及适用D：done/complete。Mega正式完成5/109（活动5/108）、Libra仍0/26（活动0/25）。MTR100仅其FIX08发布前驱解除，可按受保护前像精确恢复六个非Cargo路径；恢复尚未在本收据执行，MTR100自身输入/Review/0.42.60完整C/D仍待，不能据此标本卡完成。 **此前阶段索引：** FIX08源码、六门A/B及ownER05双PASS已核；0.42.59最终五门本地C实际通过（session68149 exit0，20目标2981通过/0失败/3原有ignored/0过滤/0measured，fmt/strict clippy及双build零warning/error）。Lifecycle=in-progress、Acceptance=locally-accepted；尚未提交/推送/tag/人工Release/D，不能done/complete。MTR100 WIP仍受保护；Libra仍待新上游资格/H1/LTR01。 **此前阶段索引：** FIX08 in-progress/locally-accepted；2AC/3VER及六门A/B已核，自身ER05真实Claude/Codex双PASS（session82523 exit0）；版本入口实际session25405 exit0，58→59两面一致。完整C尚未启动；签名提交、推送/tag/Release/D均待。MTR100 WIP继续受保护，未恢复；Mega完成仍4/109、Libra0/26。 **历史阶段索引：** FIX08六门A/B原件已核（2026-10-21T10:23:18.538031+00:00）：in-progress/locally-accepted，2AC/3VER已核；ownER05、版本bump、完整C、签名提交、推送/tag/Release/D均未执行。MTR100 blocked/locally-accepted，受保护WIP尚未恢复；完成计数仍Mega4/109（活动4/108）、Libra0/26（活动0/25）。 **此前索引快照：** FIX08采纳候选待双审；Mega109/活动108、Libra26/活动25、联合135/活动133；完成仍4/109与0/26。D1入口STOP、未运行测试且claim已消费；MTR100 blocked/locally-accepted，独立FIX08完整C/D前不放行。 **此前索引快照（保留历史）：** MTR94 v0.42.58完整C/D已核、done/complete；93继承精确94覆盖而done/complete（来源限94/100）；01仅Mega覆盖完成、Libra仍待LTR01。Docker双架构/manifest及Harbor实际success。Libra本地signed b157396、未push，H1/LTR01仍待；100已核ER01/02/03并开始实现，验收/双审/C/D待。 **历史D待定索引：** MTR94五门与最终双审PASS，signed04c42e1/main/标注v0.42.58/人工Release已核；实际Docker39539957757及Harbor39539882313 D待，remote-pending，93覆盖与100前驱未闭合；Libra资格10658/network3及signed9314a17已核、未push，H1/LTR01仍待。本次后置事实文档另做B/双审。 **历史提交前索引：** 当前C4本地五门通过，2979/0/3、20目标，0.42.58；最终输入审查/签名提交/发布C-D待，93覆盖与100前驱仍未解除；Libra10658/network3与本地signed2332823已核，H1/LTR01仍待。 以下为历史阶段快照： 新树资格实际终态；计划待H1，正式0/26、活动0/25 | MTR94 v0.42.58完整C/D已核、done/complete；93继承精确94覆盖而done/complete（来源限94/100）；01仅Mega覆盖完成、Libra仍待LTR01。Docker双架构/manifest及Harbor实际success。Libra本地signed b157396、未push，H1/LTR01仍待；100已核ER01/02/03并开始实现，验收/双审/C/D待。 **历史D待定索引：** MTR94五门与最终双审PASS；signed04c42e1/main/v0.42.58/人工Release已核，实际Docker39539957757及Harbor39539882313 D待，remote-pending；93覆盖/100前驱未闭合。Libra10658/network3与signed9314a17已核、未push，H1/LTR01仍待。 **历史资格收据与提交前状态：** 选定上游`3b1200a80e00e8d1a8866ab07aa790c27f8a17a9`、本地验收HEAD`3eec95934e5862f2528c6fb181fcd5da3b7a4ab3`、版本0.30.69的新树首次资格已实际结束：fmt/clippy/CLI build/full/network均exit0，full 10658项、network 3项终态通过；21既有ignored不计通过。full保留1次失败重试事件、1次重试后通过，不称全程零失败；Cargo依赖proc-macro-error2 v2.0.1 future-incompat警告保留，不称零警告。本次仅资格与MTR01三文档事实跟进，最终三文档自身B/双审/精确signed+DCO本地提交待；H1/LIVE/WRITERS及Worktree冻结、LTR01唯一发布点不变，正式完成仍0/26，无push/tag/Release/CI-D。 Mega94仍blocked/locally-accepted，源码/A-B/自身R2双PASS保留；原C3一次120分钟已FAIL/STOP并消费claim，full lib1349PASS/1337FAIL/3ignored，后续targets/build/build-tests未到，历史C2原因未证。新C4恢复方案实际Claude/Codex各3项PASS、P0/P1=0、root13项P2具名处置；新一次120分钟授权待；不执行C4。不重用原C3剩余时间，不重置FIX3/LTR00原3/3诊断与8/8 A/B STOP/取消。93→94→100及跨仓H1仍阻塞。 总108/26、活动107/25不变；47 rebind与06 move风险仍阻塞后继identity消费。 |
 | [`plan-20261001-mega-browser-noninteractive.md`](plan-20261001-mega-browser-noninteractive.md) | 横切（Mega2 browser 非交互操作 / 黑盒驱动） | **已收口** | **2026-10-04 21:11:16 UTC**：MN-01..MN-12 全部 `done`/`complete`，v0.30.27 与 `DEP-MN-03` 已交付；PR #609 以原 head `adb9b59` 合并，后续修复基于 main `622bed5` 移至 `fix/opencode-exporter-cancel-ci`；全量本地测试、格式与 workflow lint 通过；PR #612 首轮 run `37230096807` 的 Linux Clippy 检出未使用的 `linux_pidfd_supported`，已删除，run `37231625328` 又发现通用 runner 错误要求 `NSpid=1`；现仅 trusted-bwrap runner 捕获 namespace pidfd，本地 exporter 模块 15/15、Clippy/fmt/actionlint 通过；run `37233480909` 的 sandbox gates 通过，Clippy 与 bridge 编译均遇到 `run_bounded_exporter` `dead_code`，现已限定 wrapper 为 `cfg(test)`；待新 run 验收 Clippy 与 bridge E2E。原实现基线 `faae20c`、Codex R19/R20/R22 与版本信息见计划正文；无 LR 编号|
 | [`plan-20260924.md`](plan-20260924.md) | B（Agent Capture 通用架构前置） | **已收口** | 2026-10-03 14:56:26 UTC：ACF-01..20 与 FIX-ACF-01 `done`/`complete`；R91 `VERDICT: PASS`；ACF-09 已交接 `DEP-ACF-MIRROR`／ACF 侧 `DEP-ACF-CAP`／`DEP-ACF-DM06`。CAP-04..07 仍受独立 RFC `blocked`；DM-05 仍 `pending`。 |
 | [`plan-20260925.md`](plan-20260925.md) | B（Session Capture 决策中层） | **已收口** | SCAP-02 / SCAP-01 均为 `done`/`complete`（`v0.23.55` / `fa3849e`；D 组 release+CodeQL 全绿；2026-09-28 最终本地门 8241/8241 passed，本轮不 bump 版本） |
@@ -577,7 +848,7 @@
 
 | 计划 | 全部待执行卡 | 开工前置条件 |
 |---|---|---|
-| [`plan-20261019-agent-mcp-server.md`](plan-20261019-agent-mcp-server.md) | MC-01 `done`（0.30.68）；MC-22 `done`（0.30.69）；MC-16 `done` / `complete`（`v0.30.71`）；MC-19 `done` / `complete`（`v0.30.72`）；MC-29 `in-progress`（`v0.30.79` 的 release.yml 39576472385 success；该 merge SHA 的 base/codeql 被后续 main 提交取消）；MC-35 `done` / `complete`（`v0.30.82` / `24fabae`；release.yml 39591913788 success；codeql 39591846433 success；含该提交的 `f0ea585` base.yml 39629633740 与 codeql 39629633747 success）；MC-32 `in-progress` / `locally-accepted`（发布候选 `0.30.84`）；MC-02..MC-08、MC-10..MC-15、MC-17..MC-21、MC-23..MC-34、MC-36..MC-41、MC-43 pending（MC-09 撤销，MC-42 并入 MC-06） | 计划级 review：Codex R64 PASS（R66 差异确认 PASS）；DEP-MC-01（grok 计划 migration.rs 写集）、DEP-MC-03（并发未提交改动）按卡核对 |
+| [`plan-20261019-agent-mcp-server.md`](plan-20261019-agent-mcp-server.md) | MC-01 `done`（0.30.68）；MC-22 `done`（0.30.69）；MC-16 `done` / `complete`（`v0.30.71`）；MC-19 `done` / `complete`（`v0.30.72`）；MC-29 `in-progress`（`v0.30.79` 的 release.yml 39576472385 success；该 merge SHA 的 base/codeql 被后续 main 提交取消）；MC-35 `done` / `complete`（`v0.30.82` / `24fabae`；release.yml 39591913788 success；codeql 39591846433 success；含该提交的 `f0ea585` base.yml 39629633740 与 codeql 39629633747 success）；MC-32 `done` / `complete`（`v0.30.84` / `99a92c1`；release.yml 39642596203 success；codeql 39642505059 success；含该提交的 `2b67073` base.yml 39729493615 与 codeql 39729493671 success）；MC-36 `in-progress` / `locally-accepted`（发布候选 `0.30.86`）；MC-02..MC-08、MC-10..MC-15、MC-17..MC-21、MC-23..MC-31、MC-33..MC-34、MC-37..MC-41、MC-43 pending（MC-09 撤销，MC-42 并入 MC-06） | 计划级 review：Codex R64 PASS（R66 差异确认 PASS）；DEP-MC-01（grok 计划 migration.rs 写集）、DEP-MC-03（并发未提交改动）按卡核对 |
 | [`plan-20260924.md`](plan-20260924.md) | ACF-01..20 与 FIX-ACF-01 `done`/`complete` | **已收口**（ACF-09 `Lifecycle=done`、`Acceptance=complete`）；`DEP-ACF-MIRROR` 已交接 |
 | [`plan-20260926.md`](plan-20260926.md) | DM-00..DM-13（14 卡；`DM-00` `done`/`complete`，`DM-01` `done`/`complete`，`DM-10` `done`/`complete`，`DM-02` `done`/`complete`，其余 pending） | R11 字面 `VERDICT: PASS`（`P0=0` / `P1=0`）。`DM-00` 已于 2026-10-07 `done`/`complete`（#456 取材清单、远端事实冻结、plan-20260819 退役）。`DM-01` 已于 2026-10-07 `done`/`complete`（迁移 A `2026092901_memory_core` 交付，REL-DM-01 独立发布至 v0.30.31 / PR #614 / merge `603bad3` / release run `37588423715`；本地 nextest（umask 0022）9549/9549 + D 组 base.yml/CodeQL 全绿；ER-05 评审待记录）。`DM-10` 已于 2026-10-07 `done`/`complete`（迁移 B `2026092902_memory_path_search` 交付，REL-DM-01 独立发布至 v0.30.35 / PR #618 / merge `c384bc7` / 版本面补丁 `b51f5c3`；D 组 base.yml/CodeQL + compat-offline-core 全绿；ER-05 评审待记录）。`DM-02` 已于 2026-10-08 `done`/`complete`（`src/internal/ai/memory/` commit/change 派生实现，REL-DM-01 独立发布至 v0.30.37 / PR #620 / merge `125657b`；D 组 base.yml/CodeQL + compat-offline-core 全绿；含 `parse_repo_oid`（object_format）修复；ER-05 待记录）。`DEP-DM-06` 正式 handoff 已由 ACF-09（`Lifecycle=done`、`Acceptance=complete`）完成；DM-05 仍 `pending` 并须在开工日按 ER-02 重核（经 DEP-DM-06） |
 | [`plan-20260905.md`](plan-20260905.md) | CC-00..CC-08 done / complete | 见计划[最终 C/D 与完成](plan-20260905.md#cc-closeout-20261019)；v0.30.66 已发布 |
@@ -891,6 +1162,8 @@ SBX-01..05 `done/locally-accepted`；**发布步按 DEFER-SBX-06 正式延后**�
 DEFER-AD-01..16：Git advice、ignored 相对路径、`add -u --ignore-missing` 128 语义、typechange/gitlink 暂存、全局 `-c`、其余 pathspec 开关、`add -i`/`--edit`、旧锁文件/超时键、`add -n` 零写入、`add -p` 会话（回 477）、gitlink 缺失暂存、Windows symlink fixture、批量 add 剩余耗时、conflict-marker-size、`add -n`/`-v` 对齐 Git 格式。全部延后（多为外部用例/对照集升级重启）。
 
 ### 5.4 其它计划
+
+- plan-20261015：`DEFER-LTR-06`，用户取消 LTR-00 后续验收；卡保持 blocked/空，原 AC-3/自身 ER-05 FAIL 与静态子项历史保留。LTR-10/LTR-01 不自动放行，替代依赖须 ER-03/G-09 两仓双审。
 
 - plan-20260904 / plan-20260902：`DEFER-RG-SCOPED-04`（2026-10-10 用户将并发目录移动NO-GO与完整所有权/退出证明移出当前计划）。未修复；原reparent组合fixture保留ignored/UNRUN，不计PASS。04仅稳定目录命名空间功能/静态no-follow，继承到02/03/RG03/FAST-RG的同一限制；native Source A不变。重启须独立方案/Claude PASS及外部审批变化后真实回归；当前不实施、不是当前硬依赖，61卡计数不增。
 
@@ -3495,6 +3768,119 @@ Grok核查更正：生产 `parse_grok_hook_event` 无文件I/O；同文件 `obse
 
 
 **2026-10-19 11:41:37 UTC Grok-only提交快照隔离验证：** 使用HEAD加所选index内容的临时源码快照（不含codex_reasoning.rs、Codex本机target、admission转发或Claude oracle覆盖）验证：Grok31/31、kind1/1、docs34/34、capability5/5实际PASS；nightly fmt和严格all-target/all-feature Clippy exit0。架构target初次63/65：Grok引入第20个AgentKind分支的问题用既有provider-neutral partial fallback及下降至15的guard修复纳入本提交；另一项capture_modules_do_not_import_hook_entry_layers来自HEAD原有Claude admission直接引用，ingress/Claude源码逐字节等于HEAD，修复继续保留在Codex WIP，不夹带。先前联合工作区的10325全量PASS不是本次独立commit的全量PASS。仅本地提交，不推送；其它已有非Grok工作保留。
+
+## 本轮替换前现行字段快照（2026-10-20；全部为历史输入）
+
+以下逐条保留被本轮前滚字段替代的旧文字；其中“当前”“待审”及97/26等均仅指原记录时点，不定义现行门。
+
+> **docs/development/plan/plan-status.md main row：**
+> | [`plan-20261015.md`](plan-20261015.md) | B（外部Agent traces）+ 横切（Mega2 Agent 历史检索） | 当前 2026-10-20 08:43:28 UTC：H0 R5a真实Claude/Codex双PASS；MTR-91自身双PASS、签名+DCO本地提交`3723200180b914f20af7152968438009cac373fe`已核，source-qualified；MTR-01本轮A/B已核、in-progress/locally-accepted，自身ER05及两仓精确本地提交待取得，之后才放行MTR-38。91/01均未C/D完成；Libra已原生快进141de9ab，LTR-10仍等H1/LIVE。 历史： 前滚待H0；Mega2 MTR-91/MTR-38 pending，Libra LTR-10 pending/缺H1；FIX3/LTR-00延后 | 当前 2026-10-20 08:12:36 UTC：H0前滚R1 Claude FAIL/Codex PASS、R2 Claude PASS/Codex FAIL、R3/R4 Claude FAIL/Codex PASS；谓词计数/具名C/D与精确提交方法修订后待现行冻结输入真实双审；Mega97/活动96、Libra26/活动25；MTR-91→01（均no-release；Mega侧C/D38，01的Libra治理文档C/DLTR-01；两仓精确签名本地提交先交、不提前push）→38→11→40→13→39→92→12/H1→LTR-10→11→12→01。LTR-10直接依H0/H1/WRITERS/LIVE，当前缺H1；逐卡目标写集串行，完整验收/小家族C/D不减。MTR-92承接真实HTTP v0/v2/SSH discovery、scope/server_id及授权不泄漏黑盒门；91不提交契约。LTR-01真实C/D后root回填Mega MTR-01的Libra侧收据；后续上游原生rebase后重核。历史 2026-10-20 07:20:41 UTC：Libra main=origin/main=6003a0c，取消前 source pin 三行漂移、旧静态脚本 exit1；FIX3/LTR00 验收取消，引用方继续阻塞，替代依赖待两仓双审。历史 2026-10-20 06:36:12 UTC：FIX3/LTR00 验收取消，DEFER-TR-FIX3-AC/DEFER-LTR-06；两卡 blocked/空、引用方不自动解锁，替代依赖待两仓双审。历史 2026-10-20：Libra `e24c2d4`、Mega2 本地 `74ce530d`，Mega2 远端 SSH fetch 未核实；原 C2 材料不存在，停止原件诊断；R15/R16/R17 双 FAIL 均保留；R18 冻结输入治理修订 Claude/Codex 双 PASS（仅治理）；Mega2 远端未核实，H0 仍未 PASS；FIX3/FIX4/MTR-01/LTR00 blocked/空，LTR01 未开工。历史 2026-10-20 03:44:17 UTC：Libra `fc56869`、Mega2 `74ce530d`；R13 Claude/Codex 双 FAIL 的 H0 映射旧状态 P1 已前滚，R14 双审待取得；无包 STOP、旧 B8/3+8 与 FIX3/LTR00 blocked 不变。历史 2026-10-20 03:39:25 UTC：Libra `fc56869`、Mega2 `74ce530d`；R12 Claude FAIL/Codex PASS 的旧快照 P1 已修，R13 双审待取得；无包 STOP、旧 B8/3+8 与 FIX3/LTR00 blocked 不变。历史 2026-10-20 03:31:42 UTC：Libra `fc56869`、Mega2 `74ce530d`；R11 旧 `ec77730` 输入双 PASS、无包 STOP；现行 H0 新审待取得，FIX3/LTR00 blocked/空，零新窗。历史 2026-10-20 00:38:10 UTC：Libra `main=ec77730a`、Mega2 `main=74ce530d`；R10 Claude FAIL/Codex PASS：两计划正文 DEP-TR-H0 行仍以旧 R6 为当前的 P1 已前滚，R11 终态由本字节的真实隔离双审输出裁定，不预填 PASS。FIX3 原 B8 FAIL/3+8 STOP 与 C2 原件缺失不变；FIX3/FIX4/MTR-01/LTR-00 blocked/空，LTR-00 AC-3/自身 ER-05 未过、formal 0/26，LTR-01 未开工；零新增诊断/A-B 窗或发布。 历史 2026-10-20 00:34 UTC：新 HEAD `ec77730` 的 49 路径/444 链接静态门通过；R9 Claude FAIL/Codex PASS 的索引与修订历史 P1 已前滚，R10 待双审。FIX3、FIX4、MTR-01 与 LTR-00 仍 blocked/空，零新诊断/A-B 窗；LTR-01 未开工。 历史 2026-10-19 18:34 UTC：新 FIX3 条件治理终态 R6 Claude/Codex 双 VERDICT: PASS（治理范围）；Claude 两项 P2 已具名修正：Libra R5 轮次加“新提案”限定、LTR00 B 静态摘要补 AC-4。旧失败/STOP、零新窗口及所有卡阻塞不变；本次纯文档修订的结论以隔离终态审查输出为准。 历史 2026-10-19 18:30 UTC：新 FIX3 条件恢复治理 R5 Claude/Codex 双 VERDICT: PASS（冻结输入，仅治理）；收据与 H0/LTR00 B 静态限定已前滚记账，终态文档待独立复核。原 C2 包、精确诊断合同、新窗口及交叉写者让出仍缺；FIX3/MTR-01/FIX4/LTR00 blocked/空，无卡验收、提交或发布授权。 历史 2026-10-19 18:25 UTC：新 FIX3 提案 R4 Claude/Codex 双 FAIL；LTR-00 现行 AC-1/AC-2/VER-2 曾写“待 R3”与已发生 R3 冲突，三处已改为不依赖轮次的“现行 H0 待双 PASS”；R5 待审。原 C2 包与精确诊断合同仍缺，零新诊断/A-B 授权，LTR-00 与 FIX3 链 blocked/空。 历史 2026-10-19 18:21 UTC：新 FIX3 提案 R3 Claude FAIL/Codex PASS；Claude P1 为 Libra 生效计划总览仍以旧 18:08 作为当前，已修；审查 R4 待双审。恢复方案仍须原 C2 包与另审精确诊断合同；零新诊断/A-B 授权，LTR-00 与 FIX3 链 blocked/空。 历史 2026-10-19 18:08 UTC：旧 H0 R6 只覆盖原冻结治理输入；新 FIX3 提案联合首轮 Claude PASS/Codex FAIL，索引 P1 前滚修订后待新双审。LTR-00 自身首轮双 FAIL、AC-3 未勾、交叉写者未让出，formal0/26；LTR-01 不开工。历史 2026-10-19 17:39:15 UTC：LTR-00 静态 A/B 候选当时记 in-progress/locally-accepted，已由自身审查否决。历史 2026-10-19 17:33:08 UTC：H0 R5 Claude FAIL/Codex PASS，Mega2 日期索引旧下一卡已修、R6待审。历史 2026-10-19 17:28:37 UTC：H0 R4 Claude FAIL/Codex PASS，Mega2 PT-17 主表旧下一卡已修待R5。历史：2026-10-19 17:21:59 UTC：H0 R3 Claude FAIL/Codex PASS，Mega2四P1已前滚修订待R4；FIX3/MTR-01/FIX4 blocked/空，其他27张已发布依赖后继及MTR-10 blocked/complete，LTR-00 blocked/空。历史：2026-10-19 17:12:48 UTC：H0 R2双FAIL修订后待R3；FIX3/MTR-01 blocked/空，其他27张已发布依赖后继及MTR-10 blocked/complete；LTR-00 blocked/空。历史：2026-10-19 17:00:10 UTC：H0首轮 Claude/Codex 双FAIL；FIX3原AC-1/VER-5未证，已发布链前滚阻断；LTR-00本轮合同hash/owner待重验，formal0/26。历史：2026-10-19 16:49:57 UTC：Libra main=`cbee959c`，Mega2 MTR-10 `v0.42.56` C 已完成、tag Docker D 运行中；当前 H0 联合双审待取得，LTR-00 formal0/26，LTR-01 未开工。历史：2026-10-19 15:38:49 UTC：Mega2 G-13 已退出，FIX-MTR-03/01 分别完成独立发布；FIX-MTR-04 不发布。旧 B8 FAIL、8/8 STOP 及 FIX-MTR-03 AC-1/VER-5 未勾选保持历史。MTR-87 `v0.42.55` Docker D 成功；MTR-10 四项专有 VER 通过，Git 协议 smoke 与双审仍待，本卡完整 C/D 未完成。Libra 合并候选保留 handoff 两笔文档提交及上游 COV/OG，当前 H0 尚未取得 PASS，待最新两仓联合复审；LTR-00 formal 0/26、LTR-01 未开工。原交接见[WIP 交接段](plan-20261015.md#wip-migration-checkpoint-20261016)。 |
+
+**Traces治理修稿（2026-10-20 11:34:32 UTC）：** 107/26 R1真实Claude/Codex均FAIL，历史P2处置与逐commit checkpoint保护两P1分别归93的17/17验收和新增101。当前108/26、联合134，前沿仍为新H0及MTR01增量自身双审；101在98之后99/11之前独立patch完整C/D。Libra不提前push，旧取消/FAIL/STOP保持。
+
+**Traces治理R2事实收据（2026-10-20 11:49:57 UTC）：** 108/26治理H0与MTR01无代码增量自身ER05均获真实Claude及隔离Codex `VERDICT: PASS`，两方exit0、P0/P1=0，20项冻结输入前后同一。manifest SHA256 `615225e47c3dbcc420a88a254e5d7bd7f721be150d190c0655be5529fb6b1924`；Claude raw SHA256 `4a7f3e187ef440c6fcaaf652d7661c6ea3bcfde1f9feddfd0b3f25981d533dba`；Codex attempt2 final SHA256 `1406f660fbec3166125e4eb206394f2ac1f609ac6b2a9869c4b59b0173a4d14d`。原件 `/tmp/traces_108_review_r2_20261020/`；进程终态、首次网络exit1/无verdict、root三P2处置及当前源CLI aa2e6213绑定限制详见[日期计划R2收据](plan-20261015.md#10826治理r2真实双pass与事实处置2026-10-20-114957-utc)。101 ER02明确old-tip baseline，超I先ER03；93若具名无显式P2消费条款的owner，先触发该卡ER03；Mega事实记录同步R1全部六P2。两仓精确signed+DCO本地amendment及验签待root、93未验收；仅当前事实增量，不冒称原冻结字节。新Mega治理C/D=94，Libra三文档C/D=LTR01；LTR10等H1/WRITERS/LIVE，LTR01家族唯一发布点、不提前push，Worktree/网站冻结、旧取消/FAIL/STOP保持。
+
+**Traces后置事实同步（2026-10-20 12:05:48 UTC）：** MTR01治理amendment已精确signed+DCO本地提交：Mega `a077fe65dfe0dbd1becfe5432e28c871827dd9cb`、Libra `c2c76b3e1f926ebfaa8dd3d276b564adbbeecf3b`，两方GPG exit0/VALIDSIG、唯一DCO1、未push。原件 `/tmp/traces_108_amendment_commit_20261020/receipt.json` SHA256 `d76fbdb61e3d9ea554c42b1c465698e1560788a2c9222978ef1218d3d932090e`；当次CLI分别2500c5a0/aa2e6213，完整路径/版本/hash见[日期计划事实收据](plan-20261015.md#mtr01签名提交与mtr93来源审计事实同步2026-10-20-120548-utc)。MTR93正式17AC/VER核验记录SHA256 `accc11a23054cb3dcd45333ba1805f8a3d858666b308bc847dd37d2ec7fceab0`，v4来源核验SHA256 `361d8add8e0fe1869979f795874045266e3e7f353b4f156cf097b53eaef5cc32`，53项root处置SHA256 `7b875614083bf6432f6f9c41a36fbbaf71f0ec37ad3559224e9cf7ed67bfe33a`；93自身B/ER05及signed source提交待，只提出94/100拒绝路径受限资格候选。47 rebind与06 move恢复风险继续阻塞95及后继identity消费，须ER03具名处理，FIX06单独完成不够。此三文档是MTR01后置事实独立写集，非MTR93 Mega I；额外事实审查与精确本地提交待root。新Mega治理C/D=94、LibraC/D=LTR01；LTR10等H1/WRITERS/LIVE，发布冻结和全部历史记录保持，无push。
+
+
+## Libra环境恢复R4终态索引
+
+**当前Libra环境资格（2026-10-20 16:33:49 UTC）：** 独立ENV-LTR-UPSTREAM-022 R4真实Claude/Codex三项均PASS后，唯一受控022恢复已结束：focused16/16、full10636/10636（43slow、21既有ignored）、network3/3，三门及root协调器均exit0；2244冻结输入至终态逐项相同。仅选定上游e4d843d整合树的本机环境资格PASS；root新观察远端main已到e3eaff1ac3fee92be0ad83f8db21062f98d8b2d0，尚未fetch/整合/复验，不称最新上游通过；旧0002的16项各三次FAIL、旧恢复审查FAIL及STOP全部保留。源码未改，LTR00验收仍取消，H1/WRITERS/LIVE及LTR01完整C/D仍未满足，正式完成0/26不变。Mega94一次120分钟完整C总窗口已由用户授权，失败STOP且旧预算不重置；C3预算v3真实Claude/Codex各三项PASS后，已于2026-10-20 16:36:57 UTC启动原一次窗口；完整C仍运行中，未称通过。本次三文档后置新字节另作B/真实双审，尚未提交或推送；[完整终态与限定范围](plan-20261015.md#libra独立环境恢复r4实际终态与后置文档记账)。
+
+恢复原件 `gates.json` SHA256 `3ef9a5103e5867724244fc8807c574b8cdbf77f84f7c7f535db07c089c2c4a63`；原0002 full exit100和16项各三次FAIL、旧审查FAIL/STOP均保持。[具体命令、审查/raw/JUnit hash、21ignored和继承边界](plan-20261015.md#libra独立环境恢复r4实际终态与后置文档记账)以日期计划为准。此次三文档新字节不借既有full或R4许可宣称自身提交Review已过。
+
+**历史主表快照（本次事实更新前）：**
+
+> | [`plan-20261015.md`](plan-20261015.md) | B（外部Agent traces）+ 横切（Mega2 Agent 历史检索） | MTR-38/MTR-91已done/complete；MTR-01的Mega旧输入已获C/D、Libra三文档仍待LTR-01，整卡未完成；LTR-10仍pending/缺H1与LIVE；实施中/待H1 | Mega2总108/活动107；Libra总26/活动25、正式完成0/26、活动正式完成0/25；联合总134/活动132。本轮H0及MTR01增量自身ER05已R2真实双PASS，两仓本地amendment及验签已完成；93已正式核17AC/17VER，自身B已PASS，ER05与signed source提交待；`MTR-38完整C/D → 本轮治理H0双审 → MTR-93自身A/B+双审+签名本地source-qualified → MTR-94完整C/D（覆盖93）→ MTR-100完整C/D → FIX-MTR-06完整C/D → MTR-95 → MTR-96 → MTR-97 → FIX-MTR-07完整C/D → MTR-98 → MTR-101 → MTR-99 → MTR-11 → MTR-40 → MTR-13 → MTR-39 → MTR-92 → MTR-12/H1`；客户端LTR10→11→12→01仍等H1/WRITERS/LIVE。93含87后续来源；93～101实现与11/39/92真实wire不能提前等同H1。root整合来源HEAD `3433d7703752a581355293ec2d361a09b232e2c4`，上游 `5f0e80823b6994575af33eacf9946df55bcc6648`；MTR01既有治理提交已重签、本轮增量自身ER05已双PASS、精确signed+DCO本地提交c2c76b3及验签已完成，后置事实收据本地提交待root，C/D=LTR01，不提前push；47 rebind与06 move恢复风险仍阻塞95及后继identity消费，须ER03具名处理，FIX06单独完成不够。 |
+
+## 2026-10-20T16:56:43.319120+00:00 后置状态
+
+已原生整合选定最新远端3b1200a80e00e8d1a8866ab07aa790c27f8a17a9（含e3eaff1源码变更），本地HEAD 3eec95934e5862f2528c6fb181fcd5da3b7a4ab3；5本地文档提交逐条重放重签、DCO/GPG核同，源与上游相同仅3计划文档本地差异。版本四面0.30.69；新CLI/新树完整资格待，不继承旧10636集合。原e4d树022恢复16/full10636/network3真实PASS及后置双审签名870aec0保留为历史选定树资格。未push/tag/Release/D，H1/LIVE/LTR01仍待。
+
+Mega94原一次120分钟C3已FAIL/STOP并消费claim：fmt/clippy0、lib1349PASS/1337FAIL/3ignored，build未到；源码/A-B/R2双PASS保留，blocked/locally-accepted。新C4仅修正执行启动资源parity，实际15类入口/每gate child限制拒绝门，另一次7200秒候选，真实双审与新用户授权待；不自动重跑、不重用剩余时间，旧C2因果仍未证。
+
+完整ER03、新源资格门与无授权C4条件方案见[日期计划](plan-20261015.md#upstream-c3-stop-20261021)。正式完成仍0/26、活动0/25，未push/发布。
+
+## 新上游资格实际终态（2026-10-20T18:09:42.087157+00:00）
+
+选定上游`3b1200a80e00e8d1a8866ab07aa790c27f8a17a9`、本地验收HEAD`3eec95934e5862f2528c6fb181fcd5da3b7a4ab3`、版本0.30.69的新树首次资格已实际结束：fmt/clippy/CLI build/full/network均exit0，full 10658项、network 3项终态通过；21既有ignored不计通过。full保留1次失败重试事件、1次重试后通过，不称全程零失败；Cargo依赖proc-macro-error2 v2.0.1 future-incompat警告保留，不称零警告。本次仅资格与MTR01三文档事实跟进，最终三文档自身B/双审/精确signed+DCO本地提交待；H1/LIVE/WRITERS及Worktree冻结、LTR01唯一发布点不变，正式完成仍0/26，无push/tag/Release/CI-D。
+
+Mega94仍blocked/locally-accepted，源码/A-B/自身R2双PASS保留；原C3一次120分钟已FAIL/STOP并消费claim，full lib1349PASS/1337FAIL/3ignored，后续targets/build/build-tests未到，历史C2原因未证。新C4恢复方案实际Claude/Codex各3项PASS、P0/P1=0、root13项P2具名处置；新一次120分钟授权待；不执行C4。不重用原C3剩余时间，不重置FIX3/LTR00原3/3诊断与8/8 A/B STOP/取消。93→94→100及跨仓H1仍阻塞。
+
+计数、逐门UTC/exit/原始SHA与重试/警告处置见[日期计划的实际终态登记](plan-20261015.md#upstream-qualification-20261021)。
+
+### 本次更新前的历史索引快照（保留，不作当前状态）
+
+```text
+| [`plan-20261015.md`](plan-20261015.md) | B（外部Agent traces）+ 横切（Mega2 Agent 历史检索） | 当前C4本地五门通过，2979/0/3、20目标，0.42.58；最终输入审查/签名提交/发布C-D待，93覆盖与100前驱仍未解除；Libra10658/network3与本地signed2332823已核，H1/LTR01仍待。 以下为历史阶段快照： 环境资格PASS；计划实施中/待H1；LTR10 pending，正式完成0/26、活动0/25 | 选定e4d843d→本地e2509aa，原4文档提交精确重放/重签；独立ENV恢复R4真实双PASS后focused16/16、完整full10636/10636（43slow、21既有ignored）、network3/3，均exit0、2244输入同一。源码未改，COV/OG/MX保留。MTR38/91已done/complete；93自身B/ER05及signed2320e95已核，仅94/100来源资格，C/D94待；94最终C/D仍未闭合。MTR01本仓三文档后置新字节自身B/双审/签名提交待，C/D=LTR01、不提前push；LTR10→11→12→01仍等H1/WRITERS/LIVE与Worktree发布边界。总108/26、活动107/25不变；47 rebind与06 move风险仍阻塞后继identity消费。详见[实际终态与限制](plan-20261015.md#libra独立环境恢复r4实际终态与后置文档记账)；本环境结果不是卡验收、发布或历史C2根因证明。 |
+```
+
+### 新上游资格后置文档审查与剩余项（2026-10-20T18:25:37.046924+00:00）
+
+R1真实Claude/Codex各两项PASS、exit0、P0/P1=0；root修复稳定锚点/修订行及精确本地提交防护，新字节须R2实际双审。唯一flaky及future-incompat警告由root与LTR-01执行者具名承接，在LTR-01完整C/计划最终全量门重新核验，本记录不授豁免或额外诊断。提交前快照、R1原始报告与后续事实同步责任见[日期计划P2处置](plan-20261015.md#qualification-r1-disposition-20261021)。无新源码、卡/依赖/版本或发布变更，正式完成0/26保持。
+
+<a id="mtr94-c4-local-gates-20261021"></a>
+
+## MTR94 C4本地五门实际终态与提交前事实同步（2026-10-21T03:14:24.621527+00:00）
+
+MTR94源码/A-B及自身R2真实双PASS保留；新授权C4一次120分钟已实际执行，0.42.58最终源码树五门均exit0、编译0警告/0错误；full20目标2979PASS/0FAIL/3原有ignored、无过滤。窗口2082.320秒，98530输入终态同一，owned host为空/Git容器已停。当前in-progress/locally-accepted；后置文档最终双审、精确签名提交、main/tag/Release和实际D待，未填done/complete。原C2/C3 FAIL/STOP、消耗claim及历史C2原因未知保留；不复用剩余时间。
+
+Libra选定上游3b1200a、本地2332823f1a2841a4e3121b164965dea25dea98fc/0.30.69；新树fmt/clippy/CLI build/full10658/network3实际exit0，21原有ignored、1 flaky与proc-macro-error2 future-incompat警告保留；后置三文档最终R2真实双PASS，signed+DCO2332823及精确3路径/签名已核，仅本地。此次两仓新事实文档另作B/双审；H1/LIVE/WRITERS与Worktree发布冻结不变，LTR01唯一发布点、formal0/26，未push。
+
+本次实际命令、UTC、SHA与限制见[日期计划终态登记](plan-20261015.md#mtr94-c4-local-gates-20261021)。
+
+ER01/02/03：本次只在实际C4终态之后更新既有计划文档写集；代码/配置/测试/版本/协议语义/依赖均不变，134卡/132活动/223边保持。原测试只覆盖其冻结输入，新文档须自身B和实际Claude/隔离Codex最终双审；不把新字节倒记为旧测试或旧PASS。最终发布仍串行，MTR94精确signed+DCO/main/标注v0.42.58/人工Release/实际D均须另核；Libra仅精确本地文档提交，C/D由LTR01承载，不提前push。93→94→100与H1/client前驱保持；FIX3/LTR00取消、3/3诊断和8/8 A/B STOP、G13退出与所有旧失败不变。
+
+当前为提交前快照。root具名负责在实际最终双审、提交、推送和D之后按真实终态事实同步，不以候选或文件存在当完成；若远端变化，先精确整合并按变更范围复验，不force或搬运扩大其它发布权限。
+
+### 本次覆盖前的带日期历史页首（原事实保留）
+
+> **历史资格终态（2026-10-20T18:09:42.087157+00:00）：** 选定上游`3b1200a80e00e8d1a8866ab07aa790c27f8a17a9`、本地验收HEAD`3eec95934e5862f2528c6fb181fcd5da3b7a4ab3`、版本0.30.69的新树首次资格已实际结束：fmt/clippy/CLI build/full/network均exit0，full 10658项、network 3项终态通过；21既有ignored不计通过。full保留1次失败重试事件、1次重试后通过，不称全程零失败；Cargo依赖proc-macro-error2 v2.0.1 future-incompat警告保留，不称零警告。本次仅资格与MTR01三文档事实跟进，最终三文档自身B/双审/精确signed+DCO本地提交待；H1/LIVE/WRITERS及Worktree冻结、LTR01唯一发布点不变，正式完成仍0/26，无push/tag/Release/CI-D。
+> **历史跨仓阻塞：** Mega94仍blocked/locally-accepted，源码/A-B/自身R2双PASS保留；原C3一次120分钟已FAIL/STOP并消费claim，full lib1349PASS/1337FAIL/3ignored，后续targets/build/build-tests未到，历史C2原因未证。新C4恢复方案实际Claude/Codex各3项PASS、P0/P1=0、root13项P2具名处置；新一次120分钟授权待；不执行C4。不重用原C3剩余时间，不重置FIX3/LTR00原3/3诊断与8/8 A/B STOP/取消。93→94→100及跨仓H1仍阻塞。
+
+
+<a id="mtr94-publication-20261021"></a>
+
+## MTR94实际提交、发布与远端门登记（2026-10-21T03:43:53.672324+00:00）
+
+MTR94 v0.42.58完整C/D已核、done/complete；93继承精确94覆盖而done/complete（来源限94/100）；01仅Mega覆盖完成、Libra仍待LTR01。Docker双架构/manifest及Harbor实际success。Libra本地signed b157396、未push，H1/LTR01仍待；100未开工，下一步重核ER01/02/03。
+
+> **历史D待定阶段：** MTR94源码/A-B、自身R2及C4后置最终真实Claude/Codex双PASS已核；C4五门exit0、编译0警告/错误，full2979通过/0失败/3原有ignored（20目标）。精确13路径signed+DCO提交`04c42e10ba88ed45b830d509407d5732f4f17845`已推main；标注`v0.42.58`及人工Release已核。版本Docker run39539957757与main Harbor run39539882313均已触发，最后观察运行中，D尚待；94为in-progress/remote-pending，93覆盖及100前驱未闭合，100未开工。
+
+
+Libra选定上游`3b1200a80e00e8d1a8866ab07aa790c27f8a17a9`、0.30.69资格保留：full10658与network3实际PASS，21原有ignored、1 flaky及future-incompat警告不隐去；三份计划文档精确signed+DCO提交`9314a17348aceb0c631139715fd213ead73ed90c`已验签，仅本地未push。H1/LIVE/WRITERS与Worktree发布冻结、LTR01唯一发布点均不变，formal0/26。
+
+具体签名、双审、发布原件、D事件映射及P2处置见[日期计划发布登记](plan-20261015.md#mtr94-publication-20261021)。
+
+
+<a id="mtr94-d-complete-20261021"></a>
+
+## MTR94实际D闭环与来源覆盖（2026-10-21T04:02:51.712358+00:00）
+
+MTR94源码/A-B及自身真实双审、C4五门（2979通过/0失败/3原有ignored）、signed04c42e1、main/标注v0.42.58/人工Release已核；版本Docker run39539957757的amd64/arm64/manifest三job全部success，main Harbor run39539882313亦success。root于2026-10-21T04:00:24.847557+00:00重新取得原始API并核同提交/ref/Release。94现done/complete；93原signed2320e95精确树获94 C/D覆盖，done/complete，来源资格仍仅94/100拒绝路径；01本增量Mega覆盖已取得，Libra侧仍待LTR01，整卡不done。MTR100仍pending，须重新ER01/02/03后开工；本次D事实文档自身B/双审及精确提交待，不倒记为版本预发布字节。
+
+Libra选定上游3b1200a/0.30.69，full10658/network3资格已核，21既有ignored、1 flaky、future-incompat警告保持；已签名本地文档checkpoint b157396f5c1aacbbaf5071b23ef34d9184f968e6（父9314a17），未push。H1/LIVE/WRITERS与Worktree冻结、LTR01唯一发布点不变。Mega正式完成4/108（活动4/107），Libra0/26（活动0/25）；其余旧blocked不批量改判。
+
+完整D原件、精确来源覆盖与P2处置见[日期计划D闭环登记](plan-20261015.md#mtr94-d-complete-20261021)。
+
+
+## MTR100开工与MTR94终态交接（2026-10-21T04:23:33.853724+00:00）
+
+MTR94完整C/D及最终D事实双审已核；Mega文档收口c52bf4a已推main，Libra对应signed e938c05仅本地。93/94 done/complete，01仅Mega侧覆盖，Libra仍待LTR01；MTR100于2026-10-21T04:22:24.959231+00:00完成ER01/02/03，现in-progress/空，准备实现disabled SSH拒绝。5AC/1VER未验收、自身双审与独立patch完整C/D未执行；不开放enabled数据面，不重启旧FIX3/LTR00或C4窗口。
+
+详细来源、原件与边界见[日期计划](plan-20261015.md)。
+
+## MTR100初始C实际失败与停止边界（2026-10-21）
+
+MTR100初始完整C已实际FAIL/STOP：controller session21819 exit1，fmt/严格clippy exit0；原`source .env.test && cargo test --all` exit101，已到5目标合计2775通过/1失败/3原有ignored/0过滤，后续目标及双build未执行。失败为`delete_entry_reject_traversal_400`夹具seed阶段Git clone连接本地41555端口被拒绝，未到400业务断言，服务退出/端口归属原因尚未证明。一次120分钟claim已消费（1416.872秒），不自动重跑或复用余时；0.42.59已bump而未提交/推送/tag/Release/D。卡现blocked/locally-accepted，原A/B及R4源码/执行器双PASS保留其限定输入，不覆盖C失败。DEBT open、FIX06未开工，Libra仍本地e938c05，H1/LTR01边界不变。
+
+- 原始C收据 `/tmp/mtr100_c_initial_actual_20261021/receipt.json`；原日志 `full-test.log` SHA256 `fedbc38f1107ddfb341565bd7eccda8dfdf96a84457c67ed487ea2127e85957a`；真实工具退出 `/tmp/mtr100_C_actual_tool_terminal_20261021.json`，root绑定 `/tmp/mtr100_c_failure_root_audit_20261021/root-process-terminal.json`。库目标2688/0/3，main0/0/0、辅助bin7/0/0、agent-capture8/0/0，api-write-trunk72/1/0；不能把未到目标或A专项通过补为C通过。
+- R4真实Claude/隔离Codex均两项PASS，actual session4094 exit0，632输入manifest `c53ade4f2c73ca016fc328e7ce9c25dd3c3be7cffb135d6bd1e7c2e71e3c60f0`；明确认证v6 SHA `6e780b8066286fd815c72782d7ea67a41a3238965e565b16d9f0696a6f8566ae`及v2合同。新Entry3 actual session21764 exit0，经工具链把自身版本58→59，原两个入口STOP/R2执行器FAIL原件保留；新入口未复用过期网络恢复额度。
+- Entry/C父环境全hash核同；仅恢复已证实的工具基础设施metadata CODEX_TOOL_CALL_ID/SHLVL，实际外层工具身份另存 `/tmp/mtr100_C_launch_outer_20261021.json`；不修改Rust flags、测试线程、构建并发、超时或过滤。SSH443适配仅用于原生远端查询子进程，不进入产品C环境。相关原件 `/tmp/mtr100_launch_env_reconciliation_20261021/receipt.json`。
+- root失败后只读核验：C输入before=after，1636项launch manifest全部原hash相同；版本仍0.42.59；工具链三项实际版本输出与入口相同。原件 `/tmp/mtr100_c_failure_root_audit_20261021/receipt.json` 及 `toolchain-after/receipt.json`。这是失败证据完整性核验，绝非验收PASS或新运行授权。
+- 控制器host清理记录remaining_owned为空、leader101；三个共享容器最后观测healthy且ExecID空，但控制器仍记录shared_daemon_external_requests_unresolved=true。有限观测不能宣称整个Docker daemon恢复或撤销全部OCI请求。未对共享容器执行stop/restart；后续任何运行须重新建立具名环境资格。
+- ER03/ER10处理：root只读审查已有原件及服务启动/端口/seed调用链；当前没有同源服务生命周期因果材料，不凭类似旧MTR94失败断言根因，不把夹具连接失败塞进SSH拒绝行为轴。新诊断/修复方案须先具名登记I/R、真实oracle、尝试次数、总预算与清理边界并真实双审；需要新增执行窗口时另获明确授权。本段不启动任何新诊断或测试，不重开FIX3/LTR00、MTR94 C4或本次已消费claim。
+- 当前可执行前沿仅MTR100失败归属/恢复资格。MTR100完整C/D→FIX06→后续95及身份风险前置；未解除95的move/rebind P2，也未跳过Libra H1/LTR01。正式完成仍Mega4/108、Libra0/26。七份计划此次仅据真实失败写回，新文档字节不倒记为被本轮C验收；失败事实/关联停止边界的独立双审待。
 
 **2026-10-19 Codex主线恢复：** 用户授权仅继续Codex采集；Grok独立修复已签推，后续由其它Agent开发，不消费其未提交修改。CX-00 probe已合并至主计划并删除独立文件；CX-15 ordinary retention保持本机未提交，正式0/59、真实thinking UNRUN。当前在main 2d06c88/0.30.65复验CX-15本机23+11项，按同一继续授权启动CX-01的12-event缺口；必要8生产文件/3落点与append-only TurnInterrupted及provider纯kind匹配已在主计划预登记。Codex新/修订测试继续feature+ignored，不入CI，不提交/推送/发布。
 

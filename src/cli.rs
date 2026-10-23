@@ -1039,6 +1039,17 @@ fn rewrite_short_number_args(
     args: Vec<std::ffi::OsString>,
     command: &str,
 ) -> Vec<std::ffi::OsString> {
+    rewrite_short_number_args_to(args, command, "-n")
+}
+
+/// Rewrite Git's `-<n>` numeric shorthand (`log -3`, `format-patch -3`) into
+/// `<target_flag> <n>`. `log`/`reflog` consume it as `-n <n>`; `format-patch`
+/// uses its own hidden `--last-n`.
+fn rewrite_short_number_args_to(
+    args: Vec<std::ffi::OsString>,
+    command: &str,
+    target_flag: &'static str,
+) -> Vec<std::ffi::OsString> {
     // Detect the real subcommand position to avoid rewriting positional args for other commands.
     let subcommand = find_subcommand_index(&args);
     let Some((log_index, from_double_dash)) = subcommand else {
@@ -1079,7 +1090,7 @@ fn rewrite_short_number_args(
         // passes through untouched rather than being lossily inspected.
         match arg.to_str() {
             Some(text) if is_short_number_flag(text) => {
-                out.push(std::ffi::OsString::from("-n"));
+                out.push(std::ffi::OsString::from(target_flag));
                 out.push(std::ffi::OsString::from(&text[1..]));
             }
             _ => out.push(arg),
@@ -3301,6 +3312,9 @@ fn reject_unsupported_single_dash_control(utf8_argv: &[String]) -> CliResult<()>
 async fn parse_async_scoped(argv: Vec<std::ffi::OsString>) -> CliResult<()> {
     let argv = rewrite_short_number_args(argv, "log");
     let argv = rewrite_short_number_args(argv, "reflog");
+    // `format-patch -<n>` is Git's "last n commits" shorthand (the same numeric
+    // form `log -<n>` uses); it rewrites to the hidden `--last-n <n>`.
+    let argv = rewrite_short_number_args_to(argv, "format-patch", "--last-n");
     let argv = rewrite_index_pack_progress_args(argv);
     let argv = rewrite_reset_pathspec_separator_args(argv);
     let argv = rewrite_show_pathspec_separator_args(argv);

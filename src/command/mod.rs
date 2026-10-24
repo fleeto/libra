@@ -150,6 +150,7 @@ pub(crate) mod status_probe;
 pub(crate) mod status_untracked;
 pub(crate) mod status_untracked_paths;
 pub mod switch;
+pub mod ui;
 pub mod upgrade;
 pub mod write_tree;
 

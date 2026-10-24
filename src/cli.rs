@@ -63,6 +63,7 @@ Command Groups:
   Remote And Cloud        remote, fetch, pull, push, open, cloud, cache, credential, bundle, auth, login, logout, whoami, mega2
   AI And Automation       automation, memory, sandbox, agent, review, investigate, service
   Maintenance And Plumbing fsck, gc, maintenance, repack, logfile, upgrade, cat-file, hash-object, write-tree, read-tree, update-index, update-ref, merge-file, merge-base, apply, mailinfo, diff-tree, diff-index, diff-files, fast-export, fast-import, replace, verify-pack, count-objects, rev-parse, rev-list, symbolic-ref, reflog, bisect, for-each-ref, commit-tree, file, alternates, deps
+  Desktop                 ui
 
 Help Topics:
   error-codes  Print the stable CLI error code table (`libra help error-codes`)
@@ -403,6 +404,11 @@ enum Commands {
         after_help = command::upgrade::UPGRADE_EXAMPLES
     )]
     Upgrade(command::upgrade::UpgradeArgs),
+    #[command(
+        about = "Open the Libra desktop window (Libra extension)",
+        after_help = command::ui::UI_EXAMPLES
+    )]
+    Ui(command::ui::UiArgs),
     #[command(
         about = "Inspect the tiered-storage / LRU cache configuration",
         after_help = command::cache::CACHE_EXAMPLES
@@ -1301,6 +1307,20 @@ fn reset_flag_takes_separate_value(arg: &str) -> bool {
     )
 }
 
+/// A bare `libra ui` (global flags allowed before the subcommand, nothing after it).
+///
+/// `libra ui --help` is left for clap. The process entry point uses this to
+/// open the window on the main thread instead of the CLI worker thread.
+pub fn ui_window_launch(args: &[std::ffi::OsString]) -> bool {
+    let Some((index, _)) = find_subcommand_index(args) else {
+        return false;
+    };
+    let Some(name) = args.get(index).and_then(|arg| arg.to_str()) else {
+        return false;
+    };
+    name == "ui" && args.len() == index + 1
+}
+
 /// Locate the first non-flag token in `args` and return its index plus whether it was
 /// produced by an explicit `--` separator.
 ///
@@ -1674,6 +1694,7 @@ fn command_preflight(command: &Commands, structured_output: bool) -> CliResult<C
         | Commands::Completions(_)
         // `logfile` only inspects env-derived tracing configuration.
         | Commands::Logfile(_)
+        | Commands::Ui(_)
         // `upgrade` manages the INSTALLED BINARY next to the executable; it
         // never reads or writes repository state and works outside a repo.
         | Commands::Upgrade(_)
@@ -2055,6 +2076,7 @@ fn command_scope(command: &Commands) -> CommandScope {
         Commands::Status(_)
         | Commands::Log(_)
         | Commands::Logfile(_)
+        | Commands::Ui(_)
         | Commands::Upgrade(_)
         | Commands::LsFiles(_)
         | Commands::LsTree(_)
@@ -3611,7 +3633,7 @@ async fn parse_async_scoped(argv: Vec<std::ffi::OsString>) -> CliResult<()> {
     // Agent hook entries are exempt too (issue #502) and were dispatched
     // above: a host-invoked callback must stay within its timeout and must
     // not touch the install directory, which may be mounted read-only.
-    if !schema_doctor && !matches!(args.command, Commands::Upgrade(_)) {
+    if !schema_doctor && !matches!(args.command, Commands::Upgrade(_) | Commands::Ui(_)) {
         run_auto_upgrade_check_hook();
     }
 
@@ -3693,6 +3715,7 @@ async fn parse_async_scoped(argv: Vec<std::ffi::OsString>) -> CliResult<()> {
             Commands::Upgrade(cmd_args) => {
                 command::upgrade::execute_safe(cmd_args, &output).await?
             }
+            Commands::Ui(cmd_args) => command::ui::execute(cmd_args)?,
             Commands::Cache(cmd_args) => command::cache::execute_safe(cmd_args, &output).await?,
             Commands::Layer(cmd_args) => command::layer::execute_safe(cmd_args, &output).await?,
             Commands::File(cmd_args) => command::file::execute_safe(cmd_args, &output).await?,
@@ -4804,6 +4827,25 @@ mod tests {
     /// accompanying group entry, which would make them invisible in
     /// scenario-grouped `libra --help` output even though they remain
     /// callable.
+    #[test]
+    fn ui_window_launch_accepts_only_a_bare_ui_command() {
+        let launch = |args: &[&str]| {
+            let argv = args
+                .iter()
+                .map(std::ffi::OsString::from)
+                .collect::<Vec<_>>();
+            ui_window_launch(&argv)
+        };
+        assert!(launch(&["libra", "ui"]));
+        assert!(launch(&["libra", "--no-pager", "ui"]));
+        assert!(launch(&["libra", "--json", "ui"]));
+        assert!(!launch(&["libra", "ui", "--help"]));
+        assert!(!launch(&["libra", "ui", "--bogus"]));
+        assert!(!launch(&["libra", "status"]));
+        assert!(!launch(&["libra", "--help"]));
+        assert!(!launch(&["libra"]));
+    }
+
     #[test]
     fn root_after_help_lists_every_visible_command() {
         use clap::CommandFactory;

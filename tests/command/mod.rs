@@ -1147,6 +1147,7 @@ mod switch_test;
 mod symbolic_ref_test;
 mod t4_port_test;
 mod tag_test;
+mod ui_test;
 mod update_index_test;
 mod update_ref_test;
 mod upgrade_cmd_test;

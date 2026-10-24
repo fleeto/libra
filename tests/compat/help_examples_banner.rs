@@ -117,6 +117,7 @@ const VISIBLE_COMMANDS: &[&str] = &[
     "service",
     "revision",
     "auth",
+    "ui",
 ];
 
 #[test]

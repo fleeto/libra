@@ -1,0 +1,35 @@
+# ui 命令开发设计
+
+## 命令实现目标
+
+`libra ui` 在同一个 `libra` 二进制里打开一个桌面窗口。窗口使用 Ely GPUI
+Components（GPUI 快照 `gpui-pre` 0.3.9）。feature `gui` 默认关闭，普通 CLI
+构建不链接 GPU UI。
+
+## 对比 Git 与兼容性
+
+- 兼容级别：`intentionally-different`。Git 无对应命令。
+- 已支持：不带额外参数的 `libra ui`。带 `--features gui` 时在进程主线程打开一个窗口；否则退出 128 / `LBR-UNSUPPORTED-001`，并提示 `cargo build --features gui`。
+- `libra ui --help` 只打印用法，不打开窗口。
+- 不需要仓库。
+
+## 设计方案
+
+- GPUI 的 `Application::run` 必须在进程主线程上调用。`src/main.rs` 在 helper 提前返回和 tracing 初始化之后、启动 `libra-cli` 线程之前，用 `cli::ui_window_launch` 识别裸 `libra ui`（子命令前可以有全局 flag，子命令后不能有参数）。
+- 窗口实现在 `src/gui/mod.rs`，仅 `feature = "gui"` 编译。入口是 `gui::run`。
+- clap 命令始终存在：`Commands::Ui` → `command::ui::execute`。调度器路径不打开窗口。库嵌入（`libra::exec`）走到这里时返回说明，避免在错误线程上启动 GPUI。
+- 预检是 `CommandPreflight::none()`，scope 是 `ReadOnly`。不参与自动升级检查。
+
+## 实现历史
+
+- 2026-10-24：第一扇窗口。Ely 的 `FocusScope`、`Heading`、`Paragraph` 和 `Button`。依赖钉在 Ely `6b0d154dc5c3ec3daf3bf059cc77cd8ed11ba2df` 与 `gpui-pre` `=0.3.9`。
+
+## 当前状态
+
+`libra ui` 打开 Sessions 窗口（浅色默认，可切到深色）。顶栏、会话列表、Overview / Conversation / Changes、搜索和能力地图按 `libra-sessions-v2` 原型交互。数据来自 `src/gui/sessions.json`，是原型里的 8 条演示会话，不读仓库。
+
+## 还未实现的功能
+
+- 把 status、log、diff 接进窗口。
+- 从窗口调用 Libra 库函数，而不是每次新建一个 Tokio runtime。
+- 发布构建是否带 `gui`。当前 release 流水线不启用这个 feature。

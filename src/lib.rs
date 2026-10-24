@@ -21,6 +21,8 @@ pub mod cli;
 pub mod command;
 pub mod common_utils;
 pub mod git_protocol;
+#[cfg(feature = "gui")]
+pub mod gui;
 pub mod internal;
 pub mod lfs_structs;
 pub mod utils;

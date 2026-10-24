@@ -512,6 +512,33 @@ fn run_capture_scope_binding_helper_if_requested() -> Option<i32> {
     Some(0)
 }
 
+/// Open the desktop window, or explain how to build it.
+///
+/// Feature `gui` runs GPUI on this thread. Without it, the process exits
+/// with `LBR-UNSUPPORTED-001` and the rebuild command.
+fn run_desktop_ui() -> i32 {
+    #[cfg(feature = "gui")]
+    {
+        match libra::gui::run() {
+            Ok(()) => 0,
+            Err(error) => {
+                eprintln!("fatal: {error:#}\n\nHint: {INTERNAL_ERROR_REPORT_HINT}");
+                128
+            }
+        }
+    }
+    #[cfg(not(feature = "gui"))]
+    {
+        let err = libra::command::ui::unavailable_error();
+        let argv: Vec<String> = std::env::args_os()
+            .filter_map(|arg| arg.into_string().ok())
+            .collect();
+        let output = OutputConfig::resolve_from_argv(&argv);
+        err.print_for_output(&output);
+        err.exit_code()
+    }
+}
+
 /// Process entry point.
 ///
 /// Functional scope:
@@ -595,6 +622,18 @@ fn main() {
     }
     install_broken_pipe_panic_hook();
     init_tracing();
+
+    // GPUI must run on this thread. A bare `libra ui` never enters the CLI
+    // worker below; `--help` and any other arguments stay on the clap path.
+    let argv: Vec<std::ffi::OsString> = std::env::args_os().collect();
+    if cli::ui_window_launch(&argv) {
+        let exit_code = run_desktop_ui();
+        flush_telemetry();
+        if exit_code != 0 {
+            std::process::exit(exit_code);
+        }
+        return;
+    }
 
     const CLI_STACK_SIZE: usize = 32 * 1024 * 1024;
     let handle = std::thread::Builder::new()

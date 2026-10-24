@@ -444,6 +444,6 @@ Merge aborted.
 
 ## Issue #477 notes
 
-reset 会清除进行中的 merge，并把其 autostash 移入 stash 列表
-普通 commit 会结束进行中的 merge
-冲突标记按命令行原文标注合并目标
+- reset 会清除进行中的 merge，并把其 autostash 移入 stash 列表
+- 普通 commit 会结束进行中的 merge
+- 冲突标记按命令行原文标注合并目标

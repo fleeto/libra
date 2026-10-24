@@ -318,5 +318,5 @@ Cherry-pick revision 使用 sidecar Change ID 投影和类型化 predecessor 谱
 
 ## Issue #477 notes
 
---continue 不会重新提交已在序列外结束的停止项
-冲突标记以缩写提交与主题标注被 pick 的一侧
+- `--continue` 不会重新提交已在序列外结束的停止项
+- 冲突标记以缩写提交与主题标注被 pick 的一侧

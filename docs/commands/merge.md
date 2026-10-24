@@ -575,7 +575,7 @@ Success output keeps the historical `files_changed` numeric field and adds merge
 | Untracked file would be overwritten | `LBR-CONFLICT-002` | 128 |
 | Merge already in progress | `LBR-CONFLICT-002` | 128 |
 | No merge in progress for `--continue` / `--abort` / `--restart` (including after `--squash`) | `LBR-REPO-003` | 128 |
-| Unsupported `merge.conflictStyle` value (e.g. `zdiff3`) when rendering a conflict | `LBR-REPO-003` | 128 |
+| Unsupported `merge.conflictStyle` value (e.g. `bogus`) when rendering a conflict | `LBR-REPO-003` | 128 |
 | Invalid `merge.renormalize` value when a real three-way merge consumes it | `LBR-REPO-003` | 128 |
 | Unresolved conflict stages remain for `--continue` | `LBR-CONFLICT-002` | 128 |
 | Failed to read merge state or index | `LBR-IO-001` | 128 |
@@ -583,6 +583,6 @@ Success output keeps the historical `files_changed` numeric field and adds merge
 
 ## Issue #477 notes
 
-reset clears an in-progress merge and moves its autostash into the stash list
-a plain commit concludes the in-progress merge
-conflict markers name the merge target as it was typed
+- reset clears an in-progress merge and moves its autostash into the stash list
+- a plain commit concludes the in-progress merge
+- conflict markers name the merge target as it was typed

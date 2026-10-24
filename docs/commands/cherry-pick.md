@@ -322,5 +322,5 @@ new commits do not depend on or inject a `change-id` header.
 
 ## Issue #477 notes
 
---continue does not re-commit a stop that was concluded outside the sequence
-conflict markers label the picked side as the abbreviated commit and its subject
+- `--continue` does not re-commit a stop that was concluded outside the sequence
+- conflict markers label the picked side as the abbreviated commit and its subject

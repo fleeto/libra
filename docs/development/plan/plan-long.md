@@ -1,3 +1,7 @@
+> **MTR-97 环境恢复审查通过（2026-10-24）：** 真实本地Claude session36bb023f/exec95192 exit0，对一次C恢复、原代码ER05沿用及H0同步均明确PASS，P0/P1=0；18输入hash核同。仅固定设施与机械0.42.66版本变化，源码/SSOT未改；不表示C或D通过。root接受P2：Libra新事实精确签名本地提交（owner=root/LTR01、不push）；此前未运行的后续target若失败须新证据并STOP（owner=root）；Cargo.lock相对正式前像仅mega2版本一行的实际diff已保存，若1800秒到期记timeout且不重跑（owner=root）。首次64失败及全部旧STOP保留。
+
+> **MTR-97 首次完整C失败及环境恢复（2026-10-24）：** 0.42.66首次完整测试exit101，`integration_git_cli`为3通过/64失败，64项均缺规范`mega2-it/git-cli` runner；此前单元2739/0/3原有ignored、trunk80/80等通过不代全量C。原始日志与SHA保留，无源码改动、无新提交/推送/发布。root按测试基础设施约定恢复规范项目及固定Git/LFS runner，探针通过后只再执行一次原样完整C；若再次失败先保存并停止，不自动重试或降低门。原正式Claude代码/H0 PASS仅绑定原输入，环境恢复与新事实待真实本地Claude复核；Libra治理仍仅本地，LTR01/H1前不push。
+
 > **MTR-97 正式单审既成事实（2026-10-24）：** 本地Claude exec34487/exit0，对代码ER05及两仓H0同步均明确PASS，P0/P1=0；输入实际hash核同。Mega进入0.42.66完整C，产品发布/D尚待。当前只提交已审三治理文档，不改本仓版本/源码，不在LTR01/H1前push；该既有C/D承载与Libra0/26、LTR00取消保持。审查原件 `/tmp/mega2-mtr97-formal-20261024-r1/`，当前完成不得由仅Review或后续推送推断。
 
 > **MTR-97 正式审查前同步（2026-10-24）：** Mega新树A/B实际admission12/12、PACK9/9、ingest6/6及fmt/strict clippy通过；Libra fmt/strict clippy退出0，保留proc-macro-error2既知future-incompat提示。依用户最新指示，后续用真实本地Claude单审，不再隔离Codex；此前代码预审PASS仅旧输入，P2-1/2/3/5已修复复测，P2-4由root具名限域接受给11/12前置消费，P2-6是G03分子/上限表示而非错误。当前正式ER05、版本bump与完整C/D待，MTR97为locally-accepted。三治理文档仅本地签名提交准备，不提前push；Libra0/26、LTR00取消及LTR01/H1唯一发布边界不变。详情见[Mega日期计划](../../../../mega2/docs/plan/plan-20261015.md)与[SSOT](../../../../mega2/docs/refactoring/traces.md)。

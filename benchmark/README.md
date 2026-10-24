@@ -88,3 +88,11 @@ the revision-build path, so it is intentionally as expensive as a release build.
 After building a compatible local binary, use
 `LIBRA_BENCHMARK_TEST_BINARY=/path/to/libra benchmark/test/test-runner.sh` for a
 fast fixture-and-result check.
+
+## 本机 status 三方对比
+
+`bash benchmark/status.sh --installed-libra /path/to/installed/libra --built-libra /path/to/release/libra --git /usr/bin/git --libra-repo /path/to/libra-repo --git-repo /path/to/git-repo --output /tmp/status.json`
+
+Linux 上默认预热 3 次、交错测量 20 次、3 轮；脚本不创建 fixture、不刷新 index。输入仓库需使用可校验的 SHA-1 v2/v3 index。记录二进制、HEAD、tracked 内容摘要和 stat 命中率。命令失败立即拒绝该次测量。子进程警告以字节数和摘要记录，不掩盖执行环境差异。wait4 CPU/context switches 仅覆盖主进程和它已回收的子进程，不能当作完整 worker CPU；独立资源运行同时采样进程树 CPU（内核 tick 精度、可能遗漏退出前尾部）与 RSS；内存在独立非计时运行中每 5 ms 采样进程树 RSS，可能漏掉短峰值，且共享页会重复计数。不得与此前单进程 maxrss 混算。
+
+诊断构建：`cargo build --release --features status-perf --bin libra`；设置 `LIBRA_STATUS_PERF_FILE=/tmp/status-perf.json` 后运行一次 status。文件必须不存在，且仅包含阶段耗时与计数，不记录内容。正常验收须重新使用不带该 feature 的 release；诊断阶段存在嵌套，不可相加当作总耗时。

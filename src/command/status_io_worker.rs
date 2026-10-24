@@ -89,6 +89,265 @@ pub(crate) fn deadline_stat(path: &Path) -> Result<io::Result<CapturedStat>, ()>
     Err(())
 }
 
+#[derive(Debug)]
+pub(crate) struct TrackedProbe {
+    pub(crate) stat: CapturedStat,
+    pub(crate) hash: Option<io::Result<git_internal::hash::ObjectHash>>,
+}
+impl std::ops::Deref for TrackedProbe {
+    type Target = CapturedStat;
+    fn deref(&self) -> &Self::Target {
+        &self.stat
+    }
+}
+type StatResult = Result<io::Result<TrackedProbe>, ()>;
+type PreparedStat = (
+    Vec<u8>,
+    crate::internal::worktree_io::protocol::TrackedStatCheck,
+);
+
+/// Prepare paths on the invocation thread (root sessions are thread-local),
+/// then submit bounded batches. A thread submits one bounded
+/// batch at a time; the existing executor still owns all helper processes.
+// Multiple helpers duplicate mapped/runtime RSS. Start with one; the bounded
+// scheduler supports up to four, but the measured memory budget takes priority.
+const STAT_BATCH_CONCURRENCY: usize = 1;
+
+pub(crate) fn deadline_stats(
+    paths: &[PathBuf],
+    checks: &[crate::internal::worktree_io::protocol::TrackedStatCheck],
+) -> Vec<StatResult> {
+    if paths.len() != checks.len() {
+        return paths.iter().map(|_| Err(())).collect();
+    }
+    use crate::internal::worktree_io::{
+        executor::CancellationToken,
+        protocol::{STAT_BATCH_BYTES, STAT_BATCH_PATHS},
+    };
+    let root = match request_root_bytes() {
+        Ok(root) => root,
+        Err(error) => {
+            return paths
+                .iter()
+                .map(|_| Ok(Err(io::Error::new(error.kind(), error.to_string()))))
+                .collect();
+        }
+    };
+    let prepared: Vec<_> = paths
+        .iter()
+        .zip(checks)
+        .map(|(path, check)| {
+            request_worktree_relative(&root, path, false).map(|path| (path, check.clone()))
+        })
+        .collect();
+    let mut output = Vec::with_capacity(paths.len());
+    let cancel = CancellationToken::new();
+    let hash_kind = current_hash_kind();
+    let root_session = request_worktree_session();
+    let mut offset = 0;
+    while offset < prepared.len() {
+        let mut batches = Vec::new();
+        while batches.len() < STAT_BATCH_CONCURRENCY && offset < prepared.len() {
+            let mut batch = Vec::new();
+            // JSON byte arrays need at most four bytes per path byte.
+            let mut bytes = root.len().saturating_mul(4).saturating_add(128);
+            while offset < prepared.len() && batch.len() < STAT_BATCH_PATHS {
+                let Ok(path) = &prepared[offset] else { break };
+                let cost = path.0.len().saturating_mul(4).saturating_add(1024);
+                if bytes.saturating_add(cost) > STAT_BATCH_BYTES {
+                    break;
+                }
+                bytes += cost;
+                batch.push(path.clone());
+                offset += 1;
+            }
+            if batch.is_empty() {
+                break;
+            }
+            batches.push(batch);
+        }
+        if batches.is_empty() {
+            // An invalid/oversize individual path must not stall the suffix.
+            let result = match &prepared[offset] {
+                Err(error) => Ok(Err(io::Error::new(error.kind(), error.to_string()))),
+                Ok((path, check)) => {
+                    let mut result = submit_single_stat(&root, path, &cancel);
+                    if let Ok(Ok(probe)) = &mut result {
+                        if check.needs_hash(&probe.stat) {
+                            probe.hash = Some(
+                                match deadline_file_blob_hash(&paths[offset], &bytes_to_path(&root))
+                                {
+                                    Ok(hash) => hash,
+                                    Err(()) => Err(io::Error::new(
+                                        io::ErrorKind::TimedOut,
+                                        "tracked file hash timed out",
+                                    )),
+                                },
+                            );
+                        }
+                    }
+                    result
+                }
+            };
+            output.push(result);
+            offset += 1;
+            continue;
+        }
+        if batches.len() == 1 {
+            if let Some(batch) = batches.pop() {
+                output.extend(submit_stat_batch(
+                    &root,
+                    batch,
+                    &cancel,
+                    &hash_kind,
+                    root_session,
+                ));
+            }
+            continue;
+        }
+        std::thread::scope(|scope| {
+            let handles: Vec<_> = batches
+                .into_iter()
+                .map(|batch| {
+                    let count = batch.len();
+                    let root = &root;
+                    let cancel = &cancel;
+                    let hash_kind = &hash_kind;
+                    let handle = std::thread::Builder::new()
+                        .name("libra-stat-batch".into())
+                        .spawn_scoped(scope, move || {
+                            submit_stat_batch(root, batch, cancel, hash_kind, root_session)
+                        });
+                    (count, handle)
+                })
+                .collect();
+            for (count, handle) in handles {
+                match handle.ok().and_then(|handle| handle.join().ok()) {
+                    Some(results) => output.extend(results),
+                    None => output.extend((0..count).map(|_| Err(()))),
+                }
+            }
+        });
+    }
+    output
+}
+
+fn submit_single_stat(
+    root: &[u8],
+    path: &[u8],
+    cancel: &crate::internal::worktree_io::executor::CancellationToken,
+) -> StatResult {
+    let events = worktree_io()
+        .submit_with_token(
+            IoRequest::SymlinkMetadata {
+                path: path.to_vec(),
+                root: root.to_vec(),
+            },
+            path.to_vec(),
+            crate::command::status_probe::io_op_timeout(),
+            false,
+            cancel.clone(),
+        )
+        .map_err(|_| ())?;
+    events
+        .into_iter()
+        .find_map(|event| match event {
+            IoEvent::DoneStat { result } => Some(Ok(
+                unwrap_wire(result).map(|stat| TrackedProbe { stat, hash: None })
+            )),
+            _ => None,
+        })
+        .unwrap_or(Err(()))
+}
+
+fn parse_stat_batch(
+    events: Vec<IoEvent>,
+    count: usize,
+    hash_kind: &str,
+) -> Result<(Vec<StatResult>, bool), ()> {
+    let kind = crate::internal::object_format::parse_config_value(hash_kind).map_err(|_| ())?;
+    let mut progress = crate::internal::worktree_io::protocol::StatBatchProgress::new(count);
+    let mut results = Vec::with_capacity(count);
+    for event in events {
+        progress.accept(&event).map_err(|_| ())?;
+        if let IoEvent::StatPath { result, hash, .. } = event {
+            #[cfg(feature = "status-perf")]
+            if hash.is_some() {
+                crate::utils::status_perf::count("file_hashes", 1);
+            }
+            results.push(Ok(unwrap_wire(result).map(|stat| TrackedProbe {
+                stat,
+                hash: hash.map(|hash| {
+                    unwrap_wire(hash).and_then(|hex| {
+                        crate::internal::object_format::parse_hex_for_kind(kind, &hex).map_err(
+                            |error| io::Error::new(io::ErrorKind::InvalidData, error.to_string()),
+                        )
+                    })
+                }),
+            })));
+        }
+    }
+    if progress.done {
+        return Ok((results, true));
+    }
+    // No end marker after all items is a protocol failure, not a clean batch.
+    if progress.completed == count || (progress.completed == 0 && !progress.active) {
+        return Err(());
+    }
+    if progress.active {
+        results.push(Err(()));
+    }
+    Ok((results, false))
+}
+
+fn submit_stat_batch(
+    root: &[u8],
+    mut paths: Vec<PreparedStat>,
+    cancel: &crate::internal::worktree_io::executor::CancellationToken,
+    hash_kind: &str,
+    root_session: u64,
+) -> Vec<StatResult> {
+    let mut results = Vec::with_capacity(paths.len());
+    while !paths.is_empty() {
+        let count = paths.len();
+        if cancel.is_cancelled() {
+            results.extend((0..count).map(|_| Err(())));
+            break;
+        }
+        let events = worktree_io().submit_with_token(
+            IoRequest::StatBatch {
+                paths: paths.iter().map(|(path, _)| path.clone()).collect(),
+                checks: Some(paths.iter().map(|(_, check)| check.clone()).collect()),
+                root: root.to_vec(),
+                hash_kind: hash_kind.to_string(),
+                root_session,
+            },
+            paths[0].0.clone(),
+            crate::command::status_probe::io_op_timeout(),
+            false,
+            cancel.clone(),
+        );
+        match events
+            .ok()
+            .and_then(|events| parse_stat_batch(events, count, hash_kind).ok())
+        {
+            Some((partial, done)) => {
+                let consumed = partial.len();
+                results.extend(partial);
+                if done {
+                    break;
+                }
+                paths.drain(..consumed);
+            }
+            None => {
+                results.extend((0..count).map(|_| Err(())));
+                break;
+            }
+        }
+    }
+    results
+}
+
 pub(crate) fn deadline_canonicalize_pair(
     left: &Path,
     right: &Path,
@@ -390,6 +649,310 @@ pub(crate) fn deadline_marker_probe(dir: &Path) -> Result<Result<bool, io::Error
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    #[cfg(feature = "status-perf")]
+    fn status_stat_batch_2114_paths_use_34_requests() {
+        use git_internal::internal::{index::IndexEntry, object::blob::Blob};
+
+        use crate::internal::worktree_io::protocol::TrackedStatCheck;
+        let root = tempfile::tempdir().unwrap();
+        let path = root.path().join("file");
+        std::fs::write(&path, b"test").unwrap();
+        let metadata = std::fs::symlink_metadata(&path).unwrap();
+        let entry = IndexEntry::new(
+            &metadata,
+            Blob::from_content_bytes(b"test".to_vec()).id,
+            "file".into(),
+        );
+        let check = TrackedStatCheck {
+            stat: Some(crate::utils::stat_diff::IndexStatCache::from_entry(&entry)),
+            mode: entry.mode,
+            intent_to_add: false,
+            file_mode: true,
+            index_mtime: Some(metadata.modified().unwrap() + std::time::Duration::from_secs(1)),
+        };
+        super::prime_status_io_root_cache(root.path());
+        let before = crate::utils::status_perf::test_count("worker_requests");
+        let results = super::deadline_stats(&vec![path; 2114], &vec![check; 2114]);
+        super::clear_status_io_root_cache();
+        assert_eq!(
+            crate::utils::status_perf::test_count("worker_requests") - before,
+            34
+        );
+        assert_eq!(results.len(), 2114);
+        assert!(results.into_iter().all(|result| {
+            result.is_ok_and(|result| result.is_ok_and(|probe| probe.hash.is_none()))
+        }));
+    }
+
+    fn tracked_probe_fixture(
+        root: &std::path::Path,
+        check: crate::internal::worktree_io::protocol::TrackedStatCheck,
+        kind: &str,
+    ) -> super::TrackedProbe {
+        use crate::internal::worktree_io::protocol::parse_event_frames;
+        let mut wire = Vec::new();
+        super::handle_request(
+            super::IoRequest::StatBatch {
+                paths: vec![b"file".to_vec()],
+                root: super::path_to_bytes(root),
+                checks: Some(vec![check]),
+                hash_kind: kind.to_string(),
+                root_session: 0,
+            },
+            &mut wire,
+        )
+        .unwrap();
+        let (mut results, complete) =
+            super::parse_stat_batch(parse_event_frames(&wire).unwrap(), 1, kind).unwrap();
+        assert!(complete);
+        results.remove(0).unwrap().unwrap()
+    }
+
+    #[test]
+    fn status_tracked_probe_cached_racy_dirty_and_hash_kinds() {
+        use git_internal::{
+            hash::{HashKind, ObjectHash},
+            internal::{index::IndexEntry, object::types::ObjectType},
+        };
+
+        use crate::internal::worktree_io::protocol::TrackedStatCheck;
+        let root = tempfile::tempdir().unwrap();
+        let path = root.path().join("file");
+        std::fs::write(&path, b"before").unwrap();
+        for kind in [HashKind::Sha1, HashKind::Sha256, HashKind::Blake3] {
+            let hash =
+                ObjectHash::from_type_and_data_for_kind(kind, ObjectType::Blob, b"before").unwrap();
+            let metadata = std::fs::symlink_metadata(&path).unwrap();
+            let entry = IndexEntry::new(&metadata, hash, "file".into());
+            let check = TrackedStatCheck {
+                stat: Some(crate::utils::stat_diff::IndexStatCache::from_entry(&entry)),
+                mode: entry.mode,
+                intent_to_add: false,
+                file_mode: true,
+                index_mtime: Some(metadata.modified().unwrap() + std::time::Duration::from_secs(1)),
+            };
+            let clean = tracked_probe_fixture(root.path(), check.clone(), kind.as_str());
+            assert!(
+                clean.hash.is_none(),
+                "trusted stat must not read file content"
+            );
+            let mut racy = check.clone();
+            racy.index_mtime = metadata.modified().ok();
+            let probe = tracked_probe_fixture(root.path(), racy, kind.as_str());
+            assert_eq!(probe.hash.unwrap().unwrap(), hash);
+            let mut unknown = check.clone();
+            unknown.stat = None;
+            let probe = tracked_probe_fixture(root.path(), unknown.clone(), kind.as_str());
+            assert_eq!(probe.hash.unwrap().unwrap(), hash);
+            std::fs::write(&path, b"edited").unwrap();
+            let probe = tracked_probe_fixture(root.path(), unknown, kind.as_str());
+            assert_eq!(
+                probe.hash.unwrap().unwrap(),
+                ObjectHash::from_type_and_data_for_kind(kind, ObjectType::Blob, b"edited").unwrap()
+            );
+            let mut intent = check;
+            intent.intent_to_add = true;
+            assert!(
+                tracked_probe_fixture(root.path(), intent, kind.as_str())
+                    .hash
+                    .is_none()
+            );
+            std::fs::write(&path, b"before").unwrap();
+        }
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn status_tracked_probe_modes_symlinks_and_lfs() {
+        use std::os::unix::fs::{PermissionsExt, symlink};
+
+        use crate::internal::worktree_io::protocol::TrackedStatCheck;
+        let root = tempfile::tempdir().unwrap();
+        let path = root.path().join("file");
+        std::fs::write(&path, b"bytes").unwrap();
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o644)).unwrap();
+        let mut check = TrackedStatCheck {
+            stat: None,
+            mode: 0o100755,
+            intent_to_add: false,
+            file_mode: true,
+            index_mtime: None,
+        };
+        assert!(
+            tracked_probe_fixture(root.path(), check.clone(), "sha1")
+                .hash
+                .is_some(),
+            "lost executable bit still needs repair-candidate hash"
+        );
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
+        check.mode = 0o100644;
+        assert!(
+            tracked_probe_fixture(root.path(), check.clone(), "sha1")
+                .hash
+                .is_none(),
+            "gained executable bit already proves modification"
+        );
+        std::fs::remove_file(&path).unwrap();
+        symlink("target", &path).unwrap();
+        check.mode = 0o120000;
+        let probe = tracked_probe_fixture(root.path(), check.clone(), "sha1");
+        assert_eq!(
+            probe.hash.unwrap().unwrap(),
+            git_internal::internal::object::blob::Blob::from_content_bytes(b"target".to_vec()).id
+        );
+        std::fs::remove_file(&path).unwrap();
+        std::fs::write(&path, b"large file fixture").unwrap();
+        std::fs::write(
+            root.path().join(".gitattributes"),
+            b"file filter=lfs diff=lfs merge=lfs -text\n",
+        )
+        .unwrap();
+        check.mode = 0o100644;
+        let root_fd = crate::utils::beneath::open_root(root.path()).unwrap();
+        let expected = super::hash_file_blob_beneath(
+            root.path(),
+            &root_fd,
+            std::path::Path::new("file"),
+            "sha1",
+        )
+        .unwrap();
+        assert_eq!(
+            tracked_probe_fixture(root.path(), check, "sha1")
+                .hash
+                .unwrap()
+                .unwrap(),
+            expected
+        );
+    }
+
+    #[test]
+    fn status_stat_batch_matches_single_and_rejects_malformed() {
+        use crate::internal::worktree_io::protocol::{STAT_BATCH_PATHS, parse_event_frames};
+        let root = tempfile::tempdir().unwrap();
+        std::fs::write(root.path().join("file"), b"data").unwrap();
+        let request = super::IoRequest::StatBatch {
+            paths: vec![b"file".to_vec(), b"missing".to_vec()],
+            root: super::path_to_bytes(root.path()),
+            checks: None,
+            hash_kind: "sha1".into(),
+            root_session: 0,
+        };
+        let mut wire = Vec::new();
+        super::handle_request(request, &mut wire).unwrap();
+        let (results, complete) =
+            super::parse_stat_batch(parse_event_frames(&wire).unwrap(), 2, "sha1").unwrap();
+        assert!(complete);
+        assert_eq!(results[0].as_ref().unwrap().as_ref().unwrap().len, 4);
+        assert_eq!(
+            results[1].as_ref().unwrap().as_ref().unwrap_err().kind(),
+            std::io::ErrorKind::NotFound
+        );
+        assert!(super::parse_stat_batch(vec![super::IoEvent::DoneStatBatch], 2, "sha1").is_err());
+        let request = super::IoRequest::StatBatch {
+            paths: vec![b"file".to_vec(); STAT_BATCH_PATHS + 1],
+            root: super::path_to_bytes(root.path()),
+            checks: None,
+            hash_kind: "sha1".into(),
+            root_session: 0,
+        };
+        assert!(request.validate().is_err());
+        let request = super::IoRequest::StatBatch {
+            paths: vec![b"../escape".to_vec()],
+            root: super::path_to_bytes(root.path()),
+            checks: None,
+            hash_kind: "sha1".into(),
+            root_session: 0,
+        };
+        assert!(request.validate().is_err());
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn status_stat_batch_rejects_symlink_parent() {
+        let root = tempfile::tempdir().unwrap();
+        let outside = tempfile::tempdir().unwrap();
+        std::fs::write(outside.path().join("file"), b"outside").unwrap();
+        std::os::unix::fs::symlink(outside.path(), root.path().join("link")).unwrap();
+        let mut wire = Vec::new();
+        super::handle_request(
+            super::IoRequest::StatBatch {
+                paths: vec![b"link/file".to_vec()],
+                root: super::path_to_bytes(root.path()),
+                checks: None,
+                hash_kind: "sha1".into(),
+                root_session: 0,
+            },
+            &mut wire,
+        )
+        .unwrap();
+        let events = crate::internal::worktree_io::protocol::parse_event_frames(&wire).unwrap();
+        let (results, complete) = super::parse_stat_batch(events, 1, "sha1").unwrap();
+        assert!(complete);
+        assert!(results[0].as_ref().unwrap().is_err());
+    }
+
+    #[test]
+    fn status_stat_batch_partial_preserves_prefix_and_marks_active() {
+        use super::IoEvent;
+        let stat = super::CapturedStat::from_metadata(&std::fs::metadata(".").unwrap());
+        let events = vec![
+            IoEvent::BeginPath { seq: 0 },
+            IoEvent::StatPath {
+                seq: 0,
+                result: super::WireResult::Ok(stat.clone()),
+                hash: None,
+            },
+            IoEvent::BeginPath { seq: 1 },
+        ];
+        let (results, complete) = super::parse_stat_batch(events, 3, "sha1").unwrap();
+        assert!(!complete);
+        assert_eq!(results.len(), 2);
+        assert!(results[0].is_ok());
+        assert!(results[1].is_err());
+        assert!(
+            super::parse_stat_batch(
+                vec![
+                    IoEvent::BeginPath { seq: 0 },
+                    IoEvent::StatPath {
+                        seq: 0,
+                        result: super::WireResult::Ok(stat),
+                        hash: None
+                    },
+                ],
+                1,
+                "sha1"
+            )
+            .is_err(),
+            "missing terminal event must not become clean"
+        );
+        assert!(super::parse_stat_batch(vec![IoEvent::BeginPath { seq: 1 }], 2, "sha1").is_err());
+    }
+
+    #[test]
+    fn status_stat_batch_cancelled_request_does_not_start() {
+        let token = crate::internal::worktree_io::executor::CancellationToken::new();
+        token.cancel();
+        let results = super::submit_stat_batch(
+            b"/",
+            vec![(
+                b"missing".to_vec(),
+                crate::internal::worktree_io::protocol::TrackedStatCheck {
+                    stat: None,
+                    mode: 0,
+                    intent_to_add: false,
+                    file_mode: true,
+                    index_mtime: None,
+                },
+            )],
+            &token,
+            "sha1",
+            0,
+        );
+        assert_eq!(results.len(), 1);
+        assert!(results[0].is_err());
+    }
+
     fn helper_entry_identity(
         root: &std::path::Path,
         path: &std::path::Path,

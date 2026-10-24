@@ -8,7 +8,44 @@
 
 use std::time::SystemTime;
 
-use git_internal::internal::index::{IndexEntry, Time};
+use git_internal::internal::index::IndexEntry;
+
+/// Serializable copy of the stat fields only. Time's fields are private in
+/// git-internal; its stable Display representation preserves the exact values.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub(crate) struct IndexStatCache {
+    ctime: String,
+    mtime: String,
+    size: u32,
+}
+impl IndexStatCache {
+    pub(crate) fn from_entry(entry: &IndexEntry) -> Self {
+        Self {
+            ctime: entry.ctime.to_string(),
+            mtime: entry.mtime.to_string(),
+            size: entry.size,
+        }
+    }
+    fn matches(&self, ctime: SystemTime, mtime: SystemTime, size: u64) -> bool {
+        fn encoded(time: SystemTime) -> Option<String> {
+            let duration = time.duration_since(std::time::UNIX_EPOCH).ok()?;
+            let seconds = u32::try_from(duration.as_secs()).ok()?;
+            Some(format!("{seconds}:{}", duration.subsec_nanos()))
+        }
+        size == u64::from(self.size)
+            && encoded(ctime).as_deref() == Some(self.ctime.as_str())
+            && encoded(mtime).as_deref() == Some(self.mtime.as_str())
+    }
+    pub(crate) fn differs(
+        &self,
+        ctime: SystemTime,
+        mtime: SystemTime,
+        size: u64,
+        index_mtime: Option<SystemTime>,
+    ) -> bool {
+        !self.matches(ctime, mtime, size) || !index_mtime.is_some_and(|snapshot| mtime < snapshot)
+    }
+}
 
 /// Whether `entry`'s cached ctime/mtime/size triple equals the observed values.
 ///
@@ -20,12 +57,7 @@ pub fn entry_stat_matches(
     mtime: SystemTime,
     size: u64,
 ) -> bool {
-    let Ok(stat_size) = u32::try_from(size) else {
-        return false;
-    };
-    entry.ctime == Time::from_system_time(ctime)
-        && entry.mtime == Time::from_system_time(mtime)
-        && entry.size == stat_size
+    IndexStatCache::from_entry(entry).matches(ctime, mtime, size)
 }
 
 /// Whether the index entry's cached stat disagrees with the observed triple,

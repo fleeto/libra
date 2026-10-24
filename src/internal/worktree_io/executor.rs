@@ -316,6 +316,13 @@ impl WorktreeIo {
         if timeout.is_zero() {
             return Err(ExecutorError::DeadlineExpired);
         }
+        #[cfg(feature = "status-perf")]
+        {
+            crate::utils::status_perf::count("worker_requests", 1);
+            if matches!(request, IoRequest::FileBlobHash { .. }) {
+                crate::utils::status_perf::count("file_hashes", 1);
+            }
+        }
         request.validate().map_err(ExecutorError::Protocol)?;
         match run_in_process(self.pool.config.in_process_handler, request) {
             JobOutcome::Events(events) => Ok(events),
@@ -336,6 +343,13 @@ impl WorktreeIo {
         }
         if timeout.is_zero() {
             return Err(ExecutorError::DeadlineExpired);
+        }
+        #[cfg(feature = "status-perf")]
+        {
+            crate::utils::status_perf::count("worker_requests", 1);
+            if matches!(request, IoRequest::FileBlobHash { .. }) {
+                crate::utils::status_perf::count("file_hashes", 1);
+            }
         }
         request.validate().map_err(ExecutorError::Protocol)?;
         let pool = &self.pool;
@@ -1143,6 +1157,13 @@ fn drive_worker(
             error: Some(ExecutorError::Cancelled),
         };
     }
+    let mut batch = match &request {
+        IoRequest::StatBatch { paths, .. } => {
+            Some(super::protocol::StatBatchProgress::new(paths.len()))
+        }
+        _ => None,
+    };
+    let mut path_deadline = None;
     if let Err(error) = write_request(&mut worker.stdin, token, request) {
         return DriveResult {
             events: Vec::new(),
@@ -1153,7 +1174,9 @@ fn drive_worker(
     }
     let mut events = Vec::new();
     loop {
-        let frame_deadline = if absolute {
+        let frame_deadline = if let Some(path_deadline) = path_deadline {
+            path_deadline
+        } else if absolute {
             let remaining = deadline.saturating_duration_since(Instant::now());
             if remaining.is_zero() {
                 return DriveResult {
@@ -1188,6 +1211,16 @@ fn drive_worker(
                 reuse: false,
                 error: Some(ExecutorError::Cancelled),
             };
+        }
+        if let Some(progress) = &mut batch {
+            if let Err(error) = progress.accept(&event) {
+                return drive_frame_error(Vec::new(), ExecutorError::Protocol(error));
+            }
+            if matches!(event, IoEvent::BeginPath { .. }) {
+                path_deadline = Instant::now().checked_add(window);
+            } else if matches!(event, IoEvent::StatPath { .. }) {
+                path_deadline = None;
+            }
         }
         let reuse = !matches!(event, IoEvent::Error { .. });
         // Ok payloads travel as a trailing length-prefixed binary frame
@@ -1232,7 +1265,8 @@ fn drive_worker(
         };
         let done = matches!(
             event,
-            IoEvent::DoneStat { .. }
+            IoEvent::DoneStatBatch
+                | IoEvent::DoneStat { .. }
                 | IoEvent::DoneEntryIdentity { .. }
                 | IoEvent::DoneCanonicalize { .. }
                 | IoEvent::DoneReadDir { .. }
@@ -1279,6 +1313,117 @@ fn maybe_mcp_status_pause() {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    #[cfg(unix)]
+    fn status_stat_batch_real_helper() {
+        use std::os::unix::process::CommandExt;
+
+        use super::super::protocol::{WireResult, path_to_bytes};
+        let binary = std::env::var_os("LIBRA_STATUS_HELPER_BINARY")
+            .map(std::path::PathBuf::from)
+            .unwrap_or_else(|| {
+                std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("target/release/libra")
+            });
+        let mut child = std::process::Command::new(binary)
+            .arg(super::super::handler::WORKER_ARG)
+            .env(super::super::handler::CAP_ENV, "stat-batch-test")
+            .env(
+                super::super::handler::PPID_ENV,
+                std::process::id().to_string(),
+            )
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::null())
+            .process_group(0)
+            .spawn()
+            .expect("build the current release helper before running this test");
+        let stdin = child.stdin.take().unwrap();
+        let stdout = child.stdout.take().unwrap();
+        let mut worker = WorkerProc {
+            child,
+            stdin,
+            stdout,
+        };
+        set_stdout_nonblocking(&worker.stdout).unwrap();
+        let token = CancellationToken::new();
+        let deadline = Instant::now() + Duration::from_secs(10);
+        let ready = read_worker_frame(&mut worker.stdout, deadline, &token);
+        if !matches!(ready, Ok(IoEvent::Ready)) {
+            kill_worker(worker);
+            panic!("helper handshake failed");
+        }
+        let root = tempfile::tempdir().unwrap();
+        std::fs::write(root.path().join("file"), b"test").unwrap();
+        let request = IoRequest::StatBatch {
+            paths: vec![b"file".to_vec(), b"missing".to_vec()],
+            root: path_to_bytes(root.path()),
+            checks: None,
+            hash_kind: "sha1".into(),
+            root_session: 0,
+        };
+        let result = drive_worker(
+            &mut worker,
+            "stat-batch-test",
+            request,
+            deadline,
+            Duration::from_secs(2),
+            false,
+            &token,
+        );
+        // A FIFO blocks the hash open. The preceding result must survive,
+        // and the suffix must not be reported as completed.
+        use std::os::unix::ffi::OsStrExt;
+        let fifo = root.path().join("fifo");
+        let fifo_c = std::ffi::CString::new(fifo.as_os_str().as_bytes()).unwrap();
+        assert_eq!(unsafe { libc::mkfifo(fifo_c.as_ptr(), 0o600) }, 0);
+        let check = super::super::protocol::TrackedStatCheck {
+            stat: None,
+            mode: 0o100644,
+            intent_to_add: false,
+            file_mode: true,
+            index_mtime: None,
+        };
+        let start = Instant::now();
+        let blocked = drive_worker(
+            &mut worker,
+            "stat-batch-test",
+            IoRequest::StatBatch {
+                paths: vec![b"file".to_vec(), b"fifo".to_vec(), b"file".to_vec()],
+                root: path_to_bytes(root.path()),
+                checks: Some(vec![check; 3]),
+                hash_kind: "sha1".into(),
+                root_session: 0,
+            },
+            Instant::now() + Duration::from_secs(2),
+            Duration::from_millis(150),
+            false,
+            &token,
+        );
+        kill_worker(worker);
+        assert!(start.elapsed() < Duration::from_secs(2));
+        assert!(blocked.timed_out);
+        assert_eq!(blocked.events.len(), 3);
+        assert!(matches!(
+            blocked.events.last(),
+            Some(IoEvent::BeginPath { seq: 1 })
+        ));
+        assert!(!result.timed_out);
+
+        assert!(result.error.is_none());
+        assert!(matches!(result.events.last(), Some(IoEvent::DoneStatBatch)));
+        assert!(
+            matches!(&result.events[1], IoEvent::StatPath { seq: 0, result: WireResult::Ok(stat), .. } if stat.len == 4)
+        );
+        assert!(matches!(
+            &result.events[3],
+            IoEvent::StatPath {
+                seq: 1,
+                result: WireResult::Err { .. },
+                ..
+            }
+        ));
+    }
+
     use std::{collections::VecDeque, io::Read};
 
     use super::*;

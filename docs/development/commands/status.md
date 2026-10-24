@@ -17,6 +17,9 @@
 - 源码分层：主要实现文件为 `src/command/status.rs`。参数/子命令类型包括：`StatusArgs`、`PorcelainVersion`、`UntrackedFiles`；输出、错误或状态类型包括：`StatusData`（所有渲染器共享的中心数据结构，承载 staged/unstaged/unmerged/ignored/stash/upstream/merge_state/porcelain_v2 字段，模块内可见）、`Changes`、`StatusError`、`UpstreamInfo`、`MergeStatusInfo`；核心数据函数为 `collect_status_data`，辅助执行函数包括：`execute`、`execute_safe`、`execute_to`、`changes_to_be_committed_safe`、`changes_to_be_staged_split_safe`。upstream ahead/behind 计数由 `resolve_upstream_info` 经 `upstream_ahead_behind`（`branch -vv` 共用）调用 `internal::merge_base::ahead_behind`：与 merge-base 共用标记遍历，读取 shallow 边界并视为根；计数不可得时 `UpstreamInfo.ahead/behind` 为 `None`，并向本次调用的 `warnings` 追加 `upstream_counts_unavailable`（source `metadata`，不走进程级 `emit_warning`，且不计入 `rename_scan_blocked`；`branch -vv` 仍经 `emit_warning`），短格式不带括号、porcelain v2 省略 `# branch.ab`、JSON 为 `null`（#486）。
 - 源码意图：源码模块注释说明该命令结合 ignore 策略计算 staged/unstaged/untracked 集合，并输出简洁摘要或结构化状态。
 - 执行路径：`execute_safe`、`execute_to`、`collect_status_json_envelope_for_api` 三个入口都立即委托给共享数据核心 `collect_status_data(args) -> CliResult<StatusData>`（`src/command/status.rs:259`）；`execute_to` 是薄封装，先调用 `collect_status_data` 再调用 `render_status_to_writer`。索引路径会加载、比较并刷新 `.libra/index`（只读，不回写）；对象路径会解析 revision 并读取 blob/tree/commit 等对象；引用路径只读取 SQLite refs 与 HEAD（不更新 refs/HEAD，也不写 reflog）；本命令为只读，不通过 SeaORM/SQLite 或 D1 客户端持久化元数据。
+- HEAD 快照生命周期：一次 `collect_status_data` 将 HEAD 树展开为按路径有序的快照，并由 staged 比较与 rename 检测共用；独立调用 `changes_to_be_committed_safe` 则建立自己的单次快照。快照只在该调用内存活，不跨 status 调用缓存。Porcelain v2 输出元数据仍通过其独立构建入口生成。
+
+- stat 缓存来源：同时恢复工作树和索引的 restore/clone/checkout 路径在保存索引前校验工作树内容，并刷新匹配条目的 stat；仅恢复索引仍保留未知 stat。已有零时间戳索引不会由 `status` 自动回写，可通过 `add --refresh` 校验刷新。
 
 ### Worktree I/O executor 边界（OL-01，2026-08-29）
 
@@ -87,3 +90,11 @@ flowchart TD
 - 任何行为变更都要先核对实现源码，再同步 `COMPATIBILITY.md`、`docs/commands/<cmd>.md` 和相关测试。
 - 新增 Git 兼容参数时必须明确 tier、错误码、JSON/机器输出契约和回归测试。
 - 2026-09-20（plan issues/470 FM-04）：`changes_to_be_staged_split_{safe,force}_with_index` 增加 `file_mode` 参数与仅 mode 变化判定，`collect_tracked_worktree_changes` 同步；`status` 经 `core_file_mode()` 解析后传入，`changes_to_be_staged_split_*_with_ignore_case_and_file_mode` 供 add/commit 复用。
+
+### status 性能优化（本地实现已验证，整体性能门未通过）
+
+Tracked 探测按最多 64 路径分批；调度支持最多 4 批，当前默认 1 批以限制 helper 的内存开销，单批不创建额外提交线程；生产扫描逐批准备和消费路径、check与结果，避免保留全仓库probe临时数据；父进程先捕获 root session 与 hash kind，提交线程不重新依赖线程本地仓库状态。helper 在每条路径开始/结束时发事件，stat 失效时在同一次请求中计算所需 blob hash。进程内及跨进程均校验批次序号，缺失终止事件不能被当成干净结果；已完成的前缀在超时后保留，未开始的后缀重新调度。文件访问仍走现有 beneath/no-follow 根路径打开，不缓存文件描述符。
+
+同次 status 的 staged/worktree/unmerged/rename/porcelain 共享一个 index 所有权，index mtime 在加载前后验证，观察到替换时禁用 stat 信任。独立调用 staged helper 保留独立加载行为。无跨调用 index 缓存，无 status 自动回写索引。
+
+基准入口为 `benchmark/status.sh`；诊断构建 `status-perf` 默认关闭，不能用诊断构建的耗时作为正式性能门。当前目标为同轮 Git 的五倍以内，尚未通过该目标验收。

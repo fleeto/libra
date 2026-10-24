@@ -166,6 +166,82 @@ fn has_empty_component(path: &Path) -> bool {
     }
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub(crate) struct TrackedStatCheck {
+    pub(crate) stat: Option<crate::utils::stat_diff::IndexStatCache>,
+    pub(crate) mode: u32,
+    pub(crate) intent_to_add: bool,
+    pub(crate) file_mode: bool,
+    pub(crate) index_mtime: Option<std::time::SystemTime>,
+}
+impl TrackedStatCheck {
+    pub(crate) fn needs_hash(&self, stat: &CapturedStat) -> bool {
+        if self.intent_to_add {
+            return false;
+        }
+        let mode_changed = self.file_mode
+            && stat.is_file
+            && !stat.is_symlink
+            && self.mode & 0o100000 == 0o100000
+            && (self.mode & 0o111 != 0) != (stat.mode & 0o111 != 0);
+        if mode_changed {
+            return self.mode & 0o111 != 0 && stat.mode & 0o111 == 0;
+        }
+        let (ctime, mtime) = stat.times();
+        self.stat
+            .as_ref()
+            .is_none_or(|cache| cache.differs(ctime, mtime, stat.len, self.index_mtime))
+    }
+}
+
+pub(crate) const STAT_BATCH_PATHS: usize = 64;
+pub(crate) const STAT_BATCH_BYTES: usize = 256 * 1024;
+
+/// Each worker processes a batch in order. Validate both the pipe and the
+/// in-process path, so malformed or missing records cannot become clean files.
+pub(crate) struct StatBatchProgress {
+    pub(crate) completed: usize,
+    pub(crate) active: bool,
+    pub(crate) done: bool,
+    count: usize,
+}
+impl StatBatchProgress {
+    pub(crate) fn new(count: usize) -> Self {
+        Self {
+            completed: 0,
+            active: false,
+            done: false,
+            count,
+        }
+    }
+    pub(crate) fn accept(&mut self, event: &IoEvent) -> io::Result<()> {
+        if !self.done {
+            match event {
+                IoEvent::BeginPath { seq }
+                    if !self.active && *seq == self.completed && *seq < self.count =>
+                {
+                    self.active = true;
+                    return Ok(());
+                }
+                IoEvent::StatPath { seq, .. } if self.active && *seq == self.completed => {
+                    self.active = false;
+                    self.completed += 1;
+                    return Ok(());
+                }
+                IoEvent::DoneStatBatch if !self.active && self.completed == self.count => {
+                    self.done = true;
+                    return Ok(());
+                }
+                _ => {}
+            }
+        }
+        Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "invalid stat batch event sequence",
+        ))
+    }
+}
+
 /// Serializable worktree stat (Metadata cannot cross the process boundary).
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub(crate) struct CapturedStat {
@@ -181,6 +257,27 @@ pub(crate) struct CapturedStat {
 }
 
 impl CapturedStat {
+    pub(crate) fn times(&self) -> (std::time::SystemTime, std::time::SystemTime) {
+        use std::time::{Duration, UNIX_EPOCH};
+        fn at(seconds: i64, nanos: i64) -> std::time::SystemTime {
+            if seconds < 0 {
+                return UNIX_EPOCH;
+            }
+            let nanos = u32::try_from(nanos)
+                .ok()
+                .filter(|n| *n < 1_000_000_000)
+                .unwrap_or(0);
+            // Index times cannot represent anything beyond u32 seconds.
+            // Keep such observations outside that range, never turn them into
+            // the zero timestamp used by an uninitialized index entry.
+            UNIX_EPOCH + Duration::new((seconds as u64).min(u64::from(u32::MAX) + 1), nanos)
+        }
+        (
+            at(self.ctime_sec, self.ctime_nsec),
+            at(self.mtime_sec, self.mtime_nsec),
+        )
+    }
+
     #[cfg(test)]
     pub(crate) fn from_metadata(meta: &std::fs::Metadata) -> Self {
         #[cfg(unix)]
@@ -397,6 +494,13 @@ pub(crate) enum IoRequest {
         /// An absolute, sealed worktree root.
         root: Vec<u8>,
     },
+    StatBatch {
+        paths: Vec<Vec<u8>>,
+        root: Vec<u8>,
+        checks: Option<Vec<TrackedStatCheck>>,
+        hash_kind: String,
+        root_session: u64,
+    },
     CanonicalizePair {
         /// Canonical relative paths beneath `root`; empty means `root`.
         left: Vec<u8>,
@@ -451,6 +555,35 @@ impl IoRequest {
             | Self::SymlinkMetadata { path, root }
             | Self::ReadDir { path, root, .. } => {
                 validate_worktree_path(root, path, true).map(|_| ())
+            }
+            Self::StatBatch {
+                paths,
+                root,
+                checks,
+                ..
+            } => {
+                if paths.len() > STAT_BATCH_PATHS
+                    || serde_json::to_vec(self).map_err(io::Error::other)?.len() > STAT_BATCH_BYTES
+                {
+                    return Err(io::Error::new(
+                        io::ErrorKind::InvalidInput,
+                        "stat batch exceeds request budget",
+                    ));
+                }
+                if checks
+                    .as_ref()
+                    .is_some_and(|checks| checks.len() != paths.len())
+                {
+                    return Err(io::Error::new(
+                        io::ErrorKind::InvalidInput,
+                        "stat batch check count does not match paths",
+                    ));
+                }
+                validate_absolute_root(root, "worktree")?;
+                for path in paths {
+                    validate_worktree_path(root, path, false)?;
+                }
+                Ok(())
             }
             Self::CanonicalizePair { left, right, root } => {
                 validate_worktree_path(root, left, true)?;
@@ -642,6 +775,15 @@ pub(crate) enum IoEvent {
         seq: u64,
         records: u64,
     },
+    BeginPath {
+        seq: usize,
+    },
+    StatPath {
+        seq: usize,
+        result: WireResult<CapturedStat>,
+        hash: Option<WireResult<String>>,
+    },
+    DoneStatBatch,
     DoneStat {
         result: WireResult<CapturedStat>,
     },

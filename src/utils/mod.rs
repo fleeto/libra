@@ -49,3 +49,6 @@ pub(crate) mod windows_process;
 pub mod worktree;
 pub mod worktree_blob;
 pub mod worktree_layout;
+
+#[cfg(feature = "status-perf")]
+pub mod status_perf;

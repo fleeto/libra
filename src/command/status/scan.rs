@@ -68,6 +68,47 @@ pub(super) async fn collect_status_data(
     extras: StatusConfigExtras,
     warning_ctx: &InvocationWarningCtx,
 ) -> CliResult<StatusData> {
+    collect_status_data_with_head_snapshot_loader(
+        args,
+        extras,
+        warning_ctx,
+        StatusHeadSnapshot::load,
+    )
+    .await
+}
+
+pub(super) async fn collect_status_data_with_head_snapshot_loader<F>(
+    args: &StatusArgs,
+    extras: StatusConfigExtras,
+    warning_ctx: &InvocationWarningCtx,
+    load_head_snapshot: F,
+) -> CliResult<StatusData>
+where
+    F: FnMut(&ObjectHash) -> Result<StatusHeadSnapshot, StatusError>,
+{
+    collect_status_data_with_snapshot_loaders(
+        args,
+        extras,
+        warning_ctx,
+        load_head_snapshot,
+        StatusIndexSnapshot::load,
+    )
+    .await
+}
+
+pub(super) async fn collect_status_data_with_snapshot_loaders<F, G>(
+    args: &StatusArgs,
+    extras: StatusConfigExtras,
+    warning_ctx: &InvocationWarningCtx,
+    mut load_head_snapshot: F,
+    mut load_index: G,
+) -> CliResult<StatusData>
+where
+    F: FnMut(&ObjectHash) -> Result<StatusHeadSnapshot, StatusError>,
+    G: FnMut() -> Result<StatusIndexSnapshot, StatusError>,
+{
+    #[cfg(feature = "status-perf")]
+    let perf_head = crate::utils::status_perf::Span::new("head_index");
     // lore.md 2.4: layer-overlay paths are excluded from status like ignored
     // files (a no-op with no layers). W1 §C.4.1.1: refreshed with this
     // request's resolved worktree scope.
@@ -97,19 +138,28 @@ pub(super) async fn collect_status_data(
         .await
         .map_err(|error| status_branch_store_error("resolve HEAD commit", error))?;
     let has_commits = head_oid.is_some();
-
-    let mut staged = changes_to_be_committed_safe()
-        .await
-        .map(|c| c.to_relative())
+    let head_snapshot = head_oid
+        .as_ref()
+        .map(&mut load_head_snapshot)
+        .transpose()
         .map_err(CliError::from)?;
+
+    let index_snapshot = load_index().map_err(CliError::from)?;
+    let mut staged =
+        changes_to_be_committed_from_snapshot(head_snapshot.as_ref(), &index_snapshot.index)
+            .map(|c| c.to_relative())
+            .map_err(CliError::from)?;
     // ADR-FM-05 (FM-04): mode-only worktree changes are reported only when
     // core.fileMode is enabled.
     let file_mode = crate::internal::config::core_file_mode().await?;
-    let worktree = status_untracked::collect_status_worktree_changes(
+    #[cfg(feature = "status-perf")]
+    drop(perf_head);
+    let worktree = status_untracked::collect_status_worktree_changes_with_index(
         args.untracked_files.unwrap_or(UntrackedFiles::Normal),
         args.ignored,
         ignore_case,
         file_mode,
+        index_snapshot,
     )
     .map_err(CliError::from)?;
     let mut unstaged = status_untracked::changes_to_current_directory(worktree.unstaged);
@@ -154,6 +204,8 @@ pub(super) async fn collect_status_data(
     let mut rename_budgets = RenameBudgets::new();
     let mut maybe_index = Some(worktree.index);
 
+    #[cfg(feature = "status-perf")]
+    let perf_rename = crate::utils::status_perf::Span::new("rename");
     // Resolve rename detection (§B.5). Precedence: CLI flags always win —
     // `--no-renames` disables, `--find-renames[=N]`/`--renames` enable at the
     // given (or default 50%) threshold. Otherwise the resolved
@@ -175,11 +227,11 @@ pub(super) async fn collect_status_data(
     let mut unstaged_rename_details: RenameDetails = HashMap::new();
     let mut warnings: Vec<StatusWarning> = Vec::new();
     if let Some(threshold) = rename_threshold {
-        let head_blobs = head_oid
+        let empty_head_blobs = BTreeMap::new();
+        let head_blobs = head_snapshot
             .as_ref()
-            .map(load_head_tree_blobs)
-            .transpose()?
-            .unwrap_or_default();
+            .map(|snapshot| &snapshot.files)
+            .unwrap_or(&empty_head_blobs);
         let index_blobs = maybe_index
             .as_ref()
             .map(load_index_stage0_blobs)
@@ -210,7 +262,7 @@ pub(super) async fn collect_status_data(
         detect_renames_in_changes(
             &mut staged,
             &config,
-            RenameBlobSide::Known(&head_blobs),
+            RenameBlobSide::Known(head_blobs),
             RenameBlobSide::Known(&index_blobs),
             &mut staged_rename_details,
             &mut rename_stats,
@@ -330,6 +382,10 @@ pub(super) async fn collect_status_data(
         }
     }
 
+    #[cfg(feature = "status-perf")]
+    drop(perf_rename);
+    #[cfg(feature = "status-perf")]
+    let _perf_metadata = crate::utils::status_perf::Span::new("metadata");
     let stash_count = if args.show_stash {
         Some(stash::get_stash_num().map_err(|detail| {
             CliError::fatal(format!("failed to read stash state for status: {detail}"))
@@ -685,7 +741,7 @@ fn pathspec_error_to_cli(error: PathspecError) -> CliError {
 pub(super) enum RenameBlobSide<'a> {
     /// HEAD tree or index stage-0: repo-relative path → (oid, mode), a
     /// content-addressed fact (`KnownObjectId`, §B.4.1).
-    Known(&'a HashMap<PathBuf, (ObjectHash, u32)>),
+    Known(&'a BTreeMap<PathBuf, (ObjectHash, TreeItemMode)>),
     /// The worktree: OID is streamed from the file during this call
     /// (`ComputedWorktreeThisCall`).
     Worktree,
@@ -768,9 +824,10 @@ fn build_rename_side(
         let repo_key = util::to_workdir_path(path);
         let blob = match side {
             RenameBlobSide::Known(known) => {
-                let Some((oid, mode)) = known.get(&repo_key).copied() else {
+                let Some((oid, tree_mode)) = known.get(&repo_key).copied() else {
                     continue;
                 };
+                let mode = tree_item_mode_to_unix(tree_mode);
                 BlobRef {
                     kind: BlobKind::from_mode(mode),
                     mode,
@@ -1322,24 +1379,18 @@ pub(crate) fn load_head_commit_tree(head_oid: &ObjectHash) -> CliResult<(Commit,
     Ok((commit, tree))
 }
 
-/// HEAD tree blobs keyed by repo-relative path → (oid, mode) (§B.4.1 old side
-/// of the staged snapshot).
-fn load_head_tree_blobs(head_oid: &ObjectHash) -> CliResult<HashMap<PathBuf, (ObjectHash, u32)>> {
-    let (_, tree) = load_head_commit_tree(head_oid)?;
-    Ok(tree
-        .get_plain_items_with_mode()
-        .into_iter()
-        .map(|(path, hash, mode)| (path, (hash, tree_item_mode_to_unix(mode))))
-        .collect())
-}
-
 /// Index stage-0 blobs keyed by repo-relative path → (oid, mode) (index side
 /// of both snapshots).
-fn load_index_stage0_blobs(index: &Index) -> HashMap<PathBuf, (ObjectHash, u32)> {
+fn load_index_stage0_blobs(index: &Index) -> BTreeMap<PathBuf, (ObjectHash, TreeItemMode)> {
     index
         .tracked_entries(0)
         .into_iter()
-        .map(|entry| (PathBuf::from(&entry.name), (entry.hash, entry.mode)))
+        .map(|entry| {
+            (
+                PathBuf::from(&entry.name),
+                (entry.hash, index_mode_to_tree_item_mode(entry.mode)),
+            )
+        })
         .collect()
 }
 

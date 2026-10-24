@@ -491,3 +491,6 @@ src/command/cloud/agent_capture.rs	remote_size_mismatch_fails_sync	lane:cwd+env	
 src/command/cloud/agent_capture.rs	remote_digest_mismatch_fails_sync	lane:cwd+env	RG-05 controlled ConfigDbFixture and setup_with_new_libra_in with ChangeDirGuard; actual src classifier lane:cwd+env
 src/command/cloud/agent_capture.rs	first_missing_artifact_is_uploaded_and_completed	lane:cwd+env	RG-05 controlled ConfigDbFixture and setup_with_new_libra_in with ChangeDirGuard; actual src classifier lane:cwd+env
 src/command/cloud/agent_capture.rs	artifact_lifecycle_helper_proves_roles_without_returning_ciphertext	lane:hash_kind	RG-05 synthetic private helper actual hash-context loop; no model or native proof; holds hash_kind lane
+src/command/restore.rs	coupled_restore_refreshes_only_verified_worktree_stats	lane:cwd+env	cwd and repository configuration fixture
+src/command/status.rs	status_head_snapshot_expands_once_for_staged_and_rename	lane:cwd+env	cwd and repository configuration fixture
+src/command/restore.rs	coupled_restore_stat_boundaries	lane:cwd+env	cwd and repository configuration fixture

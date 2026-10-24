@@ -534,8 +534,13 @@ async fn run_restore(mut args: RestoreArgs) -> Result<RestoreOutput, RestoreErro
         deleted_files.extend(deleted);
     }
     if staged {
-        let (restored, deleted) =
-            restore_index_tracked(&pathspecs, &target_blobs, overlay, &skipped_unmerged_paths)?;
+        let (restored, deleted) = restore_index_tracked(
+            &pathspecs,
+            &target_blobs,
+            overlay,
+            &skipped_unmerged_paths,
+            worktree,
+        )?;
         let mut restored_seen: HashSet<String> = restored_files.iter().cloned().collect();
         let mut deleted_seen: HashSet<String> = deleted_files.iter().cloned().collect();
 
@@ -593,7 +598,7 @@ async fn resolve_target_blobs(
             if staged {
                 return Err(RestoreError::ResolveSource);
             }
-            let index = Index::load(path::index()).map_err(|_| RestoreError::ReadIndex)?;
+            let index = Index::load(&path::index()).map_err(|_| RestoreError::ReadIndex)?;
             Ok(index
                 .tracked_entries(0)
                 .into_iter()
@@ -642,7 +647,7 @@ async fn restore_worktree_tracked(
     destination_root: Option<&Path>,
 ) -> Result<(Vec<String>, Vec<String>), RestoreError> {
     let target_map = preprocess_blobs(target_blobs);
-    let index = Index::load(path::index()).map_err(|_| RestoreError::ReadIndex)?;
+    let index = Index::load(&path::index()).map_err(|_| RestoreError::ReadIndex)?;
     let file_paths =
         collect_restore_worktree_paths(pathspecs, &target_map, &index, allowed_unmatched)?;
     if let Some(root) = destination_root {
@@ -708,6 +713,7 @@ fn restore_index_tracked(
     target_blobs: &[(PathBuf, RestoreTarget)],
     overlay: bool,
     allowed_unmatched: &[PathBuf],
+    refresh_worktree: bool,
 ) -> Result<(Vec<String>, Vec<String>), RestoreError> {
     let target_map = preprocess_blobs(target_blobs);
 
@@ -811,6 +817,19 @@ fn restore_index_tracked(
         }
     }
 
+    if refresh_worktree {
+        let workdir = util::try_working_dir().map_err(|_| RestoreError::ReadWorktree)?;
+        // Object-only entries have no trustworthy stat cache. After restoring
+        // both destinations, verify content before caching the worktree stat;
+        // a concurrent edit must never be recorded as clean.
+        super::refresh::refresh_candidates(
+            &mut index,
+            &file_paths,
+            &workdir,
+            &super::refresh::RefreshOptions::for_add_refresh(true),
+        );
+    }
+
     index
         .save(&idx_file)
         .map_err(|_| RestoreError::WriteWorktree)?;
@@ -875,7 +894,7 @@ pub async fn execute_checked(args: RestoreArgs) -> io::Result<()> {
             (None, _) => {
                 assert!(!staged);
                 let index =
-                    Index::load(path::index()).map_err(|e| io::Error::other(e.to_string()))?;
+                    Index::load(&path::index()).map_err(|e| io::Error::other(e.to_string()))?;
                 index
                     .tracked_entries(0)
                     .into_iter()
@@ -926,7 +945,7 @@ pub async fn execute_checked(args: RestoreArgs) -> io::Result<()> {
             .map_err(|error| io::Error::other(error.to_string()))?;
     }
     if staged {
-        restore_index_tracked(&pathspecs, &target_blobs, false, &[])
+        restore_index_tracked(&pathspecs, &target_blobs, false, &[], worktree)
             .map_err(|error| io::Error::other(error.to_string()))?;
     }
     Ok(())
@@ -980,7 +999,7 @@ async fn execute_checked_typed_at(
             if staged {
                 return Err(RestoreError::ResolveSource);
             }
-            let index = Index::load(path::index()).map_err(|_| RestoreError::ReadIndex)?;
+            let index = Index::load(&path::index()).map_err(|_| RestoreError::ReadIndex)?;
             index
                 .tracked_entries(0)
                 .into_iter()
@@ -1022,7 +1041,7 @@ async fn execute_checked_typed_at(
         restore_worktree_tracked(&pathspecs, &target_blobs, false, &[], destination_root).await?;
     }
     if staged {
-        restore_index_tracked(&pathspecs, &target_blobs, false, &[])?;
+        restore_index_tracked(&pathspecs, &target_blobs, false, &[], worktree)?;
     }
     Ok(())
 }
@@ -1363,7 +1382,7 @@ fn collect_unmerged_paths(index: &Index) -> Vec<PathBuf> {
 /// Unmerged paths (stages 1/2/3) that match the requested `filter` pathspecs.
 /// Empty when nothing is unmerged, so the common conflict-free path stays cheap.
 fn collect_matched_unmerged_paths(pathspecs: &PathspecSet) -> Result<Vec<PathBuf>, RestoreError> {
-    let index = Index::load(path::index()).map_err(|_| RestoreError::ReadIndex)?;
+    let index = Index::load(&path::index()).map_err(|_| RestoreError::ReadIndex)?;
     let unmerged = collect_unmerged_paths(&index);
     if unmerged.is_empty() {
         return Ok(Vec::new());
@@ -1447,7 +1466,7 @@ async fn restore_conflict_stage(
     stage: u8,
     overlay: bool,
 ) -> Result<(Vec<String>, Vec<String>), RestoreError> {
-    let index = Index::load(path::index()).map_err(|_| RestoreError::ReadIndex)?;
+    let index = Index::load(&path::index()).map_err(|_| RestoreError::ReadIndex)?;
     let unmerged = collect_unmerged_paths(&index);
     let matched = filter_paths(&unmerged, pathspecs);
     if matched.is_empty() {
@@ -1502,7 +1521,7 @@ async fn restore_conflict_merge(
     pathspecs: &PathspecSet,
     diff3: bool,
 ) -> Result<Vec<String>, RestoreError> {
-    let index = Index::load(path::index()).map_err(|_| RestoreError::ReadIndex)?;
+    let index = Index::load(&path::index()).map_err(|_| RestoreError::ReadIndex)?;
     let unmerged = collect_unmerged_paths(&index);
     let matched = filter_paths(&unmerged, pathspecs);
     if matched.is_empty() {
@@ -1702,7 +1721,7 @@ pub(crate) async fn preflight_worktree_restore_to_commit(
         .map(|(path, hash, mode)| (path, RestoreTarget::new(hash, Some(mode))))
         .collect();
     let target_map = preprocess_blobs(&target_blobs);
-    let index = Index::load(path::index()).map_err(|_| RestoreError::ReadIndex)?;
+    let index = Index::load(&path::index()).map_err(|_| RestoreError::ReadIndex)?;
     let pathspecs = compile_restore_pathspecs(&[util::working_dir_string()]).await?;
     let file_paths = collect_restore_worktree_paths(&pathspecs, &target_map, &index, &[])?;
     preflight_worktree_directory_transitions(&file_paths, &target_map, &index, false, None)
@@ -1879,7 +1898,7 @@ pub async fn restore_to_file(hash: &ObjectHash, path: &PathBuf) -> io::Result<()
     }
     // Legacy entry point: it receives no explicit mode, so keep the index's
     // executable bit when the path is tracked (ADR-FM-02).
-    let executable = Index::load(path::index())
+    let executable = Index::load(&path::index())
         .ok()
         .and_then(|index| {
             path.to_str().and_then(|name| {
@@ -1924,7 +1943,7 @@ pub async fn restore_worktree(
 ) -> io::Result<()> {
     let target_blobs = legacy_targets(target_blobs);
     let target_blobs = preprocess_blobs(&target_blobs);
-    let index = Index::load(path::index()).map_err(|e| io::Error::other(e.to_string()))?;
+    let index = Index::load(&path::index()).map_err(|e| io::Error::other(e.to_string()))?;
     let raw_pathspecs = filter
         .iter()
         .map(|path| util::path_to_string(path))
@@ -2055,6 +2074,134 @@ mod tests {
         internal::config::ConfigKv,
         utils::test::ChangeDirGuard,
     };
+
+    #[tokio::test]
+    #[serial(cwd, env)]
+    async fn coupled_restore_refreshes_only_verified_worktree_stats() {
+        let repo = tempdir().expect("create repository");
+        let _guard = ChangeDirGuard::new(repo.path());
+        init::init(init::InitArgs::parse_from(["init", "-q", "."]))
+            .await
+            .expect("initialize repository");
+        fs::write(repo.path().join("tracked.txt"), b"staged content\n").unwrap();
+        add::execute_safe(
+            add::AddArgs::parse_from(["add", "tracked.txt"]),
+            &OutputConfig {
+                quiet: true,
+                ..Default::default()
+            },
+        )
+        .await
+        .expect("stage fixture");
+        let idx_file = path::index();
+        let index = Index::load(&idx_file).unwrap();
+        let original = index.get("tracked.txt", 0).unwrap();
+        let target = RestoreTarget::new(original.hash, Some(TreeItemMode::Blob));
+        let targets = vec![(PathBuf::from("tracked.txt"), target)];
+        let pathspecs = compile_restore_pathspecs(&[":/".to_string()])
+            .await
+            .unwrap();
+
+        // A fresh object-only entry models clone's initial index.
+        let mut index = Index::new();
+        index.add(index_entry_from_target(
+            "tracked.txt".to_string(),
+            target,
+            15,
+        ));
+        index.save(&idx_file).unwrap();
+        restore_index_tracked(&pathspecs, &targets, false, &[], false).unwrap();
+        let index = Index::load(&idx_file).unwrap();
+        assert_eq!(
+            index.get("tracked.txt", 0).unwrap().mtime,
+            git_internal::internal::index::Time::from_system_time(std::time::UNIX_EPOCH)
+        );
+
+        restore_index_tracked(&pathspecs, &targets, false, &[], true).unwrap();
+        let index = Index::load(&idx_file).unwrap();
+        let refreshed = index.get("tracked.txt", 0).unwrap();
+        let metadata = fs::symlink_metadata(repo.path().join("tracked.txt")).unwrap();
+        let expected = IndexEntry::new(&metadata, target.hash, "tracked.txt".to_string());
+        assert_eq!(refreshed.ctime, expected.ctime);
+        assert_eq!(refreshed.mtime, expected.mtime);
+        assert_ne!(
+            refreshed.mtime,
+            git_internal::internal::index::Time::from_system_time(std::time::UNIX_EPOCH)
+        );
+        assert_eq!(refreshed.hash, target.hash);
+
+        // A same-size edit after worktree restore must not acquire clean stats.
+        fs::write(repo.path().join("tracked.txt"), b"edited content\n").unwrap();
+        let before = fs::read(&idx_file).unwrap();
+        restore_index_tracked(&pathspecs, &targets, false, &[], true).unwrap();
+        assert_eq!(fs::read(&idx_file).unwrap(), before);
+        assert_ne!(
+            calc_file_blob_hash(&repo.path().join("tracked.txt")).unwrap(),
+            target.hash
+        );
+    }
+
+    #[tokio::test]
+    #[serial(cwd, env)]
+    #[cfg(unix)]
+    async fn coupled_restore_stat_boundaries() {
+        use std::os::unix::fs::{PermissionsExt, symlink};
+
+        use git_internal::internal::index::Time;
+
+        let repo = tempdir().unwrap();
+        let _guard = ChangeDirGuard::new(repo.path());
+        init::init(init::InitArgs::parse_from(["init", "-q", "."]))
+            .await
+            .unwrap();
+        let zero = Time::from_system_time(std::time::UNIX_EPOCH);
+        let hash = Blob::from_content_bytes(b"target".to_vec()).id;
+        let cases = [
+            ("missing", TreeItemMode::Blob, false),
+            ("executable", TreeItemMode::BlobExecutable, false),
+            ("link", TreeItemMode::Link, false),
+            ("sparse", TreeItemMode::Blob, true),
+        ];
+        fs::write(repo.path().join("executable"), b"target").unwrap();
+        fs::set_permissions(
+            repo.path().join("executable"),
+            fs::Permissions::from_mode(0o644),
+        )
+        .unwrap();
+        symlink("target", repo.path().join("link")).unwrap();
+        fs::write(repo.path().join("sparse"), b"target").unwrap();
+        let mut index = Index::new();
+        let targets: Vec<_> = cases
+            .iter()
+            .map(|(name, mode, skip)| {
+                let target = RestoreTarget::new(hash, Some(*mode));
+                let mut entry = index_entry_from_target((*name).to_string(), target, 6);
+                entry.flags.skip_worktree = *skip;
+                index.add(entry);
+                (PathBuf::from(name), target)
+            })
+            .collect();
+        index.save(&path::index()).unwrap();
+        let pathspecs = compile_restore_pathspecs(&[":/".to_string()])
+            .await
+            .unwrap();
+        restore_index_tracked(&pathspecs, &targets, false, &[], true).unwrap();
+        let index = Index::load(&path::index()).unwrap();
+        for name in ["missing", "executable", "sparse"] {
+            assert_eq!(index.get(name, 0).unwrap().mtime, zero, "{name}");
+        }
+        let link = index.get("link", 0).unwrap();
+        assert_ne!(link.mtime, zero);
+        assert_eq!(link.hash, hash);
+        assert_eq!(link.mode, 0o120000);
+        assert!(index.get("sparse", 0).unwrap().flags.skip_worktree);
+        // A changed link must not receive clean metadata from its target.
+        fs::remove_file(repo.path().join("link")).unwrap();
+        symlink("different", repo.path().join("link")).unwrap();
+        let before = fs::read(path::index()).unwrap();
+        restore_index_tracked(&pathspecs, &targets, false, &[], true).unwrap();
+        assert_eq!(fs::read(path::index()).unwrap(), before);
+    }
 
     #[test]
     fn explicit_destination_pruning_stops_at_root() {

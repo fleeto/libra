@@ -39,6 +39,7 @@ fn seal_worktree_capability(request: &IoRequest) -> io::Result<Option<WorktreeRo
     let root = match request {
         IoRequest::EntryIdentity { root, .. }
         | IoRequest::SymlinkMetadata { root, .. }
+        | IoRequest::StatBatch { root, .. }
         | IoRequest::CanonicalizePair { root, .. }
         | IoRequest::ReadDir { root, .. }
         | IoRequest::FileBlobHash { root, .. }
@@ -181,6 +182,40 @@ pub(crate) fn handle_request(request: IoRequest, stdout: &mut impl Write) -> io:
             };
             let result = lstat_request(&path, capability);
             write_frame(stdout, &IoEvent::DoneStat { result })?;
+        }
+        IoRequest::StatBatch {
+            paths,
+            checks,
+            hash_kind,
+            root_session,
+            ..
+        } => {
+            let capability = worktree_capability
+                .as_ref()
+                .ok_or_else(|| io::Error::other("missing worktree capability"))?;
+            for (seq, path) in paths.into_iter().enumerate() {
+                write_frame(stdout, &IoEvent::BeginPath { seq })?;
+                let path = bytes_to_path(&path);
+                let result = lstat_request(&path, capability);
+                let hash = match (&result, checks.as_ref().and_then(|checks| checks.get(seq))) {
+                    (WireResult::Ok(stat), Some(check)) if check.needs_hash(stat) => {
+                        let hashed =
+                            crate::utils::beneath::open_root(capability.root()).and_then(|root| {
+                                hash_file_blob_beneath_with_session(
+                                    capability.root(),
+                                    &root,
+                                    &path,
+                                    &hash_kind,
+                                    (root_session != 0).then_some(root_session),
+                                )
+                            });
+                        Some(wire_result(hashed.map(|hash| hash.to_string())))
+                    }
+                    _ => None,
+                };
+                write_frame(stdout, &IoEvent::StatPath { seq, result, hash })?;
+            }
+            write_frame(stdout, &IoEvent::DoneStatBatch)?;
         }
         IoRequest::CanonicalizePair { left, right, .. } => {
             write_frame(stdout, &IoEvent::Begin)?;

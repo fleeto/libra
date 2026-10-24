@@ -1,7 +1,7 @@
 //! Implements status reporting with ignore policy support, computing staged/unstaged/untracked sets and printing concise summaries.
 
 use std::{
-    collections::{HashMap, HashSet},
+    collections::{BTreeMap, HashMap, HashSet},
     io,
     io::Write,
     path::{Path, PathBuf},
@@ -325,6 +325,33 @@ pub enum StatusError {
     HeadObjectUnreadable { what: &'static str, oid: String },
 }
 
+/// One expansion of the current HEAD tree shared by staged comparison and
+/// rename detection during a status collection.
+pub(super) struct StatusHeadSnapshot {
+    pub(super) files: BTreeMap<PathBuf, (ObjectHash, TreeItemMode)>,
+}
+
+impl StatusHeadSnapshot {
+    fn load(head_oid: &ObjectHash) -> Result<Self, StatusError> {
+        let commit =
+            Commit::try_load(head_oid).ok_or_else(|| StatusError::HeadObjectUnreadable {
+                what: "commit",
+                oid: head_oid.to_string(),
+            })?;
+        let tree =
+            Tree::try_load(&commit.tree_id).ok_or_else(|| StatusError::HeadObjectUnreadable {
+                what: "tree",
+                oid: commit.tree_id.to_string(),
+            })?;
+        let files = tree
+            .get_plain_items_with_mode()
+            .into_iter()
+            .map(|(path, oid, mode)| (path, (oid, mode)))
+            .collect();
+        Ok(Self { files })
+    }
+}
+
 impl From<StatusError> for CliError {
     fn from(error: StatusError) -> Self {
         let msg = format!("failed to determine working tree status: {error}");
@@ -606,6 +633,8 @@ pub(crate) async fn execute_safe_with_resolution(
         fail_closed_on_io_blocked(&data, output)?;
         if !output.quiet {
             let mut stdout = std::io::stdout();
+            #[cfg(feature = "status-perf")]
+            let _perf_output = crate::utils::status_perf::Span::new("output");
             render_status_to_writer(&data, &args, output, &mut stdout).await?;
         }
     }
@@ -993,14 +1022,70 @@ pub async fn changes_to_be_committed() -> Changes {
     }
 }
 
+pub(super) struct StatusIndexSnapshot {
+    pub(super) index: Index,
+    pub(super) mtime: Option<std::time::SystemTime>,
+}
+impl StatusIndexSnapshot {
+    pub(super) fn load() -> Result<Self, StatusError> {
+        let index_path = path::try_index().map_err(|source| StatusError::Workdir { source })?;
+        Self::load_path(&index_path)
+    }
+    fn load_path(index_path: &Path) -> Result<Self, StatusError> {
+        let before = std::fs::metadata(index_path).ok();
+        let index = Index::load(index_path).map_err(|source| StatusError::IndexLoad {
+            path: index_path.to_path_buf(),
+            source,
+        })?;
+        let after = std::fs::metadata(index_path).ok();
+        let mtime = before
+            .as_ref()
+            .zip(after.as_ref())
+            .filter(|(a, b)| {
+                let same = a.len() == b.len() && a.modified().ok() == b.modified().ok();
+                #[cfg(unix)]
+                {
+                    use std::os::unix::fs::MetadataExt;
+                    same && a.dev() == b.dev()
+                        && a.ino() == b.ino()
+                        && a.ctime() == b.ctime()
+                        && a.ctime_nsec() == b.ctime_nsec()
+                }
+                #[cfg(not(unix))]
+                {
+                    same && a.created().ok() == b.created().ok()
+                }
+            })
+            .and_then(|(a, _)| a.modified().ok());
+        Ok(Self { index, mtime })
+    }
+}
+
 pub async fn changes_to_be_committed_safe() -> Result<Changes, StatusError> {
-    let mut changes = Changes::default();
+    let head_commit = Head::current_commit().await;
+    let head_snapshot = head_commit
+        .as_ref()
+        .map(StatusHeadSnapshot::load)
+        .transpose()?;
+    changes_to_be_committed_with_head_snapshot(head_snapshot.as_ref()).await
+}
+
+pub(super) async fn changes_to_be_committed_with_head_snapshot(
+    head_snapshot: Option<&StatusHeadSnapshot>,
+) -> Result<Changes, StatusError> {
     let index_path = path::try_index().map_err(|source| StatusError::Workdir { source })?;
     let index = Index::load(&index_path).map_err(|source| StatusError::IndexLoad {
         path: index_path.clone(),
         source,
     })?;
-    let head_commit = Head::current_commit().await;
+    changes_to_be_committed_from_snapshot(head_snapshot, &index)
+}
+
+pub(super) fn changes_to_be_committed_from_snapshot(
+    head_snapshot: Option<&StatusHeadSnapshot>,
+    index: &Index,
+) -> Result<Changes, StatusError> {
+    let mut changes = Changes::default();
     // WT-06/WT-07 (ADR-WT-05): an intent-to-add entry is an empty-blob
     // PLACEHOLDER for a new file, not staged content. Git never reports it as
     // `A ` and never writes it into a tree; excluding it here is the single
@@ -1017,28 +1102,12 @@ pub async fn changes_to_be_committed_safe() -> Result<Changes, StatusError> {
         .filter(|path| !intent_to_add.contains(path))
         .collect();
 
-    if head_commit.is_none() {
+    let Some(head_snapshot) = head_snapshot else {
         changes.new = tracked_files;
         return Ok(changes);
-    }
-
-    let head_commit = match head_commit {
-        Some(head_commit) => head_commit,
-        None => return Ok(changes),
     };
-    let commit =
-        Commit::try_load(&head_commit).ok_or_else(|| StatusError::HeadObjectUnreadable {
-            what: "commit",
-            oid: head_commit.to_string(),
-        })?;
-    let tree =
-        Tree::try_load(&commit.tree_id).ok_or_else(|| StatusError::HeadObjectUnreadable {
-            what: "tree",
-            oid: commit.tree_id.to_string(),
-        })?;
-    let tree_files = tree.get_plain_items_with_mode();
 
-    for (item_path, item_hash, item_mode) in tree_files.iter() {
+    for (item_path, (item_hash, item_mode)) in &head_snapshot.files {
         // §B.6.1: a tree path that is not valid UTF-8 cannot match an index
         // key, so it is skipped rather than made fatal.
         let Some(item_str) = item_path.to_str() else {
@@ -1065,11 +1134,9 @@ pub async fn changes_to_be_committed_safe() -> Result<Changes, StatusError> {
             changes.deleted.push(item_path.clone());
         }
     }
-    let tree_files_set: HashSet<PathBuf> =
-        tree_files.into_iter().map(|(path, _, _)| path).collect();
     changes.new = tracked_files
         .into_iter()
-        .filter(|path| !tree_files_set.contains(path))
+        .filter(|path| !head_snapshot.files.contains_key(path))
         .collect();
 
     Ok(changes)
@@ -1845,6 +1912,137 @@ mod test {
         );
     }
 
+    #[tokio::test]
+    #[serial(cwd, env)]
+    async fn status_head_snapshot_expands_once_for_staged_and_rename() {
+        let repo = tempdir().expect("temporary Libra repository");
+        test::setup_with_new_libra_in(repo.path()).await;
+        let _guard = ChangeDirGuard::new(repo.path());
+        std::fs::write(repo.path().join("old.txt"), b"rename snapshot fixture\n")
+            .expect("write base file");
+        let output = OutputConfig::default();
+        crate::command::add::execute_safe(
+            crate::command::add::AddArgs {
+                pathspec: vec!["old.txt".to_string()],
+                ..Default::default()
+            },
+            &output,
+        )
+        .await
+        .expect("stage base file");
+        crate::command::commit::execute(crate::command::commit::CommitArgs {
+            message: Some("status snapshot fixture".to_string()),
+            disable_pre: true,
+            no_verify: true,
+            ..Default::default()
+        })
+        .await;
+        std::fs::remove_file(repo.path().join("old.txt")).expect("remove old path");
+        std::fs::write(repo.path().join("new.txt"), b"rename snapshot fixture\n")
+            .expect("write rename destination");
+        crate::command::add::execute_safe(
+            crate::command::add::AddArgs {
+                all: true,
+                ..Default::default()
+            },
+            &output,
+        )
+        .await
+        .expect("stage rename fixture");
+
+        let mut args = StatusArgs {
+            porcelain: Some(PorcelainVersion::V2),
+            ..Default::default()
+        };
+        let extras = apply_status_config_defaults(&mut args)
+            .await
+            .expect("resolve status defaults");
+        assert!(
+            extras.rename_threshold.is_some(),
+            "default rename detection is on"
+        );
+
+        let load_count = std::cell::Cell::new(0);
+        let index_load_count = std::cell::Cell::new(0);
+        let data = scan::collect_status_data_with_snapshot_loaders(
+            &args,
+            extras,
+            &InvocationWarningCtx::empty(),
+            |head_oid| {
+                load_count.set(load_count.get() + 1);
+                StatusHeadSnapshot::load(head_oid)
+            },
+            || {
+                index_load_count.set(index_load_count.get() + 1);
+                let snapshot = StatusIndexSnapshot::load()?;
+                // A hidden second load would now observe an empty index and
+                // corrupt staged/worktree/v2 results, rather than just escape
+                // this loader's counter.
+                std::fs::rename(
+                    path::index(),
+                    repo.path().join(".libra/index-snapshot-test"),
+                )
+                .unwrap();
+                Ok(snapshot)
+            },
+        )
+        .await
+        .expect("collect status using a shared HEAD snapshot");
+        std::fs::rename(
+            repo.path().join(".libra/index-snapshot-test"),
+            path::index(),
+        )
+        .unwrap();
+        assert!(data.porcelain_v2.is_some());
+
+        assert_eq!(load_count.get(), 1, "staged and rename share one expansion");
+        assert_eq!(
+            index_load_count.get(),
+            1,
+            "staged and worktree share one index"
+        );
+        assert_eq!(
+            data.staged.renamed,
+            vec![(PathBuf::from("old.txt"), PathBuf::from("new.txt"))]
+        );
+        assert!(data.staged.deleted.is_empty());
+        assert!(data.staged.new.is_empty());
+        assert!(data.unstaged.is_empty());
+    }
+
+    #[test]
+    fn status_index_snapshot_observes_next_call_and_preserves_errors() {
+        use git_internal::internal::{index::IndexEntry, object::blob::Blob};
+        let root = tempdir().unwrap();
+        let path = root.path().join("index");
+        let absent = StatusIndexSnapshot::load_path(&path).unwrap();
+        assert!(absent.index.tracked_files().is_empty());
+        let old = Blob::from_content_bytes(b"old".to_vec()).id;
+        let new = Blob::from_content_bytes(b"new".to_vec()).id;
+        let mut index = Index::new();
+        index.add(IndexEntry::new_from_blob("file".into(), old, 3));
+        index.save(&path).unwrap();
+        let first = StatusIndexSnapshot::load_path(&path).unwrap();
+        index.add(IndexEntry::new_from_blob("file".into(), new, 3));
+        index.save(&path).unwrap();
+        let second = StatusIndexSnapshot::load_path(&path).unwrap();
+        assert_eq!(first.index.get("file", 0).unwrap().hash, old);
+        assert_eq!(second.index.get("file", 0).unwrap().hash, new);
+        for stage in 1..=3 {
+            let mut entry = IndexEntry::new_from_blob("conflict".into(), old, 3);
+            entry.flags.stage = stage;
+            index.add(entry);
+        }
+        index.save(&path).unwrap();
+        let conflict = StatusIndexSnapshot::load_path(&path).unwrap();
+        assert_eq!(unmerged::collect(&conflict.index).len(), 1);
+        std::fs::write(&path, b"corrupt index").unwrap();
+        assert!(matches!(
+            StatusIndexSnapshot::load_path(&path),
+            Err(StatusError::IndexLoad { .. })
+        ));
+    }
+
     #[test]
     fn short_format_surface_emits_all_seven_unmerged_xy_codes() {
         use crate::command::unmerged::{UnmergedEntry, UnmergedStage};
@@ -2249,10 +2447,12 @@ mod rename_destination_budget_test {
         std::fs::create_dir_all(repo.path().join("d")).expect("d dir");
         std::fs::create_dir_all(repo.path().join("u")).expect("u dir");
         std::fs::write(repo.path().join("u/same.txt"), b"payload\n").expect("dest");
-        let known: HashMap<PathBuf, (ObjectHash, u32)> =
-            [(PathBuf::from("d/same.txt"), (missing_oid, 0o100644))]
-                .into_iter()
-                .collect();
+        let known: BTreeMap<PathBuf, (ObjectHash, TreeItemMode)> = [(
+            PathBuf::from("d/same.txt"),
+            (missing_oid, TreeItemMode::Blob),
+        )]
+        .into_iter()
+        .collect();
         let mut changes2 = Changes {
             new: vec![],
             modified: vec![],

@@ -3310,6 +3310,8 @@ fn reject_unsupported_single_dash_control(utf8_argv: &[String]) -> CliResult<()>
 }
 
 async fn parse_async_scoped(argv: Vec<std::ffi::OsString>) -> CliResult<()> {
+    #[cfg(feature = "status-perf")]
+    let perf_preflight = crate::utils::status_perf::Span::new("parse_preflight");
     let argv = rewrite_short_number_args(argv, "log");
     let argv = rewrite_short_number_args(argv, "reflog");
     // `format-patch -<n>` is Git's "last n commits" shorthand (the same numeric
@@ -3645,6 +3647,8 @@ async fn parse_async_scoped(argv: Vec<std::ffi::OsString>) -> CliResult<()> {
         None
     };
     let command_future = async {
+        #[cfg(feature = "status-perf")]
+        drop(perf_preflight);
         match args.command {
             Commands::Init(cmd_args) => {
                 let original_dir = utils::util::cur_dir();

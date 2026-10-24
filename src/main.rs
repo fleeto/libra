@@ -593,10 +593,14 @@ fn main() {
     if let Some(exit_code) = run_status_io_worker_if_requested() {
         std::process::exit(exit_code);
     }
+    #[cfg(feature = "status-perf")]
+    let perf_startup = libra::utils::status_perf::Span::new("startup");
     install_broken_pipe_panic_hook();
     init_tracing();
 
     const CLI_STACK_SIZE: usize = 32 * 1024 * 1024;
+    #[cfg(feature = "status-perf")]
+    drop(perf_startup);
     let handle = std::thread::Builder::new()
         .name("libra-cli".to_string())
         .stack_size(CLI_STACK_SIZE)
@@ -628,6 +632,10 @@ fn main() {
         }
     };
 
+    #[cfg(feature = "status-perf")]
+    if let Err(error) = libra::utils::status_perf::flush() {
+        eprintln!("status diagnostic file could not be written: {error}");
+    }
     if let Err(err) = result {
         if err.is_stdout_broken_pipe() {
             flush_telemetry();

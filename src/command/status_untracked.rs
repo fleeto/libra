@@ -13,7 +13,7 @@ use super::{
         sort_paths,
     },
 };
-use crate::utils::{path, util};
+use crate::utils::util;
 
 pub(crate) struct StatusWorktreeChanges {
     pub(crate) unstaged: Changes,
@@ -73,26 +73,38 @@ fn io_blocked_event(
     }
 }
 
+#[cfg(test)]
 pub(crate) fn collect_status_worktree_changes(
     untracked_mode: UntrackedFiles,
     include_ignored: bool,
     ignore_case: bool,
     file_mode: bool,
 ) -> Result<StatusWorktreeChanges, StatusError> {
+    let snapshot = super::status::StatusIndexSnapshot::load()?;
+    collect_status_worktree_changes_with_index(
+        untracked_mode,
+        include_ignored,
+        ignore_case,
+        file_mode,
+        snapshot,
+    )
+}
+
+pub(super) fn collect_status_worktree_changes_with_index(
+    untracked_mode: UntrackedFiles,
+    include_ignored: bool,
+    ignore_case: bool,
+    file_mode: bool,
+    snapshot: super::status::StatusIndexSnapshot,
+) -> Result<StatusWorktreeChanges, StatusError> {
     let workdir = util::try_working_dir().map_err(|source| StatusError::Workdir { source })?;
-    let index_path = path::try_index().map_err(|source| StatusError::Workdir { source })?;
-    let index = Index::load(&index_path).map_err(|source| StatusError::IndexLoad {
-        path: index_path.clone(),
-        source,
-    })?;
+    let index = snapshot.index;
+    let index_file_mtime = snapshot.mtime;
     let tracked = TrackedPaths::from_index(&index, ignore_case);
-    let mut io_blocked: Vec<crate::command::status_probe::IoBlockedEvent> = Vec::new();
-    let mut mode_fix_candidates: Vec<PathBuf> = Vec::new();
-    // The index file's own mtime anchors the racily-clean guard: a stat
-    // triple is only trusted for files strictly older than this snapshot.
-    let index_file_mtime = std::fs::metadata(&index_path)
-        .ok()
-        .and_then(|meta| meta.modified().ok());
+    let mut io_blocked = Vec::new();
+    let mut mode_fix_candidates = Vec::new();
+    #[cfg(feature = "status-perf")]
+    let perf_tracked = crate::utils::status_perf::Span::new("tracked");
     let (mut unstaged, intent_to_add) = collect_tracked_worktree_changes(
         &workdir,
         &index,
@@ -102,6 +114,10 @@ pub(crate) fn collect_status_worktree_changes(
         file_mode,
         &mut mode_fix_candidates,
     )?;
+    #[cfg(feature = "status-perf")]
+    drop(perf_tracked);
+    #[cfg(feature = "status-perf")]
+    let _perf_untracked = crate::utils::status_perf::Span::new("untracked");
     let mut ignored_files = Vec::new();
 
     if !matches!(untracked_mode, UntrackedFiles::No) {
@@ -169,22 +185,7 @@ fn path_to_current_preserving_directory_marker(path: PathBuf) -> PathBuf {
 fn captured_stat_times(
     metadata: &crate::command::status_io_worker::CapturedStat,
 ) -> (std::time::SystemTime, std::time::SystemTime) {
-    use std::time::{Duration, SystemTime, UNIX_EPOCH};
-
-    fn at(seconds: i64, nanos: i64) -> SystemTime {
-        if seconds < 0 {
-            return UNIX_EPOCH;
-        }
-        let nanos = u32::try_from(nanos)
-            .ok()
-            .filter(|nanos| *nanos < 1_000_000_000)
-            .unwrap_or(0);
-        UNIX_EPOCH + Duration::new(seconds as u64, nanos)
-    }
-    (
-        at(metadata.ctime_sec, metadata.ctime_nsec),
-        at(metadata.mtime_sec, metadata.mtime_nsec),
-    )
+    metadata.times()
 }
 
 /// Whether the index entry's cached stat data disagrees with `metadata`
@@ -221,7 +222,39 @@ fn collect_tracked_worktree_changes(
 ) -> Result<(Changes, Vec<PathBuf>), StatusError> {
     let mut changes = Changes::default();
     let mut intent_to_add: Vec<PathBuf> = Vec::new();
-    for file in tracked_files {
+    let candidates: Vec<_> = tracked_files
+        .iter()
+        .filter(|file| {
+            file.to_str().is_some_and(|name| {
+                !index
+                    .get(name, 0)
+                    .is_some_and(|entry| entry.flags.skip_worktree || entry.mode == 0o160000)
+            })
+        })
+        .collect();
+    // Bound preparation and retained results as well as submitted requests.
+    // Holding every path/check/stat until classification amplifies RSS on large indexes.
+    let probes = candidates
+        .chunks(crate::internal::worktree_io::protocol::STAT_BATCH_PATHS)
+        .flat_map(|batch| {
+            let absolute: Vec<_> = batch.iter().map(|file| workdir.join(file)).collect();
+            let checks: Vec<_> = batch
+                .iter()
+                .map(|file| {
+                    let entry = file.to_str().and_then(|name| index.get(name, 0));
+                    crate::internal::worktree_io::protocol::TrackedStatCheck {
+                        stat: entry.map(crate::utils::stat_diff::IndexStatCache::from_entry),
+                        mode: entry.map_or(0, |entry| entry.mode),
+                        intent_to_add: entry.is_some_and(|entry| entry.flags.intent_to_add),
+                        file_mode,
+                        index_mtime: index_file_mtime,
+                    }
+                })
+                .collect();
+            let stats = crate::command::status_io_worker::deadline_stats(&absolute, &checks);
+            batch.iter().copied().zip(stats).collect::<Vec<_>>()
+        });
+    for (file, stat_result) in probes {
         // §B.6.1: an index key is a UTF-8 string by construction, so this
         // only fires if a path arrives from somewhere else. Skip the KEYED
         // comparisons rather than failing the whole status — the contract is
@@ -248,7 +281,6 @@ fn collect_tracked_worktree_changes(
         {
             continue;
         }
-        let file_abs = workdir.join(file);
         // A tracked path that is genuinely gone is a deletion; but a real I/O
         // error (permission denied, I/O failure) only means "can't tell" — it
         // must NOT be reported as a deletion NOR fabricated as clean
@@ -260,14 +292,14 @@ fn collect_tracked_worktree_changes(
         // per-operation deadline. A hung mount (or a FIFO left in the tree)
         // must reclaim the caller and report the path blocked — never wedge
         // `status` forever, and never let the timeout read as "clean".
-        let stat = match crate::command::status_io_worker::deadline_stat(&file_abs) {
+        let stat = match stat_result {
             Ok(result) => result,
             Err(()) => {
                 io_blocked.push(io_timeout_event(file));
                 continue;
             }
         };
-        let metadata = match stat {
+        let mut metadata = match stat {
             Err(source) if source.kind() == std::io::ErrorKind::NotFound => {
                 changes.deleted.push(file.clone());
                 continue;
@@ -306,8 +338,7 @@ fn collect_tracked_worktree_changes(
             if let Some(entry) = index.get(file_str, 0)
                 && entry.mode & 0o111 != 0
                 && metadata.mode & 0o111 == 0
-                && let Ok(Ok(hash)) =
-                    crate::command::status_io_worker::deadline_file_blob_hash(&file_abs, workdir)
+                && let Ok(Ok(hash)) = metadata.hash.take().ok_or(())
                 && index.verify_hash(file_str, 0, &hash)
             {
                 mode_fix_candidates.push(file.clone());
@@ -320,15 +351,13 @@ fn collect_tracked_worktree_changes(
         // would panic the whole command instead of degrading to an
         // `io_blocked[]` partial. Same fields, one stat, no panic.
         if index_stat_differs(index, file_str, &metadata, index_file_mtime) {
-            let hashed =
-                match crate::command::status_io_worker::deadline_file_blob_hash(&file_abs, workdir)
-                {
-                    Ok(result) => result,
-                    Err(()) => {
-                        io_blocked.push(io_timeout_event(file));
-                        continue;
-                    }
-                };
+            let hashed = match metadata.hash.take().ok_or(()) {
+                Ok(result) => result,
+                Err(()) => {
+                    io_blocked.push(io_timeout_event(file));
+                    continue;
+                }
+            };
             match hashed {
                 Ok(file_hash) => {
                     if !index.verify_hash(file_str, 0, &file_hash) {

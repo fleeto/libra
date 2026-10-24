@@ -12,6 +12,8 @@ categories = ["command-line-utilities", "development-tools"]
 readme = "README.md"
 
 [features]
+# Development-only status phase/counter diagnostics; excluded from normal builds.
+status-perf = []
 default        = []
 worktree-fuse  = []   # Unix FUSE-backed worktree commands (optional)
 test-network   = []   # L2: tests requiring outbound network but no secrets

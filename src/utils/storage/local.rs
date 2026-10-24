@@ -1248,7 +1248,7 @@ impl LocalStorage {
         Ok(Self::read_idx_from_open_binary(&mut idx_file, version, &fanout, obj_id)?.is_some())
     }
 
-    fn read_idx_version(file: &mut fs::File) -> Result<IdxVersion, io::Error> {
+    fn read_idx_version<R: Read + Seek>(file: &mut R) -> Result<IdxVersion, io::Error> {
         let mut header = [0u8; 4];
         file.read_exact(&mut header)?;
         if header == IDX_MAGIC {
@@ -1278,8 +1278,8 @@ impl LocalStorage {
         Self::read_idx_fanout_from_open(&mut idx_file)
     }
 
-    fn read_idx_fanout_from_open(
-        idx_file: &mut fs::File,
+    fn read_idx_fanout_from_open<R: Read + Seek>(
+        idx_file: &mut R,
     ) -> Result<(IdxVersion, [u32; 256]), io::Error> {
         let version = Self::read_idx_version(idx_file)?;
         let fanout_offset = match version {
@@ -1288,10 +1288,18 @@ impl LocalStorage {
         };
         idx_file.seek(io::SeekFrom::Start(fanout_offset))?;
         let mut fanout: [u32; 256] = [0; 256];
-        let mut buf = [0; 4];
-        for slot in fanout.iter_mut() {
-            idx_file.read_exact(&mut buf)?;
-            *slot = u32::from_be_bytes(buf);
+        let mut buf = [0; FANOUT as usize];
+        idx_file.read_exact(&mut buf)?;
+        for (slot, bytes) in fanout.iter_mut().zip(buf.chunks_exact(4)) {
+            *slot = u32::from_be_bytes(bytes.try_into().map_err(|_| {
+                io::Error::new(io::ErrorKind::InvalidData, "invalid pack index fanout")
+            })?);
+        }
+        if fanout.windows(2).any(|pair| pair[0] > pair[1]) {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "pack index fanout is not monotonic",
+            ));
         }
         Ok((version, fanout))
     }
@@ -1299,81 +1307,13 @@ impl LocalStorage {
     fn read_idx(idx_file: &Path, obj_id: &ObjectHash) -> Result<Option<u64>, io::Error> {
         let mut idx_file = fs::File::open(idx_file)?;
         let (version, fanout) = Self::read_idx_fanout_from_open(&mut idx_file)?;
-        Self::read_idx_from_open(&mut idx_file, version, &fanout, obj_id)
+        Self::read_idx_from_open_binary(&mut idx_file, version, &fanout, obj_id)
     }
 
-    fn read_idx_from_open(
-        idx_file: &mut fs::File,
-        version: IdxVersion,
-        fanout: &[u32; 256],
-        obj_id: &ObjectHash,
-    ) -> Result<Option<u64>, io::Error> {
-        let first_byte = obj_id.as_ref()[0];
-        let start = if first_byte == 0 {
-            0
-        } else {
-            fanout[first_byte as usize - 1] as usize
-        };
-        let end = fanout[first_byte as usize] as usize;
-        let object_count = fanout[255] as u64;
-        let hash_size = git_internal::hash::get_hash_kind().size() as u64;
-
-        match version {
-            IdxVersion::V1 => {
-                if hash_size != 20 {
-                    return Err(io::Error::new(
-                        io::ErrorKind::InvalidData,
-                        "pack index v1 only supports sha1",
-                    ));
-                }
-                idx_file.seek(io::SeekFrom::Start(FANOUT + 24 * start as u64))?;
-                for _ in start..end {
-                    let offset = idx_file.read_u32::<BigEndian>()?;
-                    let hash = read_sha(idx_file)?;
-
-                    if &hash == obj_id {
-                        return Ok(Some(offset as u64));
-                    }
-                }
-                Ok(None)
-            }
-            IdxVersion::V2 => {
-                let names_offset = FANOUT + 8;
-                idx_file.seek(io::SeekFrom::Start(names_offset + hash_size * start as u64))?;
-                let mut found_index = None;
-                for i in start..end {
-                    let hash = read_sha(idx_file)?;
-                    if &hash == obj_id {
-                        found_index = Some(i as u64);
-                        break;
-                    }
-                }
-                let Some(index) = found_index else {
-                    return Ok(None);
-                };
-
-                let crc_offset = names_offset + object_count * hash_size;
-                let offsets_offset = crc_offset + object_count * 4;
-                idx_file.seek(io::SeekFrom::Start(offsets_offset + index * 4))?;
-                let offset = idx_file.read_u32::<BigEndian>()?;
-                if offset & 0x8000_0000 != 0 {
-                    let large_index = (offset & 0x7fff_ffff) as u64;
-                    let large_offsets_offset = offsets_offset + object_count * 4;
-                    idx_file.seek(io::SeekFrom::Start(large_offsets_offset + large_index * 8))?;
-                    let large_offset = idx_file.read_u64::<BigEndian>()?;
-                    Ok(Some(large_offset))
-                } else {
-                    Ok(Some(offset as u64))
-                }
-            }
-        }
-    }
-
-    /// Batch-only lookup: pack index names are sorted within each fanout
-    /// bucket, so binary search avoids rescanning a large bucket for every
-    /// advertised shallow boundary. The single-object path above is unchanged.
-    fn read_idx_from_open_binary(
-        idx_file: &mut fs::File,
+    /// Pack index names are sorted within each fanout bucket, so binary search
+    /// avoids rescanning a large bucket for ordinary and batch lookups.
+    fn read_idx_from_open_binary<R: Read + Seek>(
+        idx_file: &mut R,
         version: IdxVersion,
         fanout: &[u32; 256],
         obj_id: &ObjectHash,
@@ -3228,6 +3168,10 @@ mod tests {
                     .expect("find indexed object"),
                     Some(index as u64 + 1)
                 );
+                assert_eq!(
+                    LocalStorage::read_idx(&index_path, hash).expect("ordinary lookup"),
+                    Some(index as u64 + 1)
+                );
             }
             for missing in [
                 oid(kind, 0x2a, 0x40),
@@ -3245,7 +3189,172 @@ mod tests {
                     .expect("search missing object"),
                     None
                 );
+                assert_eq!(
+                    LocalStorage::read_idx(&index_path, &missing).expect("ordinary miss"),
+                    None
+                );
             }
+        }
+    }
+
+    #[test]
+    fn ordinary_pack_index_lookup_reads_fanout_in_one_buffer() {
+        use std::io::Cursor;
+
+        struct ReadCounter {
+            inner: Cursor<Vec<u8>>,
+            read_lengths: Vec<usize>,
+            max_chunk: usize,
+        }
+
+        impl Read for ReadCounter {
+            fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
+                self.read_lengths.push(buf.len());
+                let len = buf.len().min(self.max_chunk);
+                self.inner.read(&mut buf[..len])
+            }
+        }
+
+        impl Seek for ReadCounter {
+            fn seek(&mut self, position: io::SeekFrom) -> io::Result<u64> {
+                self.inner.seek(position)
+            }
+        }
+
+        let mut index = Vec::new();
+        index.extend(std::iter::repeat_n(0u32.to_be_bytes(), 256).flatten());
+        let mut reader = ReadCounter {
+            inner: Cursor::new(index.clone()),
+            read_lengths: Vec::new(),
+            max_chunk: usize::MAX,
+        };
+        let (_, fanout) =
+            LocalStorage::read_idx_fanout_from_open(&mut reader).expect("read complete fanout");
+        assert_eq!(fanout, [0; 256]);
+        assert_eq!(
+            reader
+                .read_lengths
+                .iter()
+                .filter(|&&len| len == 1024)
+                .count(),
+            1
+        );
+
+        let mut short_reader = ReadCounter {
+            inner: Cursor::new(index),
+            read_lengths: Vec::new(),
+            max_chunk: 17,
+        };
+        LocalStorage::read_idx_fanout_from_open(&mut short_reader)
+            .expect("read fanout despite legal short reads");
+        assert!(short_reader.read_lengths.len() > 3);
+    }
+
+    #[test]
+    fn ordinary_pack_index_rejects_truncated_and_non_monotonic_fanout() {
+        use std::io::Cursor;
+
+        let truncated = vec![0; 1023];
+        assert_eq!(
+            LocalStorage::read_idx_fanout_from_open(&mut Cursor::new(truncated))
+                .expect_err("truncated fanout must fail")
+                .kind(),
+            io::ErrorKind::UnexpectedEof
+        );
+
+        let mut invalid = vec![0; FANOUT as usize];
+        invalid[0..4].copy_from_slice(&2u32.to_be_bytes());
+        invalid[4..8].copy_from_slice(&1u32.to_be_bytes());
+        assert_eq!(
+            LocalStorage::read_idx_fanout_from_open(&mut Cursor::new(invalid))
+                .expect_err("non-monotonic fanout must fail")
+                .kind(),
+            io::ErrorKind::InvalidData
+        );
+    }
+
+    #[test]
+    #[serial_test::serial(hash_kind)]
+    fn ordinary_pack_index_offsets_match_git_verify_pack() {
+        use std::process::Command;
+
+        let _kind = git_internal::hash::set_hash_kind_for_test(HashKind::Sha1);
+        let dir = tempfile::tempdir().expect("temporary Git repository");
+        let git = |args: &[&str]| {
+            let output = Command::new("git")
+                .arg("-C")
+                .arg(dir.path())
+                .args(args)
+                .output()
+                .expect("run Git comparison command");
+            assert!(
+                output.status.success(),
+                "git {args:?} failed: {}",
+                String::from_utf8_lossy(&output.stderr)
+            );
+            String::from_utf8(output.stdout).expect("Git output is UTF-8")
+        };
+
+        git(&["init", "-q"]);
+        git(&["config", "user.name", "Libra Test"]);
+        git(&["config", "user.email", "libra-test@example.invalid"]);
+        for index in 0..12 {
+            fs::write(
+                dir.path().join(format!("object-{index:02}.txt")),
+                format!("packed object payload {index}\n"),
+            )
+            .expect("write Git fixture object");
+        }
+        git(&["add", "."]);
+        git(&[
+            "-c",
+            "commit.gpgSign=false",
+            "commit",
+            "-q",
+            "-m",
+            "pack index fixture",
+        ]);
+        git(&["gc", "--aggressive", "--prune=now"]);
+
+        let pack_dir = dir.path().join(".git/objects/pack");
+        let index_path = fs::read_dir(&pack_dir)
+            .expect("read Git pack directory")
+            .filter_map(Result::ok)
+            .map(|entry| entry.path())
+            .find(|path| path.extension().is_some_and(|ext| ext == "idx"))
+            .expect("Git generated a pack index");
+        let verified = git(&[
+            "verify-pack",
+            "-v",
+            index_path.to_str().expect("index path is UTF-8"),
+        ]);
+        let expected_offsets: HashMap<String, u64> = verified
+            .lines()
+            .filter_map(|line| {
+                let mut fields = line.split_whitespace();
+                let oid = fields.next()?;
+                if oid.len() != 40 {
+                    return None;
+                }
+                let _object_type = fields.next()?;
+                let _object_size = fields.next()?;
+                let _packed_size = fields.next()?;
+                let offset = fields.next()?.parse().ok()?;
+                Some((oid.to_owned(), offset))
+            })
+            .collect();
+        assert!(
+            !expected_offsets.is_empty(),
+            "Git verify-pack listed objects"
+        );
+        for (oid, expected_offset) in expected_offsets {
+            let hash =
+                crate::internal::object_format::parse_repo_oid(&oid).expect("parse Git object ID");
+            assert_eq!(
+                LocalStorage::read_idx(&index_path, &hash).expect("ordinary pack lookup"),
+                Some(expected_offset),
+                "offset for Git object {oid}"
+            );
         }
     }
 

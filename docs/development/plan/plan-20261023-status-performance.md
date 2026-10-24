@@ -1,8 +1,324 @@
 # status 性能修复计划（2026-10-23）
 
+## 本轮执行裁决（2026-10-23 15:16:46 UTC）
+
+用户已要求实施 SP-03～SP-08。原准备阶段的 pending、Nextest、发布及等待依赖描述保留为历史，不作为本轮本地执行门。最新用户要求优先：仅本地修改，只做相关单元测试与 Libra/Git status 性能比较，不运行 nextest、不做 commit/push/安装/发布、不改真实 benchmark 仓库 index。无关联的新 Issue，不创建远端 Issue。当前分支 status-speedup，保留已有本地修改。
+
+目标：2114 tracked 文件、stat 命中、干净工作树的默认 status，每轮新版/Git 暖跑中位数比 ≤5。历史测量：安装版 1713 ms；项目 release 原仓库 1470 ms；同一隔离副本缓存刷新前 1466 ms、刷新后 950 ms；Git 22 ms。历史数值不能替代最终验收。原仓库 2114 条 stat 为零，不自动刷新。
+
+### 统一字段与约束
+
+- Release boundary：local-only；Version increment / C/D coverage from / Release write set：N/A。本轮不宣称正式发布门通过。
+- Rollback mode：revert，只撤销本卡差异、保留用户已有工作；无 schema/index 格式迁移。
+- 公共 CLI、输出、错误码不变；保留 no-follow、beneath、root 检查、deadline、partial/fail-closed 与预算。不新增依赖、daemon、监控或跨调用缓存。
+- 各卡随附写集：本计划、plan-status.md、docs/development/commands/status.md；新增串行单元测试同步 tests/SRC_SERIAL_REGISTRY.tsv。
+- 证据写入本计划，临时 fixture/原始 JSON 位于 /tmp，不新增库内证据目录。实施中每卡记录 UTC 时间、真实命令和非零测试数；零匹配不能算通过。
+- 单元测试使用现有 LIBRA_TEST_HOME 隔离用户状态；运行 fmt --check 与 libra diff --check。不把相关单测描述为全量通过。
+
+### 新增依赖与顺序
+
+| ID | 产物/约束 | 可用条件与失败路径 |
+|---|---|---|
+| DEP-SP-LOCAL | 已有 SP-01/02 与 restore 本地差异 | 已存在；先核对、不得覆盖 |
+| DEP-SP-BENCH | 三个二进制、真实仓库与隔离 fixture | 记录版本/HEAD/内容/stat；失败不作性能结论，独立单测可继续 |
+| DEP-SP-WRITER | 写集没有并发 writer | 当前串行执行；发生冲突保留他人修改并协调 |
+
+顺序：SP-03 → SP-04 → SP-05 → SP-06 → SP-07 → SP-08。无并行 Agent、无发布窗口。
+
+### 本轮任务卡
+
+### Task SP-03：完成恢复流程 stat 缓存修复
+
+**Task type:** `implementation`
+
+**Lifecycle / Acceptance:** `done` / `locally-accepted`
+
+**Description:** 沿用当前 restore_index_tracked 的 refresh_candidates 修复；只为经过内容验证的工作树缓存 stat。
+
+**Current evidence:** src/command/restore.rs::restore_index_tracked 已实现基础刷新；隔离副本 2114 条全部命中。 开工时刷新行号。
+
+**Dependencies:** DEP-SP-LOCAL、DEP-SP-WRITER
+
+**Out of scope:** 统一约束所排除的行为；不自动执行发布或真实仓库迁移。
+
+**Acceptance criteria:**
+
+- [x] AC-1 同时恢复工作树和索引后匹配的普通文件获得有效 stat。
+- [x] AC-2 仅恢复索引不为对象新条目采信工作树 stat。
+- [x] AC-3 同大小内容修改不能刷新成干净。
+- [x] AC-4 缺失文件不获得有效 stat。
+- [x] AC-5 可执行位不匹配保留 dirty 判定。
+- [x] AC-6 符号链接按链接内容校验。
+- [x] AC-7 skip-worktree 不被错误刷新。
+
+**Verification:** 新过滤名为实施约定，必须非零匹配；环境通过 `LIBRA_TEST_HOME` 隔离。
+
+1. `rtk proxy cargo test --lib command::restore::tests`。
+2. `rtk proxy cargo test --lib utils::stat_diff::tests`。
+
+**Implementation write set:** src/command/restore.rs；src/command/refresh.rs（仅边界测试证明有缺陷时）；加统一随附写集。
+
+**Deliverables:** 缓存修复、单元覆盖、历史零 stat 适用边界。
+
+**Docs and compatibility impact:** 内部缓存行为；status 仍不回写 index。
+
+**Rollback mode:** `revert`，仅本卡差异。
+
+**Version increment / C/D coverage from / Release write set:** N/A / N/A / N/A。
+
+**Release boundary:** local-only。
+
+**Estimated scope:** S。
+
+**Granularity:** `AC=7/8; VER=2/8; prod-files≤2; scope=S; writeset=serial`。
+
+### Task SP-04：建立 status 性能归因与比较工具
+
+**Task type:** `implementation`
+
+**Lifecycle / Acceptance:** `done` / `locally-accepted`
+
+**Description:** 新增 benchmark/status.sh 三方 benchmark；默认关闭的 status-perf feature 提供阶段计数，写显式临时诊断文件，不写正常 stdout/stderr。普通 release 排除插桩；阶段覆盖启动/preflight、HEAD/index、tracked、untracked、rename、其它元数据与输出，计数 worker 提交与内容哈希。
+
+**Current evidence:** benchmark/run.sh 当前未提供本会话所需三方资源比较。 开工时刷新行号。
+
+**Dependencies:** SP-03、DEP-SP-BENCH、DEP-SP-WRITER
+
+**Out of scope:** 统一约束所排除的行为；不自动执行发布或真实仓库迁移。
+
+**Acceptance criteria:**
+
+- [x] AC-1 记录二进制校验和、版本、HEAD、文件数和 stat 命中率。
+- [x] AC-2 报告中位数和 P95。
+- [x] AC-3 报告 user/system CPU。
+- [x] AC-4 报告进程树内存采样及短峰值遗漏限制。
+- [x] AC-5 报告 voluntary/involuntary context switches。
+- [x] AC-6 子命令失败不得成为成功性能样本。
+- [x] AC-7 普通 release 不包含诊断路径。
+- [x] AC-8 计数可区分 worker 提交和文件哈希。
+
+**Verification:** 新过滤名为实施约定，必须非零匹配；环境通过 `LIBRA_TEST_HOME` 隔离。
+
+1. `rtk proxy cargo test --lib --features status-perf status_perf_`。
+2. `rtk proxy cargo build --release --bin libra`。
+3. `rtk proxy bash benchmark/status.sh --installed-libra /home/dusti/.libra/bin/libra --built-libra /home/dusti/projects/libra/target/release/libra --git /usr/bin/git --libra-repo /home/dusti/projects/libra-lbr --git-repo /home/dusti/projects/libra-git --warmup 3 --runs 20 --rounds 3 --output /tmp/libra-status-performance.json`。
+
+**Implementation write set:** benchmark/status.sh；benchmark/README.md；Cargo.toml；src/main.rs；src/cli.rs；src/utils/mod.rs；src/utils/status_perf.rs（新增）；src/command/status.rs（输出阶段计时）；src/command/status/scan.rs；src/command/status_untracked.rs；src/internal/worktree_io/executor.rs；加统一随附写集。
+
+**Deliverables:** benchmark、诊断计数、分阶段基线。
+
+**Docs and compatibility impact:** 默认关闭的开发 feature；公共 CLI 不变。
+
+**Rollback mode:** `revert`，仅本卡差异。
+
+**Version increment / C/D coverage from / Release write set:** N/A / N/A / N/A。
+
+**Release boundary:** local-only。
+
+**Estimated scope:** M。
+
+**Granularity:** `AC=8/8; VER=3/8; prod-files≤9; scope=M; writeset=serial`。
+
+### Task SP-05：批量 stat 与有界调度
+
+**Task type:** `implementation`
+
+**Lifecycle / Acceptance:** `done` / `locally-accepted`
+
+**Description:** 每批最多 64 路径、序列化请求预算 256 KiB，最多 4 批并发，继续受现有 frame cap 限制。超长单项走原单项限制。逐路径开始/终态携带序号，按输入顺序归并。deadline 按路径，不由其它进度延期；超时保留完成项，blocked 当前项，重调度尚未开始项。取消不再提交。非法/截断协议 fail-closed。保持原 root 打开方式，不新增描述符缓存。
+
+**Current evidence:** status_untracked.rs::collect_tracked_worktree_changes 逐条 deadline_stat；executor.rs::submit_with_token 同步等待。 开工时刷新行号。
+
+**Dependencies:** SP-04、DEP-SP-WRITER
+
+**Out of scope:** 统一约束所排除的行为；不自动执行发布或真实仓库迁移。
+
+**Acceptance criteria:**
+
+- [x] AC-1 2114 普通路径正常 stat 批次数为 ceil(2114/64)=34。
+- [x] AC-2 活跃批次≤4。
+- [x] AC-3 批量与单项结果一致。
+- [x] AC-4 完成顺序不影响输出顺序。
+- [x] AC-5 单路径超时保留完成结果。
+- [x] AC-6 取消停止剩余提交。
+- [x] AC-7 非法/截断协议不产生伪 clean。
+- [x] AC-8 路径逃逸防护有效。
+
+**Verification:** 新过滤名为实施约定，必须非零匹配；环境通过 `LIBRA_TEST_HOME` 隔离。
+
+1. `rtk proxy cargo test --lib status_stat_batch_`。
+2. `rtk proxy cargo test --lib internal::worktree_io::executor::tests`。
+3. `rtk proxy cargo test --lib command::status_io_worker`。
+
+**Implementation write set:** src/internal/worktree_io/protocol.rs；src/internal/worktree_io/handler.rs；src/internal/worktree_io/executor.rs；src/command/status_io_worker.rs；src/command/status_untracked.rs；加统一随附写集。
+
+**Deliverables:** 批量协议、调度、partial 处理、真实 helper 单元用例及资源对比。
+
+**Docs and compatibility impact:** 内部协议变化，父子同一二进制，不支持跨版本 helper。
+
+**Rollback mode:** `revert`，仅本卡差异。
+
+**Version increment / C/D coverage from / Release write set:** N/A / N/A / N/A。
+
+**Release boundary:** local-only。
+
+**Estimated scope:** M。
+
+**Granularity:** `AC=8/8; VER=3/8; prod-files≤5; scope=M; writeset=serial`。
+
+### Task SP-06：合并 stat 与条件哈希
+
+**Task type:** `implementation`
+
+**Lifecycle / Acceptance:** `done` / `locally-accepted`
+
+**Description:** 请求携带必要 index 字段、index mtime、fileMode、hash kind；worker 返回 stat/可选哈希/错误，父进程保留分类。复用 stat_diff 与既有 LFS/符号链接哈希，不复制算法。
+
+**Current evidence:** tracked stat 失效及 mode-only 修复候选当前另行 deadline_file_blob_hash。 开工时刷新行号。
+
+**Dependencies:** SP-05、DEP-SP-WRITER
+
+**Out of scope:** 统一约束所排除的行为；不自动执行发布或真实仓库迁移。
+
+**Acceptance criteria:**
+
+- [x] AC-1 可信 stat 命中普通文件哈希次数为零。
+- [x] AC-2 stat 失效无需第二次父进程提交。
+- [x] AC-3 racy-clean 仍确认内容。
+- [x] AC-4 同大小修改可检出。
+- [x] AC-5 mode-only 与修复候选语义一致。
+- [x] AC-6 LFS 比较语义一致。
+- [x] AC-7 符号链接比较语义一致。
+- [x] AC-8 特殊索引跳过/占位规则一致。
+
+**Verification:** 新过滤名为实施约定，必须非零匹配；环境通过 `LIBRA_TEST_HOME` 隔离。
+
+1. `rtk proxy cargo test --lib status_tracked_probe_`。
+2. `rtk proxy cargo test --lib utils::stat_diff::tests`。
+3. `rtk proxy cargo test --lib command::status_io_worker`。
+
+**Implementation write set:** src/internal/worktree_io/protocol.rs；src/internal/worktree_io/handler.rs；src/command/status_io_worker.rs；src/command/status_untracked.rs；src/utils/stat_diff.rs；加统一随附写集。
+
+**Deliverables:** 合并 probe、单元覆盖、stat 命中/失效资源数据。
+
+**Docs and compatibility impact:** 不改变公共行为或 index 写回。
+
+**Rollback mode:** `revert`，仅本卡差异。
+
+**Version increment / C/D coverage from / Release write set:** N/A / N/A / N/A。
+
+**Release boundary:** local-only。
+
+**Estimated scope:** M。
+
+**Granularity:** `AC=8/8; VER=3/8; prod-files≤5; scope=M; writeset=serial`。
+
+### Task SP-07：调用内共享 index 快照
+
+**Task type:** `implementation`
+
+**Lifecycle / Acceptance:** `done` / `locally-accepted`
+
+**Description:** 调用上下文持有 index 与快照时间戳，通过引用供 staged/worktree/unmerged/rename/porcelain 消费；其它调用者的独立入口保留包装函数，不跨调用缓存。
+
+**Current evidence:** status.rs staged 与 status_untracked.rs 分别 Index::load；scan 另有加载入口。 开工时刷新行号。
+
+**Dependencies:** SP-06、DEP-SP-WRITER
+
+**Out of scope:** 统一约束所排除的行为；不自动执行发布或真实仓库迁移。
+
+**Acceptance criteria:**
+
+- [x] AC-1 默认 status 实际 index 加载一次。
+- [x] AC-2 不保留第二份完整 index 副本。
+- [x] AC-3 缺失/损坏保持错误语义。
+- [x] AC-4 unmerged 分类一致。
+- [x] AC-5 rename 分类一致。
+- [x] AC-6 porcelain 与同次收集使用相同 index。
+- [x] AC-7 下一次调用可见 index 变化。
+
+**Verification:** 新过滤名为实施约定，必须非零匹配；环境通过 `LIBRA_TEST_HOME` 隔离。
+
+1. `rtk proxy cargo test --lib status_index_snapshot_`。
+2. `rtk proxy cargo test --lib status_head_snapshot_expands_once_for_staged_and_rename`。
+
+**Implementation write set:** src/command/status.rs；src/command/status/scan.rs；src/command/status_untracked.rs；加统一随附写集。
+
+**Deliverables:** 调用级快照、兼容包装、实际 loader 计数与错误测试。
+
+**Docs and compatibility impact:** 内部接口调整，CLI 不变。
+
+**Rollback mode:** `revert`，仅本卡差异。
+
+**Version increment / C/D coverage from / Release write set:** N/A / N/A / N/A。
+
+**Release boundary:** local-only。
+
+**Estimated scope:** M。
+
+**Granularity:** `AC=7/8; VER=2/8; prod-files≤3; scope=M; writeset=serial`。
+
+### Task SP-08：Git 五倍目标与本地证据收口
+
+**Task type:** `audit`
+
+**Lifecycle / Acceptance:** `in-progress` / 空
+
+**Description:** 冻结二进制/fixture，使用默认 status（不禁用 rename/untracked），每轮预热3次、交错20次、共3轮。比较安装 Libra/新 release/Git。主门使用同内容同状态隔离 fixture；保留真实仓库对照。仅审计，不临时改生产实现。
+
+**Current evidence:** 历史缓存命中950ms、Git22ms；仍约1.9万自愿上下文切换，五倍目标未验证。 开工时刷新行号。
+
+**Dependencies:** SP-07、DEP-SP-BENCH、DEP-SP-WRITER
+
+**Out of scope:** 统一约束所排除的行为；不自动执行发布或真实仓库迁移。
+
+**Acceptance criteria:**
+
+- [ ] AC-1 三轮主场景新版/Git中位比均≤5。
+- [x] AC-2 CPU 相对同轮冻结基线不恶化超过10%。
+- [ ] AC-3 同口径进程树内存不恶化超过10%。
+- [ ] AC-4 零stat/少量dirty/较多untracked/rename无超过10%的未解决回退。
+- [x] AC-5 1k/10k/50k规模不突破并发/队列上限。
+- [x] AC-6 真实仓库 index 校验和不变。
+- [x] AC-7 默认输出与退出状态符合预期。
+- [x] AC-8 区分本地验证、目标达成、未执行发布门。
+
+**Verification:** 新过滤名为实施约定，必须非零匹配；环境通过 `LIBRA_TEST_HOME` 隔离。
+
+1. `SP-04 benchmark/status.sh 在真实仓库三方复测`。
+2. `相同参数在同内容同状态隔离 fixture 主门复测`。
+3. `相同参数扩展场景复测`。
+4. `测量前后真实仓库 index 校验和比较`。
+5. `计划记录人工核对`。
+
+**Implementation write set:** 本计划；docs/development/plan/plan-status.md；docs/development/commands/status.md；加统一随附写集。
+
+**Deliverables:** 三方表、分阶段收益、目标判定、剩余热点与复测命令。
+
+**Docs and compatibility impact:** 仅实测结论，不新增性能保证。
+
+**Rollback mode:** `revert`，仅本卡差异。
+
+**Version increment / C/D coverage from / Release write set:** N/A / N/A / N/A。
+
+**Release boundary:** local-only。
+
+**Estimated scope:** S。
+
+**Granularity:** `AC=8/20; VER=5/20; prod-files≤0; scope=S; writeset=serial`。
+
+### 目标失败与执行证据
+
+SP-08 未达标不得标验收通过。保留有效优化，记录差额和剩余热点；不关闭功能、不放宽安全边界、不改变测量口径达标。超出已声明任务的热点另立针对性卡。
+
+- SP-01/02：已有本地实现和历史 focused 单元测试证据；无正式发布/全量/评审 PASS。
+- SP-03：基础实现及 restore 8 项、stat_diff 1 项单测通过；扩展边界验收待执行。
+
+## 历史准备正文（以下门被本轮执行裁决覆盖）
+
 ## 文档职责
 
-修复已由本机测量和源码交叉定位的 pack 索引读取放大、HEAD 树重复展开。本文是修复准备草案，依据 plan-template v2.14；不代表实现、评审或发布完成。本文仅描述两张待实施任务卡，不代表代码修改、评审或发布已完成。
+修复已由本机测量和源码交叉定位的 pack 索引读取放大、HEAD 树重复展开。本文依据 plan-template v2.14，实施范围以最新用户裁决为准。本文已扩展为 SP-01～SP-08 的本地性能优化计划；本地验证与正式发布验收分开登记。
 
 ### 适用范围
 
@@ -315,3 +631,105 @@ M0：范围和交接确认；M1：SP-01 完整独立验收；M2：SP-02 完整�
 - [ ] 各卡 review 明确 PASS，未遗留 P0/P1。
 - [ ] 前后 CPU/elapsed 与工作量数据内联，说明剩余瓶颈。
 - [ ] 文档、版本与全部适用发布/远端门完成，才标记两卡 `done/complete`。
+
+## 执行记录 2026-10-23 22:37:54 UTC
+
+- 未运行 nextest。SP-03：`LIBRA_TEST_HOME=/tmp/libra-status-unit-home LIBRA_TEST=1 cargo test --lib command::restore::tests`，9 passed，包括新增 missing/exec/symlink/skip-worktree；既有 stat_diff 1 passed 证据保留。
+- SP-04：诊断 feature 单测首次编译被 SIGKILL，串行重跑 1 passed；诊断 release 构建成功。普通 release 已构建成功。既有 ingress dead_code 与 proc-macro-error2 future-incompat warning 保留。
+- SP-04 诊断样本（仅归因）：head/index 184.406 ms，tracked 320.019 ms，untracked 370.512 ms，metadata 6.963 ms，rename 0.699 ms，parse/preflight 19.598 ms；worker_requests=2724，stat 命中无内容哈希。阶段存在嵌套，不相加作为最终性能门。
+- benchmark/status.sh 工具短跑成功（1 warmup/3 runs/1 round）；与编译存在并行，**不作为性能证据**。资源脚本区分 wait4 主进程+已回收子进程 CPU 与 /proc 采样进程树 CPU/RSS；后者有 tick/采样误差、共享页重复计数。
+- SP-05～07：本地实现已写入；完整 focused 验证和正常 release 性能门待完成，未标验收通过。
+
+### 2026-10-24 02:39:46 UTC 本地验证与并发调优
+
+- focused 单元测试：status_io_worker 23、executor 16、status 9、stat_diff 1、restore 9、status_perf 1，共59 passed。真实 helper FIFO 超时在150ms窗口返回，完成前缀保留。初次新增测试中类型/作用域编译错误已修正，最终上述命令通过；未使用 nextest。
+- 四 helper 的隔离副本暖跑（3×20）：新版中位 613/616/618 ms，进程树RSS采样峰值约94MiB，相比安装版约56MiB违反内存回退门。该批数据另发现两个 PowerShell 文件的 LF/CRLF 差异，故只作诊断，不计同内容主验收。
+- 在“最多4批并发”的上限内，将默认并发收敛为1；单批直接提交，不创建额外提交线程。保留 bounded 调度及显式 hash kind。普通 release 已重建；新增加2114路径实际34次提交计数测试及隐藏 index 后仍能完成 staged/worktree/v2 的快照测试，正在复验。
+- 隔离 Git 副本两文件改为与 Libra 相同的LF，并通过 git add 更新stat；两文件blob OID不变，Git工作树重新干净。未修改真实两个benchmark仓库。基准脚本新增内容摘要与HEAD匹配判定，不匹配不能判性能目标通过。
+
+### SP-05 规模回退前滚修复
+
+SP-08 的50k短跑发现 RSS 采样 77996→140096 KiB，不能标资源验收通过。审计暂停，回到已有 SP-05 写集修复：提交批次有界之外，准备的路径/check及待消费结果也须逐批持有。属于既有队列/资源预算修复，不新增热点优化范围。随后重新构建、相关单测及受影响性能验证。
+
+## 最终本地验收记录 2026-10-24 08:24:25 UTC
+
+当前普通 release 位于 `target/release/libra`，不带 status-perf。未提交、安装或发布。SP-03～07 已完成本地实现与相关验证；SP-08 审计已执行但**五倍目标与内存门未通过**，计划不标完成。
+
+### 验证范围
+
+- 相关单元测试累计60项通过：restore 9、stat_diff 1、status_perf 1、status 9、status_io_worker 24、executor 16。最后分批消费修复后重跑 status 9 和 status_io_worker 24，33项通过。
+- 使用 `LIBRA_TEST_HOME=/tmp/libra-status-unit-home LIBRA_TEST=1 cargo test --lib --features status-perf <filter>`；restore/stat_diff早期命令和日志见前文。实际2114路径34批次测试、真实helper超时、隐藏index后的单快照测试均通过。
+- 最终 `cargo build --release --bin libra` 成功；fmt检查及最终 `libra diff --check` 通过。未运行 nextest、全量测试、集成测试或 clippy；不宣称这些门通过。
+
+### 三轮主对比
+
+每轮预热3次、交错测量20次。下表按每轮中位数报告，单位ms；所有输入在测量前后校验不变。clean/control位于/tmp，真实仓库位于项目磁盘，不能跨文件系统拼接比值。
+
+| 场景/轮 | 安装版或冻结基线 | 新版 | Git | 新版/Git |
+|---|---:|---:|---:|---:|
+| clean/1 | 1129.61 | 637.09 | 6.98 | 91.32 |
+| clean/2 | 1142.60 | 639.66 | 7.35 | 87.04 |
+| clean/3 | 1150.84 | 655.00 | 7.53 | 87.03 |
+| control/1 | 925.37 | 642.78 | 7.12 | 90.29 |
+| control/2 | 914.47 | 645.39 | 7.23 | 89.24 |
+| control/3 | 900.57 | 637.26 | 7.11 | 89.64 |
+| original/1 | 1620.36 | 791.64 | 21.42 | 36.96 |
+| original/2 | 1612.09 | 785.78 | 20.34 | 38.62 |
+| original/3 | 1623.98 | 783.69 | 21.02 | 37.28 |
+
+clean/original 的 installed 为本机安装版；control 的 installed 字段实际是冻结的 `/tmp/libra-sp03-baseline`，已含SP-01/02/03，用于隔离本轮收益。
+
+| 主场景二进制 | user中位数范围 ms | system中位数范围 ms | 自愿切换范围 | 进程树RSS采样峰值范围 KiB |
+|---|---:|---:|---:|---:|
+| clean/installed | 214.9–221.9 | 775.8–798.1 | 20634.0–20678.0 | 55500–56172 |
+| clean/built | 141.2–171.0 | 433.1–439.9 | 12431.5–12508.0 | 56828–57796 |
+| clean/git | 0.0–0.0 | 3.5–5.3 | 4.0–7.0 | 5632–5632 |
+| control/installed | 187.4–196.4 | 575.3–596.3 | 19366.0–19404.5 | 33776–34744 |
+| control/built | 155.5–168.8 | 416.5–440.4 | 12433.5–12463.5 | 58564–59448 |
+| control/git | 0.0–0.6 | 3.2–4.8 | 5.0–6.0 | 5632–5632 |
+| original/installed | 269.2–280.2 | 973.4–992.1 | 29017.0–29078.0 | 61896–62124 |
+| original/built | 163.8–174.1 | 436.6–451.4 | 13492.0–13521.5 | 61040–62156 |
+| original/git | 8.7–10.3 | 8.6–10.1 | 4.0–7.5 | 8840–9100 |
+
+CPU来自wait4（父进程及已回收子进程）；进程树CPU另在原始JSON采样。RSS为独立运行每5ms采样的树RSS之和，重复计算共享页、可能遗漏短峰值，不能视为精确物理内存。Git短进程尤其易漏采。P95、非自愿切换、逐样本数据及stderr摘要均见原始JSON。
+
+### 冻结输入
+
+- installed: `/home/dusti/.libra/bin/libra`；libra 0.30.86；SHA256 `a384ddeec47c15cb8a13c8b51a6eb2a8d9f25c0e97fcaf58830e4b8208a49df5`。
+- built: `/home/dusti/projects/libra/target/release/libra`；libra 0.30.86；SHA256 `cc06deac5c009a1ed27370c3d213cf6b1d668d5d80798d870c28dd23f7b45660`。
+- git: `/usr/bin/git`；git version 2.53.0；SHA256 `ed8b2df973b28c0fb773b9c0dc0816d3ee2b3835bb932d9153c21417bb51b362`。
+- clean/built: `/tmp/libra-stat-benchmark`，HEAD `83dfafd801025bb9cae3efb2af8b5bbc5f291f2c`，entries=2114，matching_stat=2114，zero_stat=0，index SHA256 `b00d76b0d4d2da64f45c9a1bf8f15947b674ebbea8207189f6b520168c47b483`。
+- clean/git: `/tmp/libra-status-git-main`，HEAD `83dfafd801025bb9cae3efb2af8b5bbc5f291f2c`，entries=2114，matching_stat=2114，zero_stat=0，index SHA256 `3f646c640f71524e3cde2c458f9f0e8a3afbcefaa10e9bc8285d7536c0667787`。
+- original/built: `/home/dusti/projects/libra-lbr`，HEAD `83dfafd801025bb9cae3efb2af8b5bbc5f291f2c`，entries=2114，matching_stat=0，zero_stat=2114，index SHA256 `69eaadd51ce9f758c84ec161d1c33ef4cead176e9d55ba373d78af3a0652b3f6`。
+- original/git: `/home/dusti/projects/libra-git`，HEAD `83dfafd801025bb9cae3efb2af8b5bbc5f291f2c`，entries=2114，matching_stat=2114，zero_stat=0，index SHA256 `a23895dad7ac9c5f8559ac882b3442497774034965d072f92a728b7e4bd18b3d`。
+
+clean/control 的HEAD与tracked内容摘要一致；真实仓库HEAD一致，但install.ps1与template/pre-commit.ps1存在CRLF/LF差异，故original仅作实际环境对照。只在隔离Git副本归一LF并git add刷新stat，blob OID未变化。真实Libra的2114条零stat保持原样。
+
+### 扩展场景（探索性复测）
+
+dirty/untracked/rename/zero/1k/10k：预热1次、5次测量、1轮；50k内存修复复测：预热1次、3次测量、1轮。不是三轮主验收的等强度证据。基线列均为冻结SP-03构建。
+
+| 场景 | 基线 ms | 新版 ms | Git ms | 基线树RSS KiB | 新版树RSS KiB | 新版进程树峰值 |
+|---|---:|---:|---:|---:|---:|---:|
+| dirty | 935.74 | 653.50 | 7.45 | 36036 | 61820 | 2 |
+| untracked | 926.53 | 707.03 | 7.48 | 34424 | 58808 | 2 |
+| rename | 911.74 | 639.65 | 6.98 | 34128 | 59264 | 2 |
+| zero | 1366.88 | 787.76 | 6.71 | 35960 | 62076 | 2 |
+| 1000 | 408.74 | 278.38 | 4.20 | 32888 | 57472 | 2 |
+| 10000 | 2744.20 | 1434.87 | 11.04 | 34172 | 58296 | 2 |
+| 50000 | 13303.03 | 6797.97 | 36.20 | 57432 | 80888 | 2 |
+
+- dirty：修改10个tracked Markdown文件；untracked：新增一个目录、1000个文件；rename：README.md改名并暂存；zero：隔离Libra复制真实零stat index，Git仍命中缓存，不能当缓存等价对比。
+- 规模fixture：每500文件一个目录，内容统一为 `status scale fixture\n`；Git创建临时提交，隔离Libra复制对象并reset到相同HEAD，add --refresh后测量。只在/tmp准备fixture，真实仓库不写入。
+- 七种场景新版与冻结基线的默认stdout逐字节一致，退出码均0。所有测量输入校验不变。源码每批64路径/256KiB，默认单批；当前生产调用按64条准备并消费，不持有全仓库probe结果。
+- 50k修复前新版树RSS采样140096 KiB，修复后80888 KiB；修复后同轮基线57432 KiB，仍超过10%资源门。不同轮基线也有波动（早前77996 KiB），不能据此宣称回退消除。
+
+### 判定与剩余工作
+
+最终control主场景的冻结基线树RSS采样为33776–34744 KiB，新版58564–59448 KiB，主场景资源门也未通过；不只50k有差距。此前轮次冻结基线约55MiB，最终轮次约33MiB，变化原因尚未确认，需复核进程树采样覆盖与内存组成。保留原始数据，不能选择较有利轮次宣布通过。
+
+五倍目标失败，SP-08不验收通过。批量IPC、条件hash、调用内index共享带来真实收益，但仍有大量系统时间/上下文切换。此前诊断显示HEAD/index和untracked扫描成本高；这是下一轮定位方向，不是当前精确阶段占比。规模内存残差也需继续归因，不能靠放宽门、关闭默认功能或弱化安全检查解决。新增热点实现须另立针对性卡，本次审计不擅自扩范围。
+
+复测入口：`bash benchmark/status.sh --installed-libra <installed-or-frozen> --built-libra /home/dusti/projects/libra/target/release/libra --git /usr/bin/git --libra-repo <libra-fixture> --git-repo <git-fixture> --warmup 3 --runs 20 --rounds 3 --output /tmp/result.json`。
+
+原始数据：`/tmp/libra-sp08-final-{clean,control,original}.json`、`/tmp/libra-sp08-aux-{dirty,untracked,rename,zero,1000,10000}.json`、`/tmp/libra-sp08-memory-fix-50000.json`、`/tmp/libra-sp08-output-checks.json`。修复前数据保存在 `/tmp/libra-sp08-pre-memory-*.json`；/tmp文件非持久交付，关键结果已内联。

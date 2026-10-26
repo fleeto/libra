@@ -365,7 +365,7 @@ async fn show_target_uses_commit_display(args: &ShowArgs) -> CliResult<bool> {
         return Ok(false);
     }
 
-    if let Some(hash) = resolve_existing_object_hash(object_ref) {
+    if let Some(hash) = resolve_existing_object_hash(object_ref)? {
         let storage = ClientStorage::init(path::objects());
         let object_type = storage
             .get_object_type(&hash)
@@ -426,7 +426,7 @@ async fn render_show_human(args: &ShowArgs, color_enabled: bool) -> CliResult<St
 
     // Raw object IDs should keep their native schema, including annotated tag
     // objects, but hash-like ref names must still fall back to ref resolution.
-    if let Some(hash) = resolve_existing_object_hash(object_ref) {
+    if let Some(hash) = resolve_existing_object_hash(object_ref)? {
         return show_object_by_hash(&hash, args, color_enabled).await;
     }
 
@@ -483,7 +483,7 @@ async fn validate_show_quiet(args: &ShowArgs) -> CliResult<()> {
         return validate_object_by_hash(&hash, args).await;
     }
 
-    if let Some(hash) = resolve_existing_object_hash(object_ref) {
+    if let Some(hash) = resolve_existing_object_hash(object_ref)? {
         return validate_object_by_hash(&hash, args).await;
     }
 
@@ -1179,7 +1179,7 @@ async fn run_show(args: &ShowArgs) -> CliResult<ShowOutput> {
 
     // Raw object IDs should keep their native schema, including annotated tag
     // objects, but hash-like ref names must still fall back to ref resolution.
-    if let Some(hash) = resolve_existing_object_hash(object_ref) {
+    if let Some(hash) = resolve_existing_object_hash(object_ref)? {
         return collect_object_output(&hash, &paths, path_specs.as_ref(), args).await;
     }
 
@@ -1223,10 +1223,19 @@ async fn collect_object_output(
     }
 }
 
-fn resolve_existing_object_hash(object_ref: &str) -> Option<ObjectHash> {
-    let hash = crate::internal::object_format::parse_repo_oid(object_ref).ok()?;
+fn resolve_existing_object_hash(object_ref: &str) -> CliResult<Option<ObjectHash>> {
+    let Some(hash) = crate::internal::object_format::parse_repo_oid(object_ref).ok() else {
+        return Ok(None);
+    };
     let storage = ClientStorage::init(path::objects());
-    storage.exist(&hash).then_some(hash)
+    match storage.exist_checked(&hash) {
+        Ok(true) => Ok(Some(hash)),
+        Ok(false) => Ok(None),
+        Err(error) => Err(CliError::fatal(format!(
+            "failed to read object storage while checking {hash}: {error}"
+        ))
+        .with_stable_code(StableErrorCode::IoReadFailed)),
+    }
 }
 
 async fn collect_commit_output(

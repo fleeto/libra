@@ -1418,3 +1418,23 @@ fn test_show_separator_pathspec_implies_head() {
         "the full stat must render: {text}"
     );
 }
+
+#[test]
+fn show_storage_read_error_is_not_bad_revision() {
+    let repo = create_committed_repo_via_cli();
+    let repo_path = repo.path();
+    let pack_dir = repo_path.join(".libra/objects/pack");
+    std::fs::create_dir_all(&pack_dir).expect("pack dir");
+    std::fs::write(pack_dir.join("orphan.pack"), b"not-a-pack").expect("unindexed pack");
+    let output = run_libra_command(
+        &["show", "0123456789abcdef0123456789abcdef01234567"],
+        repo_path,
+    );
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    let (_message, report) = parse_cli_error_stderr(&output.stderr);
+    assert_eq!(report.error_code, "LBR-IO-001", "{stderr}");
+    assert!(
+        !stderr.contains("bad revision"),
+        "a storage read failure must not be a missing revision: {stderr}"
+    );
+}

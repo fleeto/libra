@@ -4021,13 +4021,22 @@ fn collect_agent_run_manifest_roots(
             // A mandatory root whose object is ABSENT is not "nothing to
             // keep alive" — it means the run's evidence is already gone, and
             // continuing to prune would compound the damage.
-            if !storage.exist(&hash) {
-                return Err(CliError::fatal(format!(
-                    "agent-run manifest '{}' names object {hash}, which is not in the store",
-                    manifest.display()
-                ))
-                .with_stable_code(StableErrorCode::RepoCorrupt)
-                .with_hint("run `libra agent doctor` to reconcile the run manifests"));
+            match storage.exist_checked(&hash) {
+                Ok(true) => {}
+                Ok(false) => {
+                    return Err(CliError::fatal(format!(
+                        "agent-run manifest '{}' names object {hash}, which is not in the store",
+                        manifest.display()
+                    ))
+                    .with_stable_code(StableErrorCode::RepoCorrupt)
+                    .with_hint("run `libra agent doctor` to reconcile the run manifests"));
+                }
+                Err(error) => {
+                    return Err(CliError::fatal(format!(
+                        "failed to read object storage while checking {hash}: {error}"
+                    ))
+                    .with_stable_code(StableErrorCode::IoReadFailed));
+                }
             }
             walk_reachable(&hash, storage, boundaries, reachable)?;
         }
@@ -4564,6 +4573,77 @@ fn info_println(output: &OutputConfig, message: &str) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    struct ProbeFail;
+
+    #[async_trait::async_trait]
+    impl crate::utils::storage::Storage for ProbeFail {
+        async fn get(
+            &self,
+            _hash: &git_internal::hash::ObjectHash,
+        ) -> Result<
+            (Vec<u8>, git_internal::internal::object::types::ObjectType),
+            git_internal::errors::GitError,
+        > {
+            Err(git_internal::errors::GitError::IOError(
+                std::io::Error::other("simulated probe outage"),
+            ))
+        }
+
+        async fn put(
+            &self,
+            _hash: &git_internal::hash::ObjectHash,
+            _data: &[u8],
+            _obj_type: git_internal::internal::object::types::ObjectType,
+        ) -> Result<String, git_internal::errors::GitError> {
+            unreachable!("probe-fail test never stores objects")
+        }
+
+        async fn exist(&self, _hash: &git_internal::hash::ObjectHash) -> bool {
+            false
+        }
+
+        async fn search(&self, _prefix: &str) -> Vec<git_internal::hash::ObjectHash> {
+            Vec::new()
+        }
+
+        async fn exist_checked(
+            &self,
+            _hash: &git_internal::hash::ObjectHash,
+        ) -> Result<bool, git_internal::errors::GitError> {
+            Err(git_internal::errors::GitError::IOError(
+                std::io::Error::other("simulated probe outage"),
+            ))
+        }
+    }
+
+    #[test]
+    fn maintenance_storage_read_error_is_not_repo_corrupt() {
+        let root = tempfile::tempdir().expect("root");
+        let run = root.path().join("sessions/agent-runs/run1");
+        std::fs::create_dir_all(&run).expect("run dir");
+        std::fs::write(
+            run.join("manifest.json"),
+            r#"{"schema_version":1,"findings_oid":"0123456789abcdef0123456789abcdef01234567"}"#,
+        )
+        .expect("manifest");
+        let storage = ClientStorage::from_test_storage(
+            std::sync::Arc::new(ProbeFail),
+            std::path::PathBuf::new(),
+        );
+        let error = collect_agent_run_manifest_roots(
+            root.path(),
+            &storage,
+            &HashSet::new(),
+            &mut HashSet::new(),
+        )
+        .expect_err("a storage read failure must stop the walk");
+        assert_eq!(error.stable_code(), StableErrorCode::IoReadFailed);
+        assert!(
+            !error.to_string().contains("not in the store"),
+            "read failure must not be reported as absence: {error}"
+        );
+    }
 
     #[tokio::test]
     async fn gc_does_not_hydrate_capture_pending_chunks() {

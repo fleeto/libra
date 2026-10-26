@@ -104,7 +104,7 @@ FIX05 前需要只读的 `DEP-QUAL-F2-ATTRIB` 决定与当前本地Claude ER03�
 
 **Full-suite trigger:** T-1：跨命令共享存储核心；A、C均完整默认套件，沿本文双env/nextest原命令；不以focused PASS替代。
 
-**Dependencies:** `FIX-LTR-01`、`FIX-LTR-05P`、`FIX-LTR-05Q`、`DEP-QUAL-SOURCE`、`DEP-QUAL-PUBLISH`、`DEP-QUAL-F2-ATTRIB`、`DEC-QUAL-05-RELEASE-WARNING`。本卡拆出 `FIX-LTR-05P` 与 `FIX-LTR-05Q`。`FIX-LTR-05Q` 写集未冻结，所以这条边只保持本卡 blocked，不准入 05Q。F2-CLOSE不是本卡前驱；独立缺陷必须另外登记其FIX-ID和边；不以未来FIX04的C/D为前驱，避免环。
+**Dependencies:** `FIX-LTR-01`、`FIX-LTR-05P`、`FIX-LTR-05Q`、`DEP-QUAL-SOURCE`、`DEP-QUAL-PUBLISH`、`DEP-QUAL-F2-ATTRIB`、`DEC-QUAL-05-RELEASE-WARNING`。本卡拆出 `FIX-LTR-05P` 与 `FIX-LTR-05Q`。05Q 已准入的四个文件没有覆盖其余 `exist` / `search` 调用方，所以本卡仍 blocked。F2-CLOSE不是本卡前驱；独立缺陷必须另外登记其FIX-ID和边；不以未来FIX04的C/D为前驱，避免环。
 
 **Deliverables:** 单轴生产修复、完整测试、下列同卡文档与证据摘要；不是仅输出诊断报告。
 
@@ -197,37 +197,43 @@ FIX05 前需要只读的 `DEP-QUAL-F2-ATTRIB` 决定与当前本地Claude ER03�
 
 **Granularity:** `type=migration; axis=存储读取失败不再被布尔存在性探测说成对象不存在; recovery=immutable-release前滚，且不携带配置失败后端; complete=yes; self-contained=yes; AC=6/8; VER=5/8; landing=4; prod-files=5; scope=M; deps=FIX-LTR-01,DEP-QUAL-SOURCE; writeset=序列化于FIX-LTR-05之前; release=family child; split-from=FIX-LTR-05; exception=N/A`
 
-### Task FIX-LTR-05Q: 下一批存在性探测迁移（未准入）
+### Task FIX-LTR-05Q: 下一批存在性探测迁移
 
 **Task type:** `migration`
 
-**Lifecycle / Acceptance:** `blocked` / 空（只登记缺口，写集未冻结，不准入、不实施）
+**Lifecycle / Acceptance:** `in-progress` / 空（session `3de3e11b-98e4-46ee-807c-e903b42bcf0e` 已准入这四个生产文件）
 
-**Description:** 承接 FIX-LTR-05P 没有覆盖的 `exist` / `search` / `is_object_type` 调用方。下一张可实施切片必须先把生产文件数收到不超过 12，并另行取得本地 Claude 准入。本卡正文不授权任何源码修改。
+**Description:** 把 `show`、`maintenance`、`restore` 和 `Blob::save` 里把存储读取失败当成对象不存在的探测改成可失败结果。`Ok(false)` 保持原来的缺失或非提交语义。读失败分别使用 `IoReadFailed`、`RestoreError::ReadObject` 或 `io::Error`，不得调用 `put`。
 
-**Out of scope:** 不在本次准入中实施。不包含 FIX-LTR-05 的配置失败后端。
+**Out of scope:** 不包含 `am.rs` 的 `search`，因为 `Storage::search` 仍返回 `Vec`。不包含 `fetch.rs` 和配置失败后端。不 bump、不打 tag。
 
-**Current evidence:** ER03 session `e52e4025-3bab-423b-ae01-a666afcb458a` 统计相关调用分布在 66 个生产文件。FIX-LTR-05P 只覆盖其中 5 个。
+**Current evidence:** `src/command/show.rs` 的 `resolve_existing_object_hash`、`src/command/maintenance.rs` 的 `collect_agent_run_manifest_roots`、`src/command/restore.rs` 的两处 `is_object_type`、`src/utils/object_ext.rs` 的 `BlobExt::save`。准入 session `3de3e11b-98e4-46ee-807c-e903b42bcf0e`。
 
 **Acceptance criteria:**
 
-- [ ] AC-1: 准入前把本卡生产写集冻结到不超过 12 个文件，并得到单独的本地 Claude `VERDICT: PASS`。
+- [ ] AC-1: `show` 的存储读取失败是 `LBR-IO-001`，不是 bad revision。
+- [ ] AC-2: maintenance 清单里的存储读取失败是 `IoReadFailed`，不是 “not in the store”。
+- [ ] AC-3: `restore` 的类型读取失败是读错误，不是 “not a commit”。
+- [ ] AC-4: `Blob::save` 在读取失败时返回错误并且不写入 loose 对象。
 
 **Verification:**
 
-- [ ] VER-1: 准入审查读取冻结后的写集；未冻结时本卡不得运行 Cargo。
+- [ ] VER-1: `source .env.test && source .env.live-test && cargo nextest run --test command_test -E 'test(show_storage_read_error_is_not_bad_revision)' --no-fail-fast --retries 0`
+- [ ] VER-2: `source .env.test && source .env.live-test && cargo nextest run --lib -E 'test(maintenance_storage_read_error_is_not_repo_corrupt)' --no-fail-fast --retries 0`
+- [ ] VER-3: `source .env.test && source .env.live-test && cargo nextest run --lib -E 'test(restore_storage_read_error_is_not_non_commit)' --no-fail-fast --retries 0`
+- [ ] VER-4: `source .env.test && source .env.live-test && cargo nextest run --lib -E 'test(blob_save_storage_read_error_does_not_write)' --no-fail-fast --retries 0`
 
 **Dependencies:** `FIX-LTR-05P`。
 
-**Deliverables:** 冻结后的下一批调用方迁移。当前没有可实施文件。
+**Deliverables:** 上述四个生产文件的可失败探测和对应测试。
 
-**Implementation write set:** 未冻结。准入前不得把 `src/**` 写入本卡。
+**Implementation write set:** `src/command/show.rs`、`src/command/maintenance.rs`、`src/command/restore.rs`、`src/utils/object_ext.rs`、`tests/command/show_test.rs`、`tests/SRC_SERIAL_REGISTRY.tsv`、`tests/SRC_SERIAL_CENSUS.tsv`、本计划、`docs/development/plan/plan-status.md` 仅本计划行。
 
 **Release write set:** `N/A`
 
-**Files likely touched:** 未冻结。
+**Files likely touched:** 与 I 相同。
 
-**Docs and compatibility impact:** `N/A`。未冻结前没有用户可见行为。
+**Docs and compatibility impact:** `N/A`。本卡不新增命令、参数、配置或稳定错误码。对象缺失和非提交引用的原错误保持不变；只有存储读取失败改为已有的 `LBR-IO-001` 或读错误。没有对应的网站命令页需要改写。
 
 **Rollback mode:** `immutable-release`
 
@@ -235,7 +241,7 @@ FIX05 前需要只读的 `DEP-QUAL-F2-ATTRIB` 决定与当前本地Claude ER03�
 
 **Security and privacy:** 未实施。
 
-**Performance budget:** 未准入，不启动 Cargo。
+**Performance budget:** 不增加重试。本卡本地验证一次 3600 秒，含编译。
 
 **Estimated scope:** `M`
 
@@ -245,7 +251,7 @@ FIX05 前需要只读的 `DEP-QUAL-F2-ATTRIB` 决定与当前本地Claude ER03�
 
 **C/D coverage from:** `FIX-LTR-05`
 
-**Granularity:** `type=migration; axis=下一批调用方不再把存储读取失败当成对象不存在; recovery=immutable-release前滚; complete=no; self-contained=no; AC=1/8; VER=1/8; landing=0; prod-files=0; scope=M; deps=FIX-LTR-05P; writeset=未冻结; release=family child; split-from=FIX-LTR-05; exception=N/A`
+**Granularity:** `type=migration; axis=show、maintenance、restore 和 Blob::save 不再把存储读取失败当成对象不存在; recovery=immutable-release前滚; complete=yes; self-contained=yes; AC=4/8; VER=4/8; landing=4; prod-files=4; scope=M; deps=FIX-LTR-05P; writeset=序列化于FIX-LTR-05之前; release=family child; split-from=FIX-LTR-05; exception=N/A`
 
 ### FIX04、FIX02、FIX03 的接续细则（覆盖旧开工快照）
 
@@ -470,7 +476,7 @@ R1真实ER03/RECOVERY PASS、H0/VERDICT FAIL（sessionbb82411c-1e59-4e52-a7f1-93
 
 ## 实施顺序与发布窗口
 
-`DEP-QUAL-SECURITY + DEP-QUAL-SOURCE + DEP-QUAL-PUBLISH -> FIX-LTR-01 -> FIX-LTR-05P -> FIX-LTR-05Q -> FIX-LTR-05 -> FIX-LTR-04 -> FIX-LTR-02 -> FIX-LTR-03 -> DEP-QUAL-HANDOFF`；另有 `DEP-QUAL-F2-ATTRIB + DEC-QUAL-05-RELEASE-WARNING -> FIX-LTR-05`，另有 `FIX05/具名新FIX -> DEP-QUAL-F2-CLOSE -> FIX04`。`FIX-LTR-05Q` 写集未冻结，这条边不准入 05Q，并且在 05Q 完成前保持 FIX-LTR-05 blocked。顺序用于共享本计划/版本面的串行发布，不表示合并发布。先修确定性全量阻断，再修共享fixture，最后完成MCP测试清理与整份修复计划的最终资格。每卡真正 C/D 闭合后才发布下一卡。`FIX-LTR-05P` 与 `FIX-LTR-05Q` 都是 family child，不占用 v0.30.88。
+`DEP-QUAL-SECURITY + DEP-QUAL-SOURCE + DEP-QUAL-PUBLISH -> FIX-LTR-01 -> FIX-LTR-05P -> FIX-LTR-05Q -> FIX-LTR-05 -> FIX-LTR-04 -> FIX-LTR-02 -> FIX-LTR-03 -> DEP-QUAL-HANDOFF`；另有 `DEP-QUAL-F2-ATTRIB + DEC-QUAL-05-RELEASE-WARNING -> FIX-LTR-05`，另有 `FIX05/具名新FIX -> DEP-QUAL-F2-CLOSE -> FIX04`。`FIX-LTR-05Q` 当前切片只含 show、maintenance、restore、object_ext。其余 exist/search 调用方未迁完时 FIX-LTR-05 仍 blocked。顺序用于共享本计划/版本面的串行发布，不表示合并发布。先修确定性全量阻断，再修共享fixture，最后完成MCP测试清理与整份修复计划的最终资格。每卡真正 C/D 闭合后才发布下一卡。`FIX-LTR-05P` 与 `FIX-LTR-05Q` 都是 family child，不占用 v0.30.88。
 
 ### 实际 D 映射与现场复核
 
@@ -778,6 +784,7 @@ R1真实ER03/RECOVERY PASS、H0/VERDICT FAIL（sessionbb82411c-1e59-4e52-a7f1-93
 
 | 日期 | 触发 | 变更 | 实际状态 |
 |---|---|---|---|
+| 2026-10-26 08:10:00 UTC | 05Q 准入 session 3de3e11b 与实现审查 cf7454d4 | 冻结 show.rs、maintenance.rs、restore.rs、object_ext.rs；四个 focused 测试通过；不占用 v0.30.88；FIX-LTR-05 仍 blocked | in-progress/空；实现审查 PASS |
 | 2026-10-26 06:40:00 UTC | 准入复审 f5697874 要求补齐计数、依赖边与 file.rs 验证 | FIX-LTR-05 写明拆出 05P 与 05Q；05P 写集含 file.rs，VER-5 覆盖 obliterate 错误传播；05Q 仍未冻结不准入；现行顺序见「实施顺序与发布窗口」 | blocked/空；源码未改 |
 | 2026-10-26 06:20:00 UTC | ER03 session e52e4025 要求先拆卡 | 新增 FIX-LTR-05P，只含 client_storage 可失败类型探测及 fsck/cat-file/obliteration 的 exist_checked 迁移；66 文件全迁不进本卡；v0.30.88 仍只属于 FIX-LTR-05 | blocked/空；源码未改，待本卡 Claude 准入 |
 | 2026-10-25 18:59:44 UTC | 退出R1实际四PASS与精确native退出exit0 | 四版本回到.87、0664/stash/源树及9+9+4保护已核，真实C失败/STOP保留；实际终态待增量单审 | blocked/locally-accepted；无active bump或新窗口，资格1/4 |
@@ -793,7 +800,7 @@ R1真实ER03/RECOVERY PASS、H0/VERDICT FAIL（sessionbb82411c-1e59-4e52-a7f1-93
 |---|---|---|---|---|---|---|
 | FIX-LTR-01 | doctor完整结构oracle | global_config_schema_future_test.rs、本计划、plan-status本计划行 | 3/8、3/8 | 1/0 S | DEP-QUAL-SOURCE/SECURITY/PUBLISH | independent/self |
 | FIX-LTR-05P | 存储读取失败不再被布尔存在性探测说成对象不存在 | client_storage.rs、fsck.rs、cat_file.rs、obliteration/mod.rs、file.rs 及本卡测试、本计划、plan-status 本计划行 | 6/8、5/8 | 4/5 M；file.rs 只消费 classify_presence 的 Result | FIX-LTR-01 + DEP-QUAL-SOURCE | family child；不占用 v0.30.88；实现审查 dc579753 PASS，尚未推送 |
-| FIX-LTR-05Q | 下一批调用方迁移 | 写集未冻结，不准入 | 1/8、1/8 | 0/0 | FIX-LTR-05P | family child；不准入、不实施 |
+| FIX-LTR-05Q | show、maintenance、restore 和 Blob::save 的读取失败不再当成对象不存在 | show.rs、maintenance.rs、restore.rs、object_ext.rs 及本卡测试、本计划、plan-status 本计划行 | 4/8、4/8 | 4/4 M | FIX-LTR-05P | family child；不占用 v0.30.88；session 3de3e11b 已准入 |
 | FIX-LTR-05 | 配置失败与对象存储fail-closed（未准入候选） | client_storage/util/fetch候选及卡内逐文件同步集 | 8/8、6/8 | 3文件候选；落点/规模pending VER-6 | FIX01 + FIX-LTR-05P + SOURCE/PUBLISH + F2-ATTRIB + v0.30.88决定；05P不足以解除阻塞 | independent/self；不得先实施 |
 | FIX-LTR-04 | 同步ingress测试构造器profile可用性 | ingress.rs仅两cfg、本计划、plan-status本计划行 | 4/8、5/8 | 1/1 S | FIX-LTR-05 + F2-CLOSE + SOURCE/PUBLISH | independent/self |
 | FIX-LTR-02 | reasoning fixture索引结清 | reasoning_artifact.rs、本计划、plan-status本计划行 | 4/8、3/8 | 1/0 S | FIX-LTR-01/FIX-LTR-04 | independent/self |
@@ -1013,7 +1020,7 @@ root继续承担准入与执行器P2：任何新源码/元数据/help变化先ST
 | DEP-QUAL-HANDOFF | outgoing | 来源资格 | plan-20261015 LTR-10 / LTR-01 | root | 四卡独立C/D完成、FIX03 bump后C及发布后最终资格窗口全量/doc/network与本地Claude明确PASS（绑定实际merge树）、终态登记提交实际PR/main D通过并具名例行补记，再核受控整合树、原工作区受控整合/受影响门通过 | 后续真实提交/版本/远端ref/原件，当前无 | 来源资格未闭合不得解除LTR-10前置；不更改H1或替代LTR各卡门 |
 `DEP-QUAL-SECURITY + DEP-QUAL-SOURCE + DEP-QUAL-PUBLISH -> FIX-LTR-01 -> FIX-LTR-05 -> FIX-LTR-04 -> FIX-LTR-02 -> FIX-LTR-03 -> DEP-QUAL-HANDOFF`；另有 `DEP-QUAL-F2 + DEC-QUAL-05-RELEASE-WARNING -> FIX-LTR-05`，当前授权与诊断未闭合，候选顺序不等于准入。顺序用于共享本计划/版本面的串行发布，不表示合并发布。先修确定性全量阻断，再修共享fixture，最后完成MCP测试清理与整份修复计划的最终资格。每卡真正 C/D 闭合后才发布下一卡。
 
-现行顺序（2026-10-26，不以本快照为准）：`FIX-LTR-01 -> FIX-LTR-05P -> FIX-LTR-05Q -> FIX-LTR-05`。`FIX-LTR-05Q` 写集未冻结，不准入。见上文「实施顺序与发布窗口」。
+现行顺序（2026-10-26，不以本快照为准）：`FIX-LTR-01 -> FIX-LTR-05P -> FIX-LTR-05Q -> FIX-LTR-05`。05Q 当前切片已准入，但其余调用方未迁完时 FIX-LTR-05 仍 blocked。见上文「实施顺序与发布窗口」。
 ### 四卡共同适用的逐项D清单
 **Granularity:** `type=implementation; axis=global-schema doctor的auto-upgrade结构oracle对齐; recovery=immutable-release前滚本卡单轴测试修复; complete=yes; self-contained=yes; AC=3/8; VER=3/8; landing=1; prod-files=0; scope=S; deps=DEP-QUAL-SOURCE, DEP-QUAL-SECURITY, DEP-QUAL-PUBLISH; writeset=四卡本计划与R串行; release=independent; split-from=新上游资格20261025实际FAIL/STOP; exception=N/A`
 **Granularity:** `type=implementation; axis=合成checkpoint fixture的索引结清前置; recovery=immutable-release前滚本卡单轴测试修复; complete=yes; self-contained=yes; AC=4/8; VER=3/8; landing=1; prod-files=0; scope=S; deps=FIX-LTR-01,FIX-LTR-04; writeset=四卡本计划与R串行; release=independent; split-from=新上游资格20261025实际FAIL/STOP; exception=N/A`

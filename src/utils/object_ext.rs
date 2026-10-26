@@ -218,14 +218,56 @@ impl BlobExt for Blob {
     fn save(&self) -> std::io::Result<ObjectHash> {
         let storage = util::objects_storage();
         let id = self.id;
-        if !storage.exist(&id) {
-            storage.put(&id, &self.data, self.get_type())?;
-        } else {
-            // A prior call may have stored the payload and then failed while
-            // creating its durable index marker. Re-register existing content
-            // so a normal retry cannot silently leave cloud sync incomplete.
-            storage.ensure_existing_object_index(&id, self.data.len(), self.get_type())?;
+        match storage.exist_checked(&id) {
+            Ok(false) => {
+                storage.put(&id, &self.data, self.get_type())?;
+            }
+            Ok(true) => {
+                // A prior call may have stored the payload and then failed while
+                // creating its durable index marker. Re-register existing content
+                // so a normal retry cannot silently leave cloud sync incomplete.
+                storage.ensure_existing_object_index(&id, self.data.len(), self.get_type())?;
+            }
+            Err(error) => return Err(std::io::Error::other(error.to_string())),
         }
         Ok(self.id)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use serial_test::serial;
+
+    use super::*;
+    use crate::utils::test::{ChangeDirGuard, setup_with_new_libra_in};
+
+    #[test]
+    #[serial(cwd, env)]
+    fn blob_save_storage_read_error_does_not_write() {
+        let tmp = tempfile::tempdir().expect("tmp");
+        let _guard = ChangeDirGuard::new(tmp.path());
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("runtime");
+        runtime.block_on(setup_with_new_libra_in(tmp.path()));
+        let pack_dir = tmp.path().join(".libra/objects/pack");
+        std::fs::create_dir_all(&pack_dir).expect("pack dir");
+        std::fs::write(pack_dir.join("orphan.pack"), b"not-a-pack").expect("unindexed pack");
+        let blob = Blob::from_content("unread");
+        let oid = blob.id.to_string();
+        let loose = tmp
+            .path()
+            .join(".libra/objects")
+            .join(&oid[..2])
+            .join(&oid[2..]);
+        let error = blob
+            .save()
+            .expect_err("a storage read failure must not store the blob");
+        assert!(!loose.exists(), "save must not write after a read error");
+        assert!(
+            error.to_string().contains("no complete index"),
+            "unexpected error: {error}"
+        );
     }
 }

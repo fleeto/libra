@@ -1,5 +1,6 @@
 file	fn	lane	reason
 src/command/restore.rs	explicit_destination_restores_older_commit_without_touching_source	lane:cwd+env	initializes a real repository and changes process cwd while testing source and explicit destination isolation
+src/command/restore.rs	restore_storage_read_error_is_not_non_commit	lane:cwd+env	unkeyed+touch;env:setup_with_new_libra_in;cwd;callees:restore_storage_read_error_is_not_non_commit
 src/internal/ai/agent_import.rs	reasoning_real_multi_turn_import_consumes_only_reserved_batches	lane:cwd+env	isolates a real repository, registered helper executable and process-global capture test state
 src/internal/ai/agent_import.rs	reasoning_real_multi_turn_import_failure_keeps_committed_progress	lane:cwd+env	isolates a real repository, registered helper executable and process-global capture failpoint
 src/command/agent/import.rs	reasoning_transport_production_consumer_accepts_authenticated_fixture	lane:cwd+env	uses a real repository and registered helper to inspect authenticated shared-store artifact bytes
@@ -369,6 +370,7 @@ src/internal/worktree_scope.rs	the_request_database_follows_the_pin_not_the_cwd	
 src/lib.rs	exec_async_object_index_drain_yields_current_thread_executor	lane:cwd+env	unkeyed+touch;env:setup_with_new_libra_in,ScopedEnvVar;cwd;callees:exec_async_object_index_drain_yields_current_thread_executor
 src/lib.rs	test_libra_init	lane:cwd	unkeyed+touch;cwd;callees:test_libra_init
 src/utils/atomic_write.rs	init_sync_data_from_env_reads_the_flag	lane:env	unkeyed+touch;env:ScopedEnvVar;callees:init_sync_data_from_env_reads_the_flag
+src/utils/object_ext.rs	blob_save_storage_read_error_does_not_write	lane:cwd+env	unkeyed+touch;env:setup_with_new_libra_in;cwd;callees:blob_save_storage_read_error_does_not_write
 src/utils/client_storage.rs	agent_indexing_fails_before_enqueue_when_marker_cannot_be_persisted	lane:cwd+env+hash_kind	converted:plan-20260927;prev:unkeyed;pin:classifier-fail-closed
 src/utils/client_storage.rs	background_index_update_uses_storage_database_instead_of_cwd	lane:cwd	unkeyed+touch;cwd;callees:background_index_update_uses_storage_database_instead_of_cwd,put
 src/utils/client_storage.rs	blob_save_returns_marker_error_and_retry_recreates_the_marker	lane:cwd+env	unkeyed+touch;env:setup_with_new_libra_in;cwd;callees:blob_save_returns_marker_error_and_retry_recreates_the_marker

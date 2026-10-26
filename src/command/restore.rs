@@ -1120,8 +1120,10 @@ async fn resolve_source_commit(
     if objs.len() != 1 {
         return Err(RestoreError::ResolveSource);
     }
-    if !storage.is_object_type(&objs[0], ObjectType::Commit) {
-        return Err(RestoreError::ReferenceNotCommit);
+    match storage.is_object_type_checked(&objs[0], ObjectType::Commit) {
+        Ok(true) => {}
+        Ok(false) => return Err(RestoreError::ReferenceNotCommit),
+        Err(_) => return Err(RestoreError::ReadObject),
     }
     Ok(objs[0])
 }
@@ -1151,8 +1153,10 @@ async fn resolve_source_commit_io(
     if objs.len() != 1 {
         return Err(format!("could not resolve {src}"));
     }
-    if !storage.is_object_type(&objs[0], ObjectType::Commit) {
-        return Err(format!("reference is not a commit: {src}"));
+    match storage.is_object_type_checked(&objs[0], ObjectType::Commit) {
+        Ok(true) => {}
+        Ok(false) => return Err(format!("reference is not a commit: {src}")),
+        Err(error) => return Err(error.to_string()),
     }
     Ok(objs[0])
 }
@@ -2045,7 +2049,10 @@ fn get_index_deleted_files_in_filters_typed(
 
 #[cfg(test)]
 mod tests {
+    use std::sync::Arc;
+
     use clap::Parser;
+    use git_internal::{errors::GitError, hash::ObjectHash, internal::object::types::ObjectType};
     use serial_test::serial;
     use tempfile::tempdir;
 
@@ -2053,8 +2060,64 @@ mod tests {
     use crate::{
         command::{add, commit, init},
         internal::config::ConfigKv,
-        utils::test::ChangeDirGuard,
+        utils::{
+            client_storage::ClientStorage,
+            storage::Storage,
+            test::{ChangeDirGuard, setup_with_new_libra_in},
+        },
     };
+
+    struct UnreadableCommit(ObjectHash);
+
+    #[async_trait::async_trait]
+    impl Storage for UnreadableCommit {
+        async fn get(&self, _hash: &ObjectHash) -> Result<(Vec<u8>, ObjectType), GitError> {
+            Err(GitError::IOError(std::io::Error::other(
+                "simulated type read failure",
+            )))
+        }
+
+        async fn put(
+            &self,
+            _hash: &ObjectHash,
+            _data: &[u8],
+            _obj_type: ObjectType,
+        ) -> Result<String, GitError> {
+            unreachable!("restore probe test never stores objects")
+        }
+
+        async fn exist(&self, _hash: &ObjectHash) -> bool {
+            false
+        }
+
+        async fn search(&self, prefix: &str) -> Vec<ObjectHash> {
+            if self.0.to_string().starts_with(prefix) {
+                vec![self.0]
+            } else {
+                Vec::new()
+            }
+        }
+    }
+
+    #[tokio::test]
+    #[serial(cwd, env)]
+    async fn restore_storage_read_error_is_not_non_commit() {
+        let tmp = tempdir().expect("tmp");
+        let _guard = ChangeDirGuard::new(tmp.path());
+        setup_with_new_libra_in(tmp.path()).await;
+        let hash = ObjectHash::new_for_kind(git_internal::hash::get_hash_kind(), &[9; 20]);
+        let storage = ClientStorage::from_test_storage(
+            Arc::new(UnreadableCommit(hash)),
+            std::path::PathBuf::new(),
+        );
+        let error = resolve_source_commit(&hash.to_string(), &storage)
+            .await
+            .expect_err("a type read failure must not resolve");
+        assert!(
+            matches!(error, RestoreError::ReadObject),
+            "read failure must not be reported as a non-commit: {error}"
+        );
+    }
 
     #[test]
     fn explicit_destination_pruning_stops_at_root() {

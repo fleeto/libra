@@ -342,7 +342,7 @@ impl WorkspaceSnapshotter {
                     &key,
                     &relative,
                     &metadata,
-                )
+                )?
             } else {
                 None
             };
@@ -857,25 +857,28 @@ struct ShortCircuitCtx<'a> {
 }
 
 /// ADR-BRL-04: reuse the index oid when every equivalence condition holds.
-/// Returns `None` to fall through to the worker hash path (fail-closed).
+/// `Ok(None)` falls through to the worker hash path. A storage read error
+/// does not fall through.
 fn try_reuse_index_oid(
     ctx: &ShortCircuitCtx<'_>,
     key: &str,
     relative: &Path,
     metadata: &fs::Metadata,
-) -> Option<ObjectHash> {
-    let entry = ctx.index.get(key, 0)?;
+) -> Result<Option<ObjectHash>, ScanError> {
+    let Some(entry) = ctx.index.get(key, 0) else {
+        return Ok(None);
+    };
     if entry.flags.stage != 0 {
-        return None;
+        return Ok(None);
     }
     // Only regular files: symlinks and gitlinks always hash (G5/G6 equivalence
     // still holds because both short-circuit modes take the hash path).
     if !is_regular_index_mode(entry.mode) {
-        return None;
+        return Ok(None);
     }
     let file_type = metadata.file_type();
     if file_type.is_symlink() || file_type.is_dir() || !metadata.is_file() {
-        return None;
+        return Ok(None);
     }
     let (ctime, mtime) = metadata_stat_times(metadata);
     if stat_diff::index_entry_stat_differs(
@@ -885,15 +888,16 @@ fn try_reuse_index_oid(
         metadata.len(),
         ctx.index_file_mtime,
     ) {
-        return None;
+        return Ok(None);
     }
     if path_has_content_conversion(relative, ctx.worktree_root, ctx.autocrlf) {
-        return None;
+        return Ok(None);
     }
-    if !ctx.storage.exist(&entry.hash) {
-        return None;
+    match ctx.storage.exist_checked(&entry.hash) {
+        Ok(true) => Ok(Some(entry.hash)),
+        Ok(false) => Ok(None),
+        Err(error) => Err(ScanError::Io(io::Error::other(error.to_string()))),
     }
-    Some(entry.hash)
 }
 
 fn is_regular_index_mode(mode: u32) -> bool {
@@ -987,21 +991,28 @@ fn put_content_addressed_object(
     object_type: ObjectType,
     kind: &str,
 ) -> Result<(), SnapshotError> {
-    if storage.exist(oid) {
-        let existing = storage.get(oid).map_err(|error| {
-            SnapshotError::Object(format!("failed to load {kind} object {oid}: {error}"))
-        })?;
-        if existing != bytes {
-            return Err(SnapshotError::Object(format!(
-                "existing {kind} object {oid} has different content"
-            )));
+    match storage.exist_checked(oid) {
+        Ok(true) => {
+            let existing = storage.get(oid).map_err(|error| {
+                SnapshotError::Object(format!("failed to load {kind} object {oid}: {error}"))
+            })?;
+            if existing != bytes {
+                return Err(SnapshotError::Object(format!(
+                    "existing {kind} object {oid} has different content"
+                )));
+            }
+            Ok(())
         }
-        return Ok(());
+        Ok(false) => {
+            storage
+                .put(oid, bytes, object_type)
+                .map_err(|error| SnapshotError::Object(error.to_string()))?;
+            Ok(())
+        }
+        Err(error) => Err(SnapshotError::Object(format!(
+            "failed to read {kind} object {oid}: {error}"
+        ))),
     }
-    storage
-        .put(oid, bytes, object_type)
-        .map_err(|error| SnapshotError::Object(error.to_string()))?;
-    Ok(())
 }
 
 #[derive(Default)]
@@ -1188,7 +1199,109 @@ mod ignore_tests;
 
 #[cfg(test)]
 mod tests {
+    use std::sync::Arc;
+
+    use git_internal::errors::GitError;
+    use serial_test::serial;
+
     use super::*;
+    use crate::utils::storage::Storage;
+
+    struct ReadFail;
+
+    #[async_trait::async_trait]
+    impl Storage for ReadFail {
+        async fn get(&self, _hash: &ObjectHash) -> Result<(Vec<u8>, ObjectType), GitError> {
+            Err(GitError::IOError(std::io::Error::other(
+                "simulated probe outage",
+            )))
+        }
+
+        async fn put(
+            &self,
+            _hash: &ObjectHash,
+            _data: &[u8],
+            _obj_type: ObjectType,
+        ) -> Result<String, GitError> {
+            unreachable!("snapshot read-failure test must not store")
+        }
+
+        async fn exist(&self, _hash: &ObjectHash) -> bool {
+            false
+        }
+
+        async fn search(&self, _prefix: &str) -> Vec<ObjectHash> {
+            Vec::new()
+        }
+
+        async fn exist_checked(&self, _hash: &ObjectHash) -> Result<bool, GitError> {
+            Err(GitError::IOError(std::io::Error::other(
+                "simulated probe outage",
+            )))
+        }
+    }
+
+    #[test]
+    fn snapshot_storage_read_error_does_not_write() {
+        let hash = ObjectHash::new_for_kind(git_internal::hash::get_hash_kind(), &[4; 20]);
+        let storage =
+            ClientStorage::from_test_storage(Arc::new(ReadFail), std::path::PathBuf::new());
+        let error =
+            put_content_addressed_object(&storage, &hash, b"payload", ObjectType::Blob, "blob")
+                .expect_err("a read failure must not store");
+        assert!(
+            matches!(error, SnapshotError::Object(_)),
+            "unexpected error: {error}"
+        );
+        let rendered = error.to_string();
+        assert!(
+            rendered.contains("simulated probe outage"),
+            "read failure must keep the storage error: {rendered}"
+        );
+        assert!(
+            !rendered.contains("different content"),
+            "read failure must not be reported as a content mismatch: {rendered}"
+        );
+    }
+
+    #[tokio::test]
+    #[serial(cwd, env)]
+    async fn snapshot_index_reuse_read_error_does_not_fall_through() {
+        let tmp = tempfile::tempdir().expect("tmp");
+        let _guard = ChangeDirGuard::new(tmp.path());
+        crate::utils::test::setup_with_new_libra_in(tmp.path()).await;
+        let relative = Path::new("same.txt");
+        let path = tmp.path().join(relative);
+        std::fs::write(&path, b"same").expect("write");
+        let hash = ObjectHash::new_for_kind(git_internal::hash::get_hash_kind(), &[4; 20]);
+        let entry = IndexEntry::new_from_file(relative, hash, tmp.path()).expect("entry");
+        let mut index = Index::new();
+        index.add(entry);
+        let storage =
+            ClientStorage::from_test_storage(Arc::new(ReadFail), std::path::PathBuf::new());
+        let metadata = std::fs::symlink_metadata(&path).expect("meta");
+        let error = try_reuse_index_oid(
+            &ShortCircuitCtx {
+                index: &index,
+                index_file_mtime: Some(
+                    std::time::SystemTime::now() + std::time::Duration::from_secs(30),
+                ),
+                autocrlf: false,
+                worktree_root: tmp.path(),
+                storage: &storage,
+            },
+            "same.txt",
+            relative,
+            &metadata,
+        )
+        .expect_err("a read failure must not fall through as a missing object");
+        let rendered = error.to_string();
+        assert!(matches!(error, ScanError::Io(_)), "{rendered}");
+        assert!(
+            rendered.contains("simulated probe outage"),
+            "read failure must keep the storage error: {rendered}"
+        );
+    }
 
     #[test]
     fn cargo_test_harness_paths_use_the_in_process_capability_seam() {

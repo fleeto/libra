@@ -1075,6 +1075,24 @@ impl RestoreEngine {
         }
     }
 
+    fn require_commit_object(
+        store: &OperationStoreV2,
+        oid: ObjectHash,
+        absent_detail: &str,
+    ) -> Result<(), RestoreError> {
+        match store.is_object_type_checked(&oid, ObjectType::Commit) {
+            Ok(true) => Ok(()),
+            Ok(false) => Err(RestoreError::Object {
+                oid,
+                detail: absent_detail.to_string(),
+            }),
+            Err(error) => Err(RestoreError::Object {
+                oid,
+                detail: error.to_string(),
+            }),
+        }
+    }
+
     async fn restore_symbolic_head_branch_tip(
         &self,
         view: &RepoViewV2,
@@ -1136,12 +1154,11 @@ impl RestoreEngine {
                 oid: commit_oid,
                 detail: error.to_string(),
             })?;
-        if !self.store.is_object_type(&commit_oid, ObjectType::Commit) {
-            return Err(RestoreError::Object {
-                oid: commit_oid,
-                detail: "target branch ref does not reference a commit object".to_string(),
-            });
-        }
+        Self::require_commit_object(
+            &self.store,
+            commit_oid,
+            "target branch ref does not reference a commit object",
+        )?;
 
         // A deferred transaction would read (branch ownership, reference rows)
         // before it writes, and SQLite returns SQLITE_BUSY immediately — without
@@ -1334,13 +1351,11 @@ impl RestoreEngine {
                         oid,
                         detail: error.to_string(),
                     })?;
-                if !self.store.is_object_type(&oid, ObjectType::Commit) {
-                    return Err(RestoreError::Object {
-                        oid,
-                        detail: "refs facet commit oid does not reference a commit object"
-                            .to_string(),
-                    });
-                }
+                Self::require_commit_object(
+                    &self.store,
+                    oid,
+                    "refs facet commit oid does not reference a commit object",
+                )?;
             }
         }
         self.protect_linked_worktree_heads(references).await?;
@@ -2764,16 +2779,82 @@ fn now_millis() -> i64 {
 
 #[cfg(test)]
 mod tests {
-    use std::fs;
+    use std::{fs, sync::Arc};
 
-    use git_internal::internal::object::tree::TreeItem;
+    use git_internal::{
+        errors::GitError,
+        hash::ObjectHash,
+        internal::object::{tree::TreeItem, types::ObjectType},
+    };
+    use sea_orm::Database;
     use tempfile::tempdir;
 
     use super::*;
     use crate::{
         internal::{db, operation::CapturePolicy},
-        utils::client_storage::ClientStorage,
+        utils::{client_storage::ClientStorage, storage::Storage},
     };
+
+    struct ReadFail;
+
+    #[async_trait::async_trait]
+    impl Storage for ReadFail {
+        async fn get(&self, _hash: &ObjectHash) -> Result<(Vec<u8>, ObjectType), GitError> {
+            Err(GitError::IOError(std::io::Error::other(
+                "simulated probe outage",
+            )))
+        }
+
+        async fn put(
+            &self,
+            _hash: &ObjectHash,
+            _data: &[u8],
+            _obj_type: ObjectType,
+        ) -> Result<String, GitError> {
+            unreachable!("restore read-failure test must not store")
+        }
+
+        async fn exist(&self, _hash: &ObjectHash) -> bool {
+            false
+        }
+
+        async fn search(&self, _prefix: &str) -> Vec<ObjectHash> {
+            Vec::new()
+        }
+
+        async fn exist_checked(&self, _hash: &ObjectHash) -> Result<bool, GitError> {
+            Err(GitError::IOError(std::io::Error::other(
+                "simulated probe outage",
+            )))
+        }
+    }
+
+    #[tokio::test]
+    async fn restore_storage_read_error_is_not_non_commit() {
+        let database = Database::connect("sqlite::memory:")
+            .await
+            .expect("memory database");
+        let storage =
+            ClientStorage::from_test_storage(Arc::new(ReadFail), std::path::PathBuf::new());
+        let store = OperationStoreV2::new(database, storage);
+        let hash = ObjectHash::new_for_kind(git_internal::hash::get_hash_kind(), &[6; 20]);
+        let error = RestoreEngine::require_commit_object(
+            &store,
+            hash,
+            "target branch ref does not reference a commit object",
+        )
+        .expect_err("a type read failure must not be a non-commit");
+        let rendered = error.to_string();
+        assert!(
+            rendered.contains("simulated probe outage"),
+            "read failure must keep the storage error: {rendered}"
+        );
+        assert!(
+            !rendered.contains("does not reference a commit object"),
+            "{rendered}"
+        );
+        assert!(matches!(error, RestoreError::Object { .. }), "{rendered}");
+    }
 
     fn store_test_tree(storage: &ClientStorage, items: Vec<TreeItem>) -> ObjectHash {
         let tree = Tree::from_tree_items(items).expect("tree");

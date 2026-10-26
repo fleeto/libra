@@ -32,7 +32,7 @@ use crate::{
     internal::{config::ConfigKv, pack_writer},
     utils::{
         client_storage::ClientStorage,
-        error::{CliError, CliResult},
+        error::{CliError, CliResult, StableErrorCode},
         output::{OutputConfig, emit_json_data},
         path,
         storage::{Storage, local::LocalStorage},
@@ -315,13 +315,21 @@ async fn resolve_config_usize(key: &str, default: usize) -> CliResult<usize> {
 /// packed), dropping objects reachable only through an alternate. `-l` /
 /// `--local` semantics.
 async fn retain_local_objects(hashes: &[ObjectHash]) -> CliResult<Vec<ObjectHash>> {
-    // A local-only reader: no alternates chain, so `exist` answers "present in
-    // this store" rather than "present anywhere reachable".
+    // A local-only reader: no alternates chain, so `exist_checked` answers
+    // "present in this store" rather than "present anywhere reachable".
+    // A read error stays an error; only `Ok(false)` drops the object.
     let local = LocalStorage::open_no_create(path::objects());
     let mut out = Vec::with_capacity(hashes.len());
     for hash in hashes {
-        if local.exist(hash).await {
-            out.push(*hash);
+        match local.exist_checked(hash).await {
+            Ok(true) => out.push(*hash),
+            Ok(false) => {}
+            Err(error) => {
+                return Err(CliError::fatal(format!(
+                    "failed to read object storage while checking {hash}: {error}"
+                ))
+                .with_stable_code(StableErrorCode::IoReadFailed));
+            }
         }
     }
     Ok(out)
@@ -421,9 +429,41 @@ mod tests {
         hash::{HashKind, ObjectHash},
         internal::{object::blob::Blob, pack::entry::Entry},
     };
+    use serial_test::serial;
 
-    use super::{RepackArgs, idx_entries_fully_covered};
-    use crate::internal::pack_writer::encode_pack_bytes;
+    use super::{RepackArgs, idx_entries_fully_covered, retain_local_objects};
+    use crate::{
+        internal::pack_writer::encode_pack_bytes,
+        utils::{
+            error::StableErrorCode,
+            test::{ChangeDirGuard, setup_with_new_libra_in},
+        },
+    };
+
+    #[tokio::test]
+    #[serial(cwd, env)]
+    async fn repack_storage_read_error_is_not_absent() {
+        let tmp = tempfile::tempdir().expect("tmp");
+        let _guard = ChangeDirGuard::new(tmp.path());
+        setup_with_new_libra_in(tmp.path()).await;
+        let pack_dir = tmp.path().join(".libra/objects/pack");
+        std::fs::create_dir_all(&pack_dir).expect("pack dir");
+        std::fs::write(pack_dir.join("orphan.pack"), b"not-a-pack").expect("unindexed pack");
+        let hash = ObjectHash::new_for_kind(git_internal::hash::get_hash_kind(), &[3; 20]);
+        let error = retain_local_objects(&[hash])
+            .await
+            .expect_err("an unindexed pack is a read failure");
+        let rendered = error.to_string();
+        assert_eq!(error.stable_code(), StableErrorCode::IoReadFailed);
+        assert!(
+            rendered.contains("no complete index"),
+            "the pack read error must stay visible: {rendered}"
+        );
+        assert!(
+            !rendered.contains("missing") && !rendered.contains("absent"),
+            "a pack read error is not absence: {rendered}"
+        );
+    }
 
     #[test]
     fn repack_args_parse_flags_and_reject_invalid_window_depth() {

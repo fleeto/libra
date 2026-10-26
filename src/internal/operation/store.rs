@@ -413,6 +413,26 @@ impl OperationStoreV2 {
         self.storage.is_object_type(oid, object_type)
     }
 
+    /// Like [`Self::is_object_type`], but a storage read failure stays an error.
+    ///
+    /// A missing object is `Ok(false)`. Only a failed presence or type read
+    /// becomes [`StoreError::Object`], so callers can keep their absence text.
+    pub fn is_object_type_checked(
+        &self,
+        oid: &ObjectHash,
+        object_type: ObjectType,
+    ) -> Result<bool, StoreError> {
+        match self.storage.exist_checked(oid) {
+            Ok(false) => Ok(false),
+            Err(error) => Err(StoreError::Object(error.to_string())),
+            Ok(true) => match self.storage.get_object_type(oid) {
+                Ok(found) => Ok(found == object_type),
+                Err(git_internal::errors::GitError::ObjectNotFound(_)) => Ok(false),
+                Err(error) => Err(StoreError::Object(error.to_string())),
+            },
+        }
+    }
+
     /// Store one immutable content-addressed object for a view facet.
     ///
     /// View publication uses this narrow seam for the refs facet; callers
@@ -1464,7 +1484,70 @@ fn normalize_heads(heads: &[String]) -> Result<Vec<String>, StoreError> {
 
 #[cfg(test)]
 mod tests {
+    use std::sync::Arc;
+
+    use git_internal::{errors::GitError, hash::ObjectHash, internal::object::types::ObjectType};
+    use sea_orm::Database;
+
     use super::*;
+    use crate::utils::{client_storage::ClientStorage, storage::Storage};
+
+    struct ReadFail;
+
+    #[async_trait::async_trait]
+    impl Storage for ReadFail {
+        async fn get(&self, _hash: &ObjectHash) -> Result<(Vec<u8>, ObjectType), GitError> {
+            Err(GitError::IOError(std::io::Error::other(
+                "simulated probe outage",
+            )))
+        }
+
+        async fn put(
+            &self,
+            _hash: &ObjectHash,
+            _data: &[u8],
+            _obj_type: ObjectType,
+        ) -> Result<String, GitError> {
+            unreachable!("store read-failure test must not store")
+        }
+
+        async fn exist(&self, _hash: &ObjectHash) -> bool {
+            false
+        }
+
+        async fn search(&self, _prefix: &str) -> Vec<ObjectHash> {
+            Vec::new()
+        }
+
+        async fn exist_checked(&self, _hash: &ObjectHash) -> Result<bool, GitError> {
+            Err(GitError::IOError(std::io::Error::other(
+                "simulated probe outage",
+            )))
+        }
+    }
+
+    #[tokio::test]
+    async fn store_type_read_error_stays_an_object_error() {
+        let database = Database::connect("sqlite::memory:")
+            .await
+            .expect("memory database");
+        let storage =
+            ClientStorage::from_test_storage(Arc::new(ReadFail), std::path::PathBuf::new());
+        let store = OperationStoreV2::new(database, storage);
+        let hash = ObjectHash::new_for_kind(git_internal::hash::get_hash_kind(), &[5; 20]);
+        let error = store
+            .is_object_type_checked(&hash, ObjectType::Commit)
+            .expect_err("a type read failure must stay an error");
+        let rendered = error.to_string();
+        assert!(
+            matches!(error, StoreError::Object(_)),
+            "unexpected error: {rendered}"
+        );
+        assert!(
+            rendered.contains("simulated probe outage"),
+            "read failure must keep the storage error: {rendered}"
+        );
+    }
 
     #[test]
     fn head_ancestry_is_transitive() {

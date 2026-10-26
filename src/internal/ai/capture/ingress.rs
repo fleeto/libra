@@ -450,6 +450,7 @@ impl CaptureIngressCommand {
     /// The provider parser only runs after generic envelope validation. An
     /// unrecognized provider event becomes an explicit no-op so callers can
     /// log it without creating catalog/checkpoint side effects.
+    #[cfg(any(test, debug_assertions))]
     pub(crate) fn from_payload(
         payload: &[u8],
         hook_command: ProviderHookCommand,
@@ -469,6 +470,7 @@ impl CaptureIngressCommand {
         )
     }
 
+    #[cfg(any(test, debug_assertions))]
     fn from_payload_with_hint_policy(
         payload: &[u8],
         hook_command: ProviderHookCommand,

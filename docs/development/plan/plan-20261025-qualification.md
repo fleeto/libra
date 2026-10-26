@@ -26,7 +26,7 @@
 | FIX-LTR-05Y | family child，已在 main `ec98926` | ER03 `db7a5d7f` PASS；实现审查 `a2a2af14` PASS；不消耗 v0.30.88 |
 | FIX-LTR-05Z | family child，实现审查 PASS | ER03 `272c8d7d` PASS；实现审查 `4a42ec63` PASS；不消耗 v0.30.88；不开始 FIX04 |
 | FIX-LTR-05 | 本地 C 已过，tag 与 D 待观察 | 父卡 VER-1 至 VER-5 与失败关闭的缓存、fetch pack 已在 ae50414 满足。审查 d9641b0d PASS。本提交占用 v0.30.88。F2 仍 unknown。RISK-QUAL-ADD-LOOSE 未修。不开始 FIX04 |
-| FIX-LTR-04 | blocked/locally-accepted | 只保留两行 cfg 候选与旧 A/源审的有限效力；F1/F2 关闭后重新准入、完整新 C/D，消除两方法 release warning |
+| FIX-LTR-04 | 依赖例外已记录，准入待本次执行审查，F2 仍 unknown | 2026-10-26T19:12:37Z 修订：历史 TRY1 stderr 不可恢复，CLOSE 保持 unknown，P1 不关闭。本卡仍只加两行 cfg。旧 A1 勾选不是这次 C |
 | FIX-LTR-02 | blocked/locally-accepted | 在 FIX04 发布后精确恢复索引结清 helper 候选；保留原断言并完成新来源完整 C/D |
 | FIX-LTR-03 | pending/空 | 修复 MCP 测试拥有的暂停 worker 的清理，完成自己的 C/D，随后执行计划最终资格与受控整合 |
 | F3 / RISK-QUAL-STDIN | 具名 P2，未修 | `subagent_content` fixture 的 BrokenPipe/时序风险单独处理；不能混入 FIX05；若升级为 P1 或阻断当前门，先另立 FIX 卡和依赖 |
@@ -59,7 +59,7 @@ FIX04 C1 的 11 个命令机械退出 0、10761 个最终通过、21 个原 igno
 
 `FIX01(done) → FIX05 → FIX04 → FIX02 → FIX03 → 计划最终资格 → 终态登记及受控整合 → 原 LTR10 的资格前置闭合`。
 
-FIX05 前需要只读的 `DEP-QUAL-F2-ATTRIB` 决定与当前本地Claude ER03；ATTRIB可以明确为unknown，不代表P1关闭。真正的 `DEP-QUAL-F2-CLOSE` 在FIX05或另一个具名FIX实际C/D及关闭审查之后，且在FIX04之前；FIX05不依赖CLOSE。若F2不同根因，先登记新的FIX卡、写集与独立发布顺序；若unknown仍保留CLOSE阻塞FIX04和最终资格，不能靠FIX05全量一次PASS关闭。FIX05自己的实际新失败/flake仍按ER10 STOP，不能以F2另记为由放行。新F2卡不受FIX05唯一warning例外覆盖，必须另取得其具体发布决定。不得将不同缺陷合并成 G08 家族、移植 Mega G13，或省略各卡 patch/C/D。
+FIX05 前需要只读的 `DEP-QUAL-F2-ATTRIB` 决定与当前本地Claude ER03；ATTRIB可以明确为unknown，不代表P1关闭。真正的 `DEP-QUAL-F2-CLOSE` 在FIX05或另一个具名FIX实际C/D及关闭审查之后，且在FIX04之前；FIX05不依赖CLOSE。若F2不同根因，先登记新的FIX卡、写集与独立发布顺序；若unknown仍保留CLOSE阻塞FIX04和最终资格，不能靠FIX05全量一次PASS关闭。2026-10-26T19:12:37Z 的修订是这个规则的后续例外：CLOSE 仍是 unknown，P1 不关闭，但 FIX04 可以只加两行 cfg。该例外不把 F2 写成已修复。FIX05自己的实际新失败/flake仍按ER10 STOP，不能以F2另记为由放行。新F2卡不受FIX05唯一warning例外覆盖，必须另取得其具体发布决定。不得将不同缺陷合并成 G08 家族、移植 Mega G13，或省略各卡 patch/C/D。
 
 **DEC-QUAL-05-RELEASE-WARNING（pending，非已批准 EX）：** 既定 release 零项目 warning 门使两种顺序均不合规：FIX05 先发布会留下 ingress 两方法的既存 dead_code；FIX04 先发布又留下未关闭的 F1/F2 P1。最小待决事项仅是：是否允许 **FIX05 这一次独立版本发布**在 default/keyring release 构建保留 b73 的 `from_payload`、`from_payload_with_hint_policy` 这一个具名 dead_code 诊断，紧接着由 FIX04 的下一 patch 消除。它不是模板 G-* waiver、不是第三方 proc-macro 提示，也不允许其它 warning、全量失败、Clippy warning 或未关闭 P1。用户本次要求写卡、main 提交和跨机开发，**未等同批准此例外**。接收 Agent 先完成可独立的只读核验及候选设计，再向用户取得具体决定、记录原话/UTC与范围，并获得真实本地 Claude 的发布次序 PASS；在此之前 FIX05 不进入实现/A/C/发布。若决定维持零警告，保持阻塞并提出新可审方案，不擅自扩大例外。
 
@@ -86,7 +86,7 @@ FIX05 前需要只读的 `DEP-QUAL-F2-ATTRIB` 决定与当前本地Claude ER03�
 
 只有FIX05本身获准后，才由FIX05在已登记 `tests/command/reset_test.rs` 中补失败时的合成stdout/stderr/exit诊断，保留原命令、参数、JSON/code/exit断言，禁止剥离Warning、过滤前缀或弱化断言。诊断属于FIX05自己的VER-4完整reset模块，单次 `source .env.test && source .env.live-test && cargo nextest run --test command_test -E 'test(command::reset_test::)' --no-fail-fast --retries 0`，编译与执行计入其已准入A预算；其全量A/C继续保留真实并发，不以单case通过替代。诊断输入、资源归属及执行器须在该卡ER03中审定，无前置跟踪写集空档。
 
-`DEP-QUAL-F2-CLOSE`须真实证据及本地Claude明确关闭：同机制时依赖FIX05完整C/D；独立缺陷依赖另立FIX的完整C/D；未知时保持P1/阻塞FIX04。新的受控实验只能证明当前机制，不能补造已经缺失的历史stderr，也不能把未复现/原native retry成功写成旧C1接受。归属与关闭是两个不同节点，故不存在FIX05等待自己的环。
+`DEP-QUAL-F2-CLOSE`须真实证据及本地Claude明确关闭：同机制时依赖FIX05完整C/D；独立缺陷依赖另立FIX的完整C/D；未知时保持P1。依 2026-10-26T19:12:37Z 例外，FIX04 对 CLOSE=unknown 豁免，只加两行 cfg，P1 仍不关闭。该例外不是用户批准。新的受控实验只能证明当前机制，不能补造已经缺失的历史stderr，也不能把未复现/原native retry成功写成旧C1接受。归属与关闭是两个不同节点，故不存在FIX05等待自己的环。
 
 ### Task FIX-LTR-05: 存储配置读取失败时停止错误的本地降级
 
@@ -124,7 +124,7 @@ FIX05 前需要只读的 `DEP-QUAL-F2-ATTRIB` 决定与当前本地Claude ER03�
 
 **Full-suite trigger:** T-1：跨命令共享存储核心；A、C均完整默认套件，沿本文双env/nextest原命令；不以focused PASS替代。
 
-**Dependencies:** `FIX-LTR-01`、`FIX-LTR-05P`、`FIX-LTR-05Q`、`FIX-LTR-05R`、`FIX-LTR-05S`、`FIX-LTR-05T`、`FIX-LTR-05U`、`FIX-LTR-05V`、`FIX-LTR-05W`、`FIX-LTR-05X`、`FIX-LTR-05Y`、`FIX-LTR-05Z`、`DEP-QUAL-SOURCE`、`DEP-QUAL-PUBLISH`、`DEP-QUAL-F2-ATTRIB`、`DEC-QUAL-05-RELEASE-WARNING`。本卡拆出 `FIX-LTR-05P` 至 `FIX-LTR-05Z`。05V 只改 AutoFollow 的对象探测。05W 只增加可失败构造并让 fetch 使用它。05X 只让 `init` 的确认失败不再变成可操作的 `LocalStorage`，且不把该失败写入对象缓存。05Y 只让未决 TYPE 的本地客户端不进对象缓存。05Z 只让这一次未决读取不再构造可写的 `LocalStorage`。本卡 VER-1 至 VER-5 已在 ae50414 通过。本提交占用 v0.30.88。tag 与 D 尚未观察。F2 仍是 unknown。不开始 FIX04。F2-CLOSE不是本卡前驱；独立缺陷必须另外登记其FIX-ID和边；不以未来FIX04的C/D为前驱，避免环。
+**Dependencies:** `FIX-LTR-01`、`FIX-LTR-05P`、`FIX-LTR-05Q`、`FIX-LTR-05R`、`FIX-LTR-05S`、`FIX-LTR-05T`、`FIX-LTR-05U`、`FIX-LTR-05V`、`FIX-LTR-05W`、`FIX-LTR-05X`、`FIX-LTR-05Y`、`FIX-LTR-05Z`、`DEP-QUAL-SOURCE`、`DEP-QUAL-PUBLISH`、`DEP-QUAL-F2-ATTRIB`、`DEC-QUAL-05-RELEASE-WARNING`。本卡拆出 `FIX-LTR-05P` 至 `FIX-LTR-05Z`。05V 只改 AutoFollow 的对象探测。05W 只增加可失败构造并让 fetch 使用它。05X 只让 `init` 的确认失败不再变成可操作的 `LocalStorage`，且不把该失败写入对象缓存。05Y 只让未决 TYPE 的本地客户端不进对象缓存。05Z 只让这一次未决读取不再构造可写的 `LocalStorage`。本卡 VER-1 至 VER-5 已在 ae50414 通过。本提交占用 v0.30.88。v0.30.88 的 D 已于 2026-10-26T18:23:07Z 观察成功：base 40349034162 attempt 2、CodeQL 40349034316、release 40349204443，SHA e85470a。F2 仍是 unknown。依 2026-10-26T19:12:37Z 例外，FIX04 对 CLOSE=unknown 豁免。F2-CLOSE不是本卡前驱；独立缺陷必须另外登记其FIX-ID和边；不以未来FIX04的C/D为前驱，避免环。
 
 **Deliverables:** 单轴生产修复、完整测试、下列同卡文档与证据摘要；不是仅输出诊断报告。
 
@@ -787,7 +787,7 @@ FIX05 前需要只读的 `DEP-QUAL-F2-ATTRIB` 决定与当前本地Claude ER03�
 
 ### FIX04、FIX02、FIX03 的接续细则（覆盖旧开工快照）
 
-- **FIX04：** Dependencies现为FIX05完整C/D、DEP-QUAL-F2-CLOSE已审定关闭、SOURCE/PUBLISH。从实际已发布main重新建源；仅两cfg与本计划/status行，不携带helper5025。原A1、源B、自己ER05仅在源与覆盖未变且原件可核时限域carry；失败C1的bump/lock、全量、release构建、安装不能继承。先登记当前恢复及新预算，Claude PASS后才claim；default与keyring release必须零项目warning，之后每卡继续零warning。版本只能在FIX05实际版本上patch+1。
+- **FIX04：** Dependencies现为FIX05完整C/D、SOURCE/PUBLISH，外加 DEP-QUAL-F2-CLOSE。依 2026-10-26T19:12:37Z 例外，CLOSE=unknown 不挡住这两行 cfg，P1 不关闭。从实际已发布main重新建源；仅两cfg与本计划/status行，不携带helper5025。原A1、源B、自己ER05仅在源与覆盖未变且原件可核时限域carry；失败C1的bump/lock、全量、release构建、安装不能继承。先登记当前恢复及新预算，Claude PASS后才claim；default与keyring release必须零项目warning，之后每卡继续零warning。版本只能在FIX05实际版本上patch+1。
 - **FIX02：** Dependencies仍为FIX01、FIX04。只恢复 `tests/helpers/reasoning_artifact.rs` 的索引结清方案，不能stash-pop旧两份治理/旧bump；无stash原件时按卡片重建并新审新测。它的两个真实消费者、shared fixture全量触发、原timeout/断言均保留。A2/ownR2不是新源C/D；新版本是FIX04实际版本+1。
 - **FIX03：** Dependencies仍为FIX02。先按现有卡解决worker PID/身份/PGID/父进程的完整teardown，不能按名字kill或把父wait当worker退出。完整MCP、full、doc、network原3例及ownClaude/C/D不省略；新版本是FIX02实际版本+1。F3等独立风险若阻断门，先另卡，不把手工清理当产品修复。
 - **计划最终资格：** 五张实现卡分别完整C/D后，在FIX03最终发布merge/main树完成独立最终fmt/clippy/full/doc/network与实际Claude资格审查，再做原登记的终态文档提交及其真实D。用户在main开发时，原文「merge树=被测树」解释为实际main提交树=最终被测树；遇上游变化先整合重验，不用文档提交掩盖代码漂移。终态不得只停在本机安装成功。
@@ -1000,7 +1000,7 @@ R1真实ER03/RECOVERY PASS、H0/VERDICT FAIL（sessionbb82411c-1e59-4e52-a7f1-93
 |---|---|---|---|---|---|---|---|
 | DEP-QUAL-SOURCE | incoming | 上游revision | libra-tools/libra@b73e98a77ecc7c3db1ea905ab55478785d76c041（初始0ca47cc保留为历史） | root | 独立clone的实际远端来源、允许差异及签名工具链已核；变化先重审 | 本文来源与精确比较记录 | 不追写原工作区，不用旧资格冒充新树 |
 | DEP-QUAL-F2-ATTRIB | incoming | 只读归属 | reset真实stderr缺口与当前源码 | Libra接收Agent | Claude审定same/separate/unknown决定；unknown不代表关闭；不写源码不跑Cargo | 当前待审 | FIX05前置，无新诊断窗口 |
-| DEP-QUAL-F2-CLOSE | incoming | P1关闭 | reset失败真实机制 | Libra接收Agent | 同轴则FIX05实际C/D+关闭审查，另轴则新FIX实际C/D；unknown不关闭 | 当前未解决 | FIX04前置；不作为FIX05前驱；新FIX不自动继承warning例外 |
+| DEP-QUAL-F2-CLOSE | incoming | P1关闭 | reset失败真实机制 | Libra接收Agent | 同轴则FIX05实际C/D+关闭审查，另轴则新FIX实际C/D；unknown不关闭。依 2026-10-26T19:12:37Z 例外，FIX04 对 CLOSE=unknown 豁免，只加两行 cfg | 当前未解决 | FIX04 的关闭前提被该例外豁免；不作为FIX05前驱；新FIX不自动继承warning例外 |
 | DEC-QUAL-05-RELEASE-WARNING | incoming | 用户决定 | FIX05唯一版本的两方法dead_code例外 | 用户；Libra接收Agent记录 | 用户原话已记录：UTC 2026-10-26T05:40:46Z；范围只有 from_payload 与 from_payload_with_hint_policy；期限到下一个 patch 标签；v0.30.88 可以带上这两条诊断。session 4042079a RELEASE_ORDER_VERDICT PASS 且 VERDICT PASS | 2891a30b 仍是当时的 FAIL；现行决定是 GRANT-ONE-VERSION | 不扩大例外；不把 cfg 放进 FIX05；F2 unknown 仍不关闭 |
 | DEP-QUAL-SECURITY | incoming | 跨仓前置 | Mega2 plan-20261015 FIX-MTR-11 | root | 既定安全卡完整C/D及两个告警实际fixed；不改变其不自行延期条款 | FIX11已done/complete，932731d/v0.42.70；23/24实际fixed于2026-10-24 20:16:51/52 UTC，见文首真实D收据（此前open保留为历史） | 未满足不实施本计划；只做恢复治理与审查 |
 | DEP-QUAL-PUBLISH | incoming | 发布前置 | 独立clone与实际GitHub工作流 | root | 发布branch不包含原未发布治理祖先/文件；vault签名与DCO、版本面、PR/Release权限与artifact门实际可用 | 开工逐项原生核对，不能用gh浏览器登录互代 | 分叉/缺凭据/来源变化先停止归属，不force |
@@ -1008,7 +1008,7 @@ R1真实ER03/RECOVERY PASS、H0/VERDICT FAIL（sessionbb82411c-1e59-4e52-a7f1-93
 
 ## 实施顺序与发布窗口
 
-`DEP-QUAL-SECURITY + DEP-QUAL-SOURCE + DEP-QUAL-PUBLISH -> FIX-LTR-01 -> FIX-LTR-05P -> FIX-LTR-05Q -> FIX-LTR-05R -> FIX-LTR-05S -> FIX-LTR-05T -> FIX-LTR-05U -> FIX-LTR-05V -> FIX-LTR-05W -> FIX-LTR-05X -> FIX-LTR-05Y -> FIX-LTR-05Z -> FIX-LTR-05 -> FIX-LTR-04 -> FIX-LTR-02 -> FIX-LTR-03 -> DEP-QUAL-HANDOFF`；另有 `DEP-QUAL-F2-ATTRIB + DEC-QUAL-05-RELEASE-WARNING -> FIX-LTR-05`，另有 `FIX05/具名新FIX -> DEP-QUAL-F2-CLOSE -> FIX04`。`FIX-LTR-05W` 已推送 `2a80a10`，只含 `resolve_configured_storage` 与 fetch 写入前检查。`FIX-LTR-05X` 已推送 `a729384`，只含 `init` 的确认失败拒绝状态和不缓存该状态。`FIX-LTR-05Y` 已推送 `ec98926`，只含未决 TYPE 不进入对象缓存。`FIX-LTR-05Z` 只含未决 TYPE 这一次调用不再构造 `LocalStorage`。ER03 `272c8d7d` PASS，实现审查 `4a42ec63` PASS。父卡 VER-1 至 VER-5 已在 ae50414 通过。本提交占用 v0.30.88。tag 与 D 尚未观察。F2 仍是 unknown。不开始 FIX04。顺序用于共享本计划/版本面的串行发布，不表示合并发布。先修确定性全量阻断，再修共享fixture，最后完成MCP测试清理与整份修复计划的最终资格。每卡真正 C/D 闭合后才发布下一卡。`FIX-LTR-05P` 到 `FIX-LTR-05Z` 都是 family child，不占用 v0.30.88。
+`DEP-QUAL-SECURITY + DEP-QUAL-SOURCE + DEP-QUAL-PUBLISH -> FIX-LTR-01 -> FIX-LTR-05P -> FIX-LTR-05Q -> FIX-LTR-05R -> FIX-LTR-05S -> FIX-LTR-05T -> FIX-LTR-05U -> FIX-LTR-05V -> FIX-LTR-05W -> FIX-LTR-05X -> FIX-LTR-05Y -> FIX-LTR-05Z -> FIX-LTR-05 -> FIX-LTR-04 -> FIX-LTR-02 -> FIX-LTR-03 -> DEP-QUAL-HANDOFF`；另有 `DEP-QUAL-F2-ATTRIB + DEC-QUAL-05-RELEASE-WARNING -> FIX-LTR-05`，另有 `FIX05/具名新FIX -> DEP-QUAL-F2-CLOSE -> FIX04`。`FIX-LTR-05W` 已推送 `2a80a10`，只含 `resolve_configured_storage` 与 fetch 写入前检查。`FIX-LTR-05X` 已推送 `a729384`，只含 `init` 的确认失败拒绝状态和不缓存该状态。`FIX-LTR-05Y` 已推送 `ec98926`，只含未决 TYPE 不进入对象缓存。`FIX-LTR-05Z` 只含未决 TYPE 这一次调用不再构造 `LocalStorage`。ER03 `272c8d7d` PASS，实现审查 `4a42ec63` PASS。父卡 VER-1 至 VER-5 已在 ae50414 通过。本提交占用 v0.30.88。v0.30.88 的 D 已于 2026-10-26T18:23:07Z 观察成功：base 40349034162 attempt 2、CodeQL 40349034316、release 40349204443，SHA e85470a。F2 仍是 unknown。依 2026-10-26T19:12:37Z 例外，FIX04 对 CLOSE=unknown 豁免。顺序用于共享本计划/版本面的串行发布，不表示合并发布。先修确定性全量阻断，再修共享fixture，最后完成MCP测试清理与整份修复计划的最终资格。每卡真正 C/D 闭合后才发布下一卡。`FIX-LTR-05P` 到 `FIX-LTR-05Z` 都是 family child，不占用 v0.30.88。
 
 ### 实际 D 映射与现场复核
 
@@ -1098,7 +1098,7 @@ R1真实ER03/RECOVERY PASS、H0/VERDICT FAIL（sessionbb82411c-1e59-4e52-a7f1-93
 
 **Task type:** `implementation`
 
-**Lifecycle / Acceptance:** `blocked` / `locally-accepted`（旧A1/源审限域保留；C1审查FAIL/STOP，四版本面精确退出已执行/待终态增量审查，F1/F2及新恢复仍待，未发布）
+**Lifecycle / Acceptance:** `in-progress` / 依赖例外已记录，准入待本次执行审查（旧A1勾选和失败C1都不是这次C。2026-10-26T19:12:37Z：历史 TRY1 stderr 不可恢复，CLOSE 保持 unknown，P1 不关闭。审查 a929a323 VERDICT PASS，AMENDMENT_ALLOWS_FIX04 yes。实现审查 354b5170 VERDICT PASS，CFG_ONLY yes。ingress.rs sha256 2b7aa33698c2072d160cc6bea7801ffb8fb180a13bb0ebe78901ff888b7bb778。这是执行器依当前目标记录的修订，不是用户批准。本卡仍只在 `from_payload` 与 `from_payload_with_hint_policy` 前加 `#[cfg(any(test, debug_assertions))]`。若这次 C 重现 TRY1 形状，即 exit 129 之后整段 stderr 不能解析为 JSON，则 ER10 STOP，不用 nextest 重试成功当作通过）
 
 **历史退出前Lifecycle字段：** **Lifecycle / Acceptance:** `blocked` / `locally-accepted`（仅原A1/源审限域保留；C1 native审查FAIL/root STOP，具体退出待审/待执行，未发布）
 
@@ -1127,7 +1127,7 @@ R1真实ER03/RECOVERY PASS、H0/VERDICT FAIL（sessionbb82411c-1e59-4e52-a7f1-93
 
 **Full-suite trigger:** `T-4`：同步构造器承接共享lowerer，超过6个integration target复用；A和最终bump后的C均保留双env完整默认10761/原ignored身份核验。唯一命令仍为 `source .env.test && source .env.live-test && cargo nextest run --all --no-fail-fast --retries 2`，不改timeout/retry/并发。VER为附加门，不替代全量。
 
-**Dependencies:** `FIX-LTR-01`、`FIX-LTR-05`、`DEP-QUAL-F2-CLOSE`、`DEP-QUAL-SOURCE`、`DEP-QUAL-PUBLISH`；FIX05实际C/D与F2已审定关闭后才新准入；当前字段按2026-10-26跨机入口，旧字段见历史记录。
+**Dependencies:** `FIX-LTR-01`、`FIX-LTR-05`、`DEP-QUAL-F2-CLOSE`、`DEP-QUAL-SOURCE`、`DEP-QUAL-PUBLISH`。依 2026-10-26T19:12:37Z 例外，FIX04 对 CLOSE=unknown 豁免，不删除这条边，P1 不关闭。FIX05 的实际 C/D 仍是前提，已在 e85470a / v0.30.88 观察成功。当前字段按2026-10-26跨机入口，旧字段见历史记录。
 
 **Deliverables:** 本卡两行代码及本计划/plan-status本计划行的实际来源、审查和验收记录；原C1 STOP、旧P2接受和unknown数值exit保留。
 
@@ -1169,7 +1169,7 @@ R1真实ER03/RECOVERY PASS、H0/VERDICT FAIL（sessionbb82411c-1e59-4e52-a7f1-93
 
 **C/D coverage from:** `self`；本卡后置真实C/D由FIX02重新开工时在已登记两治理中承接并由其自身最终C覆盖，不改终止链末端FIX03的全量资格/终态登记义务。
 
-**Granularity:** `type=implementation; axis=同步ingress测试构造器的profile可用性; recovery=immutable-release; complete=yes; self-contained=yes; AC=4/8; VER=5/8; landing=1; prod-files=1; scope=S; deps=FIX-LTR-01,FIX-LTR-05,DEP-QUAL-F2-CLOSE,DEP-QUAL-SOURCE,DEP-QUAL-PUBLISH; writeset=两cfg及既定两治理+版本面; release=independent; split-from=FIX02-C1实际release警告STOP; exception=N/A`
+**Granularity:** `type=implementation; axis=同步ingress测试构造器的profile可用性; recovery=immutable-release; complete=yes; self-contained=yes; AC=4/8; VER=5/8; landing=1; prod-files=1; scope=S; deps=FIX-LTR-01,FIX-LTR-05,DEP-QUAL-F2-CLOSE,DEP-QUAL-SOURCE,DEP-QUAL-PUBLISH; writeset=两cfg及既定两治理+版本面; release=independent; split-from=FIX02-C1实际release警告STOP; exception=2026-10-26T19:12:37Z FIX04对CLOSE=unknown豁免，P1不关闭`
 
 **RB-FIX04-EXIT-C1（候选）：** FIX04原C1于2026-10-25 18:10:38 UTC结束，11阶段exit0、私有安装.88及资源后检exit0，5348.666525/10800秒；外层工具96753实际exit0。完整10761身份/21原ignored保留，4个flake/5个失败尝试后native重试成功；实际本地Claude session c7f9fbae-734f-416c-9d9d-3650ede3f824的四项判定全部FAIL，root于18:17:28 UTC记录STOP，C不接受。F1 P1为storage配置读取错误后无条件LocalStorage回退并污染machine stderr；F2暂定P1为reset missing-path失败未保留实际stderr，根因未知；F3 stdin fixture race与F4未执行accept脚本列P2。所有旧FAIL/STOP、A1两flake、37运行时覆盖缺口及21 ignored保持，历史SQLite锁owner/SQL与C2数据库根因未证。本次仅候选RB-FIX04-EXIT-C1：先保存七路径失败树及SHA清单，再用原生Libra精确恢复本卡四个未发布版本/lock到原before-bump（逐字等于b73/.87），保持两cfg和其它全部源码、原stash988ded20、两仓原WIP。经本机Claude EXIT/ER12/H0/VERDICT PASS和root采纳才执行；不reset/force/stash-pop/commit/push，不新开A/C，不授.88再次发布。退出成功仅释放本次失败C1发布占用，FIX04仍blocked/locally-accepted，资格1/4、原scoped-traces0/26不变。后续F1/F2/F3须先审定合法独立修复与依赖；不得把无G13的本仓改成聚合，也不借G08归并独立缺陷。Mega102自己的ER05已PASS，独立C2仍需退出终态与自身具体执行合同PASS。
 
@@ -1316,6 +1316,7 @@ R1真实ER03/RECOVERY PASS、H0/VERDICT FAIL（sessionbb82411c-1e59-4e52-a7f1-93
 
 | 日期 | 触发 | 变更 | 实际状态 |
 |---|---|---|---|
+| 2026-10-26 19:12:37 UTC | 历史 TRY1 stderr 不可恢复 | GitHub Actions 中该 reset 测试只有 PASS。会话 c7f9fbae 不在本机。b73 上两次自然重跑通过。诱发的 libra.db 排他锁退出 128，stderr 是 LBR-IO-001 JSON，不是 TRY1 的 129 再解析失败。关闭审查 a73f768c 与 3d7f3b15 都是 CLOSE unknown、FIX04_ALLOWED no、VERDICT PASS。用户未选择提供 stderr、新卡或修订。本次修订只允许 FIX04 加两行 cfg，同时 CLOSE 保持 unknown，P1 不关闭。不把 FIX04 写成 F2 修复。审查 a929a323 VERDICT PASS。这是执行器依当前目标记录的修订，不是用户批准。若 FIX04 的 C 重现 TRY1 形状则 ER10 STOP | in-progress；F2 仍 unknown |
 | 2026-10-26 15:16:12 UTC | 父卡 VER-1 至 VER-5 与缓存/pack 审查 d9641b0d PASS | ae50414 上 VER 计数 93、62、51、58、54，均 0 failed。完整套件 df24361e：10822 passed，0 failed；fetch mirror 用例重试后通过。fmt 与 clippy 通过。default 与 keyring release 只有 from_payload 与 from_payload_with_hint_policy 两条 dead_code，外加 proc-macro-error2。确认失败不进对象缓存。fetch 在安装 pack 前拒绝。精确 local 只在 init 保持历史本地；fetch、pull、clone 仍拒绝精确 local。VER-1 没有同步屏障真锁，覆盖是把仓库库换成目录，记为 P2 缩窄。RISK-QUAL-ADD-LOOSE：操作日志用 init_local 写快照，gcs-canary 的 add 仍留下 loose blob 45b983be，index 未写；未修，不宣称所有命令零对象写入。F2 仍 unknown。本提交占用 v0.30.88。不开始 FIX04 | in-progress/本地 C 已过；tag 与 D 未观察 |
 | 2026-10-26 14:23:00 UTC | 完整套件被未决 TYPE 挡住对象读取 | 仓库库打不开仍失败关闭。全局库存在但打不开时，对象存储回到历史本地后端。解密失败仍失败关闭。审查 9e386060 与 ce4eb432 PASS。完整套件 run db0184d9：10822 passed，0 failed。不消耗 v0.30.88。不开始 FIX04 | in-progress/空；发布 D 未观察 |
 | 2026-10-26 13:08:00 UTC | 05Z 实现审查 4a42ec63 PASS | 未决 TYPE 不再构造 LocalStorage。VER-1 两次 8/8，VER-2 3/3。fmt 与 clippy 通过。不消耗 v0.30.88。不开始 FIX04。FIX-LTR-05 仍 blocked | in-progress/空；实现审查 PASS |
@@ -1367,7 +1368,7 @@ R1真实ER03/RECOVERY PASS、H0/VERDICT FAIL（sessionbb82411c-1e59-4e52-a7f1-93
 | FIX-LTR-05Y | 未决的对象存储类型不进入对象缓存 | client_storage.rs、util.rs、cache 与 fetch 文档、本计划、plan-status 本计划行 | 5/8、1/8 | 2/2 S | FIX-LTR-05X | family child；不占用 v0.30.88；已推送 ec98926；ER03 db7a5d7f PASS；实现审查 a2a2af14 PASS |
 | FIX-LTR-05Z | 未决的对象存储类型不再构造本地存储 | client_storage.rs、util.rs、cache 与 fetch 文档、COMPATIBILITY fetch 行、本计划、plan-status 本计划行 | 4/8、2/8 | 2/2 S | FIX-LTR-05Y | family child；不占用 v0.30.88；ER03 272c8d7d PASS；实现审查 4a42ec63 PASS |
 | FIX-LTR-05 | 配置失败与对象存储fail-closed（未准入候选） | client_storage/util/fetch候选及卡内逐文件同步集 | 8/8、6/8 | 3文件候选；落点/规模pending VER-6 | FIX01 + 05P 至 05Z + SOURCE/PUBLISH + F2-ATTRIB + v0.30.88决定；05Z不足以解除阻塞 | independent/self；不得先实施 |
-| FIX-LTR-04 | 同步ingress测试构造器profile可用性 | ingress.rs仅两cfg、本计划、plan-status本计划行 | 4/8、5/8 | 1/1 S | FIX-LTR-05 + F2-CLOSE + SOURCE/PUBLISH | independent/self |
+| FIX-LTR-04 | 同步ingress测试构造器profile可用性 | ingress.rs仅两cfg、本计划、plan-status本计划行 | 4/8、5/8 | 1/1 S | FIX-LTR-05 + F2-CLOSE + SOURCE/PUBLISH；2026-10-26T19:12:37Z 起 CLOSE=unknown 豁免 | independent/self |
 | FIX-LTR-02 | reasoning fixture索引结清 | reasoning_artifact.rs、本计划、plan-status本计划行 | 4/8、3/8 | 1/0 S | FIX-LTR-01/FIX-LTR-04 | independent/self |
 | FIX-LTR-03 | MCP owned worker teardown | agent_mcp_exec_test.rs、本计划、plan-status本计划行 | 4/8、4/8 | 1/0 S | FIX-LTR-02 | independent/self |
 

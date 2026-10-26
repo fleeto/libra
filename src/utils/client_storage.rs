@@ -1361,6 +1361,54 @@ impl std::fmt::Display for StorageConfigResolutionError {
     }
 }
 
+/// Confirmed object-storage configuration failure.
+///
+/// Only the variable name is retained. `Debug`, `Display`, and
+/// [`std::error::Error::source`] cannot reveal the configured value or the
+/// underlying database error.
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub struct StorageConfigFailure {
+    variable: &'static str,
+}
+
+impl StorageConfigFailure {
+    /// Variable whose value could not be used. This is a name, not a value.
+    pub fn variable(self) -> &'static str {
+        self.variable
+    }
+}
+
+impl std::fmt::Debug for StorageConfigFailure {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("StorageConfigFailure")
+            .field("variable", &self.variable)
+            .finish()
+    }
+}
+
+impl std::fmt::Display for StorageConfigFailure {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "failed to read storage configuration for {}",
+            self.variable
+        )
+    }
+}
+
+impl std::error::Error for StorageConfigFailure {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        None
+    }
+}
+
+fn require_storage_setting(name: &'static str) -> Result<Option<String>, StorageConfigFailure> {
+    match resolve_env_sync_typed(name) {
+        Ok(value) => Ok(value),
+        Err(_) => Err(StorageConfigFailure { variable: name }),
+    }
+}
+
 /// Warn once per invocation about unsupported Global/System metadata when
 /// the command may continue in a local/offline or config-irrelevant mode.
 pub fn emit_global_config_schema_future_warning(future: &GlobalConfigSchemaFuture, action: &str) {
@@ -1834,6 +1882,132 @@ impl ClientStorage {
             name, error
         );
         Arc::new(LocalStorage::new_with_alternates(base_path.to_path_buf()))
+    }
+
+    /// Open object storage from the current configuration.
+    ///
+    /// Confirmed remote settings that cannot be completed return
+    /// [`StorageConfigFailure`] and do not build `LocalStorage`. An unset
+    /// type, a future global schema while reading the type, or any other
+    /// unread type stays on the historical local result from [`Self::init`].
+    pub fn resolve_configured_storage(
+        base_path: PathBuf,
+    ) -> Result<ClientStorage, StorageConfigFailure> {
+        let storage_type = match resolve_env_sync_typed("LIBRA_STORAGE_TYPE") {
+            Ok(Some(storage_type)) => storage_type,
+            Ok(None) => return Ok(Self::local_configured_client(base_path)),
+            Err(error) => {
+                let storage = Self::storage_config_resolution_fallback(
+                    &base_path,
+                    "LIBRA_STORAGE_TYPE",
+                    &error,
+                );
+                return Ok(ClientStorage { storage, base_path });
+            }
+        };
+        if storage_type != "s3" && storage_type != "r2" {
+            return Err(StorageConfigFailure {
+                variable: "LIBRA_STORAGE_TYPE",
+            });
+        }
+
+        let bucket = match require_storage_setting("LIBRA_STORAGE_BUCKET")? {
+            Some(bucket) if !bucket.is_empty() => bucket,
+            Some(_) => {
+                return Err(StorageConfigFailure {
+                    variable: "LIBRA_STORAGE_BUCKET",
+                });
+            }
+            None => "libra".to_string(),
+        };
+        let endpoint = require_storage_setting("LIBRA_STORAGE_ENDPOINT")?;
+        if let Some(endpoint) = endpoint.as_deref()
+            && url::Url::parse(endpoint).is_err()
+        {
+            return Err(StorageConfigFailure {
+                variable: "LIBRA_STORAGE_ENDPOINT",
+            });
+        }
+        let region = require_storage_setting("LIBRA_STORAGE_REGION")?;
+        let key = require_storage_setting("LIBRA_STORAGE_ACCESS_KEY")?;
+        if let Some(key) = key.as_deref()
+            && key.is_empty()
+        {
+            return Err(StorageConfigFailure {
+                variable: "LIBRA_STORAGE_ACCESS_KEY",
+            });
+        }
+        let secret = require_storage_setting("LIBRA_STORAGE_SECRET_KEY")?;
+        if let Some(secret) = secret.as_deref()
+            && secret.is_empty()
+        {
+            return Err(StorageConfigFailure {
+                variable: "LIBRA_STORAGE_SECRET_KEY",
+            });
+        }
+        let allow_http = require_storage_setting("LIBRA_STORAGE_ALLOW_HTTP")?;
+        let threshold = match require_storage_setting("LIBRA_STORAGE_THRESHOLD")? {
+            Some(raw) => raw.parse().unwrap_or(DEFAULT_STORAGE_THRESHOLD_BYTES),
+            None => DEFAULT_STORAGE_THRESHOLD_BYTES,
+        };
+        let disk_cache_limit_bytes = match require_storage_setting("LIBRA_STORAGE_CACHE_SIZE")? {
+            Some(raw) => raw.parse().unwrap_or(DEFAULT_CACHE_SIZE_BYTES),
+            None => DEFAULT_CACHE_SIZE_BYTES,
+        };
+
+        let mut builder = object_store::aws::AmazonS3Builder::new().with_bucket_name(&bucket);
+        builder = builder.with_retry(object_store::RetryConfig {
+            backoff: object_store::BackoffConfig {
+                init_backoff: Duration::from_millis(200),
+                max_backoff: Duration::from_secs(10),
+                base: 2.0,
+            },
+            max_retries: 5,
+            retry_timeout: Duration::from_secs(60),
+        });
+        if let Some(endpoint) = endpoint {
+            builder = builder.with_endpoint(endpoint);
+        }
+        if let Some(region) = region {
+            builder = builder.with_region(region);
+        }
+        if let Some(key) = key {
+            builder = builder.with_access_key_id(key);
+        }
+        if let Some(secret) = secret {
+            builder = builder.with_secret_access_key(secret);
+        }
+        if allow_http.as_deref() == Some("true") {
+            builder = builder.with_allow_http(true);
+        }
+        let object_store: Arc<dyn object_store::ObjectStore> = match builder.build() {
+            Ok(store) => Arc::new(store),
+            Err(_) => {
+                return Err(StorageConfigFailure {
+                    variable: "LIBRA_STORAGE_TYPE",
+                });
+            }
+        };
+        let prefix = repo_id_prefix_for_configured_remote()?;
+        let remote = match prefix {
+            Some(repo_id) => RemoteStorage::new_with_prefix(object_store, repo_id),
+            None => RemoteStorage::new(object_store),
+        };
+        let local = LocalStorage::new_with_alternates(base_path.clone());
+        Ok(ClientStorage {
+            storage: Arc::new(TieredStorage::new(
+                local,
+                remote,
+                threshold,
+                disk_cache_limit_bytes,
+            )),
+            base_path,
+        })
+    }
+
+    fn local_configured_client(base_path: PathBuf) -> ClientStorage {
+        let storage = Arc::new(LocalStorage::new_with_alternates(base_path.clone()));
+        ClientStorage { storage, base_path }
     }
 
     /// Helper to execute async task on dedicated runtime and block waiting for result.
@@ -3520,6 +3694,71 @@ fn get_or_create_repo_id_for_prefix() -> Option<String> {
     rx.recv().ok().flatten()
 }
 
+/// Prefix for a remote whose storage settings are already confirmed.
+///
+/// A missing database is the only empty prefix. A failed path lookup, stat,
+/// read, write, or reply is [`StorageConfigFailure`] and does not publish a
+/// new id.
+fn repo_id_prefix_for_configured_remote() -> Result<Option<String>, StorageConfigFailure> {
+    let storage_path = try_get_storage_path(None).map_err(|_| StorageConfigFailure {
+        variable: "libra.repoid",
+    })?;
+    let db_path = storage_path.join(DATABASE);
+    match fs::symlink_metadata(&db_path) {
+        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(None),
+        Err(_) => {
+            return Err(StorageConfigFailure {
+                variable: "libra.repoid",
+            });
+        }
+        Ok(metadata) if !metadata.is_file() => {
+            return Err(StorageConfigFailure {
+                variable: "libra.repoid",
+            });
+        }
+        Ok(_) => {}
+    }
+
+    let (tx, rx) = mpsc::channel();
+    RUNTIME.spawn(async move {
+        let result = read_or_create_configured_repo_id(db_path).await;
+        let _ = tx.send(result);
+    });
+    rx.recv().unwrap_or(Err(StorageConfigFailure {
+        variable: "libra.repoid",
+    }))
+}
+
+async fn read_or_create_configured_repo_id(
+    db_path: PathBuf,
+) -> Result<Option<String>, StorageConfigFailure> {
+    let db = db::get_db_conn_instance_for_path(&db_path)
+        .await
+        .map_err(|_| StorageConfigFailure {
+            variable: "libra.repoid",
+        })?;
+    let current = ConfigKv::get_with_conn(&db, "libra.repoid")
+        .await
+        .map_err(|_| StorageConfigFailure {
+            variable: "libra.repoid",
+        })?
+        .map(|entry| entry.value);
+    let needs_init = current
+        .as_deref()
+        .map(|value| value.is_empty() || value == "unknown-repo")
+        .unwrap_or(true);
+    if !needs_init {
+        return Ok(current);
+    }
+    let new_id = Uuid::new_v4().to_string();
+    ConfigKv::set_with_conn(&db, "libra.repoid", &new_id, false)
+        .await
+        .map_err(|_| StorageConfigFailure {
+            variable: "libra.repoid",
+        })?;
+    Ok(Some(new_id))
+}
+
 async fn expected_index_repair_oid_len(db_conn: &DatabaseConnection) -> Result<usize, String> {
     let object_format = ConfigKv::get_with_conn(db_conn, "core.objectformat")
         .await
@@ -4153,9 +4392,9 @@ mod tests {
     use tokio::sync::mpsc;
 
     use super::{
-        ClientStorage, Commit, ObjectIndexRepairLock, ObjectReadFailure, acquire_index_repair_lock,
-        parse_commit_header_refs, remove_object_index_rows_with_conn, resolve_env_sync,
-        update_object_index, update_object_index_once,
+        ClientStorage, Commit, ObjectIndexRepairLock, ObjectReadFailure, StorageConfigFailure,
+        acquire_index_repair_lock, parse_commit_header_refs, remove_object_index_rows_with_conn,
+        resolve_env_sync, update_object_index, update_object_index_once,
     };
     use crate::{
         internal::{
@@ -6861,6 +7100,481 @@ mod tests {
         assert!(
             err.contains("unsupported core.objectformat"),
             "unexpected error: {err}"
+        );
+    }
+
+    const STORAGE_ENV_KEYS: &[&str] = &[
+        "LIBRA_STORAGE_TYPE",
+        "LIBRA_STORAGE_BUCKET",
+        "LIBRA_STORAGE_ENDPOINT",
+        "LIBRA_STORAGE_REGION",
+        "LIBRA_STORAGE_ACCESS_KEY",
+        "LIBRA_STORAGE_SECRET_KEY",
+        "LIBRA_STORAGE_ALLOW_HTTP",
+        "LIBRA_STORAGE_THRESHOLD",
+        "LIBRA_STORAGE_CACHE_SIZE",
+        "LIBRA_CONFIG_GLOBAL_DB",
+    ];
+
+    fn isolate_storage_env() -> Vec<ScopedEnvVar> {
+        STORAGE_ENV_KEYS
+            .iter()
+            .map(|key| ScopedEnvVar::unset(*key))
+            .collect()
+    }
+
+    fn must_err(
+        result: Result<ClientStorage, StorageConfigFailure>,
+        label: &str,
+    ) -> StorageConfigFailure {
+        match result {
+            Ok(_) => panic!("{label} returned storage"),
+            Err(error) => error,
+        }
+    }
+
+    fn must_ok(result: Result<ClientStorage, StorageConfigFailure>, label: &str) -> ClientStorage {
+        match result {
+            Ok(storage) => storage,
+            Err(error) => panic!("{label}: {error}"),
+        }
+    }
+
+    fn assert_redacted(error: &StorageConfigFailure, canary: &str) {
+        let display = error.to_string();
+        let debug = format!("{error:?}");
+        assert!(!display.contains(canary), "{display}");
+        assert!(!debug.contains(canary), "{debug}");
+        assert!(std::error::Error::source(error).is_none());
+        assert!(display.contains(error.variable()));
+    }
+
+    fn break_repository_database(repo: &std::path::Path) {
+        let db = repo.join(".libra").join(crate::utils::util::DATABASE);
+        if db.exists() {
+            fs::remove_file(&db).expect("remove repository database");
+        }
+        fs::create_dir(&db).expect("replace repository database with a directory");
+    }
+
+    #[test]
+    #[serial(cwd, env)]
+    fn storage_config_resolve_unsupported_type_is_not_local() {
+        let _env = isolate_storage_env();
+        let root = tempdir().expect("temp");
+        let _cwd = ChangeDirGuard::new(root.path());
+        for canary in ["gcs-canary", "S3-canary"] {
+            let _type = ScopedEnvVar::set("LIBRA_STORAGE_TYPE", canary);
+            let objects = root.path().join(canary);
+            let error = must_err(
+                ClientStorage::resolve_configured_storage(objects.clone()),
+                "unsupported type",
+            );
+            assert_eq!(error.variable(), "LIBRA_STORAGE_TYPE");
+            assert_redacted(&error, canary);
+            assert!(
+                !objects.exists(),
+                "failed config must not create local storage"
+            );
+        }
+    }
+
+    #[test]
+    #[serial(cwd, env)]
+    fn storage_config_resolve_empty_and_invalid_values_hide_canary() {
+        let _env = isolate_storage_env();
+        let root = tempdir().expect("temp");
+        let _cwd = ChangeDirGuard::new(root.path());
+        let _type = ScopedEnvVar::set("LIBRA_STORAGE_TYPE", "s3");
+        let cases = [
+            ("LIBRA_STORAGE_BUCKET", ""),
+            ("LIBRA_STORAGE_ENDPOINT", "canary-secret-not-a-url"),
+            ("LIBRA_STORAGE_ACCESS_KEY", ""),
+            ("LIBRA_STORAGE_SECRET_KEY", ""),
+        ];
+        for (name, canary) in cases {
+            let _value = ScopedEnvVar::set(name, canary);
+            let _bucket = if name != "LIBRA_STORAGE_BUCKET" {
+                Some(ScopedEnvVar::set("LIBRA_STORAGE_BUCKET", "bucket"))
+            } else {
+                None
+            };
+            let objects = root.path().join(name);
+            let error = must_err(
+                ClientStorage::resolve_configured_storage(objects.clone()),
+                name,
+            );
+            assert_eq!(error.variable(), name);
+            assert_eq!(
+                error.to_string(),
+                format!("failed to read storage configuration for {name}")
+            );
+            if !canary.is_empty() {
+                assert_redacted(&error, canary);
+            }
+            assert!(!objects.exists());
+        }
+    }
+
+    #[tokio::test]
+    #[serial(cwd, env)]
+    async fn storage_config_resolve_later_key_errors_are_not_local() {
+        let _env = isolate_storage_env();
+        let repo = tempdir().expect("temp");
+        setup_with_new_libra_in(repo.path()).await;
+        break_repository_database(repo.path());
+        let _cwd = ChangeDirGuard::new(repo.path());
+        let _type = ScopedEnvVar::set("LIBRA_STORAGE_TYPE", "s3");
+        let _global = ScopedEnvVar::set(
+            "LIBRA_CONFIG_GLOBAL_DB",
+            repo.path().join("missing-global.db"),
+        );
+        let keys = [
+            "LIBRA_STORAGE_BUCKET",
+            "LIBRA_STORAGE_ENDPOINT",
+            "LIBRA_STORAGE_REGION",
+            "LIBRA_STORAGE_ACCESS_KEY",
+            "LIBRA_STORAGE_SECRET_KEY",
+            "LIBRA_STORAGE_ALLOW_HTTP",
+            "LIBRA_STORAGE_THRESHOLD",
+            "LIBRA_STORAGE_CACHE_SIZE",
+        ];
+        let priors = [
+            "bucket",
+            "https://example.com",
+            "auto",
+            "access",
+            "secret",
+            "false",
+            "1024",
+        ];
+        for (index, name) in keys.iter().enumerate() {
+            let _priors: Vec<_> = keys[..index]
+                .iter()
+                .zip(priors)
+                .map(|(key, value)| ScopedEnvVar::set(*key, value))
+                .collect();
+            let objects = repo.path().join(format!("objects-{index}"));
+            let error = must_err(
+                ClientStorage::resolve_configured_storage(objects.clone()),
+                name,
+            );
+            assert_eq!(error.variable(), *name, "{name}");
+            assert_redacted(&error, "canary");
+            assert!(!objects.exists(), "{name}");
+        }
+    }
+
+    #[tokio::test]
+    #[serial(cwd, env)]
+    async fn storage_config_resolve_repo_id_stat_failure_is_not_a_prefix() {
+        let _env = isolate_storage_env();
+        let repo = tempdir().expect("temp");
+        setup_with_new_libra_in(repo.path()).await;
+        break_repository_database(repo.path());
+        let _cwd = ChangeDirGuard::new(repo.path());
+        let _global = ScopedEnvVar::set(
+            "LIBRA_CONFIG_GLOBAL_DB",
+            repo.path().join("missing-global.db"),
+        );
+        let _vars = remote_env();
+        let objects = repo.path().join("configured-objects");
+        let error = must_err(
+            ClientStorage::resolve_configured_storage(objects),
+            "directory database",
+        );
+        assert_eq!(error.variable(), "libra.repoid");
+        assert_redacted(&error, "canary");
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    #[serial(cwd, env)]
+    async fn storage_config_resolve_repo_id_write_failure_does_not_publish_uuid() {
+        // SAFETY: geteuid is a pure libc query used only to skip a mode-bit test.
+        if unsafe { libc::geteuid() } == 0 {
+            eprintln!("skipped (root ignores mode 0444)");
+            return;
+        }
+        let _env = isolate_storage_env();
+        let repo = tempdir().expect("temp");
+        setup_with_new_libra_in(repo.path()).await;
+        let db = repo
+            .path()
+            .join(".libra")
+            .join(crate::utils::util::DATABASE);
+        let before = fs::read(&db).expect("read database");
+        let mut permissions = fs::metadata(&db).expect("metadata").permissions();
+        use std::os::unix::fs::PermissionsExt;
+        permissions.set_mode(0o444);
+        fs::set_permissions(&db, permissions.clone()).expect("chmod");
+        let _cwd = ChangeDirGuard::new(repo.path());
+        let _global = ScopedEnvVar::set(
+            "LIBRA_CONFIG_GLOBAL_DB",
+            repo.path().join("missing-global.db"),
+        );
+        let _vars = remote_env();
+        let error = must_err(
+            ClientStorage::resolve_configured_storage(repo.path().join("objects")),
+            "read-only repository database",
+        );
+        assert_eq!(error.variable(), "libra.repoid");
+        permissions.set_mode(0o644);
+        fs::set_permissions(&db, permissions).expect("restore mode");
+        assert_eq!(fs::read(&db).expect("reread"), before);
+    }
+
+    #[tokio::test]
+    #[serial(cwd, env)]
+    async fn storage_config_resolve_missing_database_has_no_prefix_file() {
+        let _env = isolate_storage_env();
+        let root = tempdir().expect("temp");
+        setup_with_new_libra_in(root.path()).await;
+        let db = root
+            .path()
+            .join(".libra")
+            .join(crate::utils::util::DATABASE);
+        fs::remove_file(&db).expect("remove database");
+        let _cwd = ChangeDirGuard::new(root.path());
+        let _global = ScopedEnvVar::set(
+            "LIBRA_CONFIG_GLOBAL_DB",
+            root.path().join("missing-global.db"),
+        );
+        let _vars = remote_env();
+        must_ok(
+            ClientStorage::resolve_configured_storage(root.path().join("objects")),
+            "confirmed missing database is local-prefix absence, not a read error",
+        );
+        assert!(!db.exists());
+    }
+
+    #[tokio::test]
+    #[serial(cwd, env)]
+    async fn storage_config_resolve_unresolved_type_stays_local() {
+        let _env = isolate_storage_env();
+        let repo = tempdir().expect("temp");
+        setup_with_new_libra_in(repo.path()).await;
+        break_repository_database(repo.path());
+        let _cwd = ChangeDirGuard::new(repo.path());
+        let _global = ScopedEnvVar::set(
+            "LIBRA_CONFIG_GLOBAL_DB",
+            repo.path().join("missing-global.db"),
+        );
+        let objects = repo.path().join("local-objects");
+        must_ok(
+            ClientStorage::resolve_configured_storage(objects.clone()),
+            "an unread type stays local",
+        );
+        assert!(objects.exists());
+    }
+
+    #[tokio::test]
+    #[serial(cwd, env)]
+    async fn storage_config_resolve_does_not_use_objects_cache() {
+        let _env = isolate_storage_env();
+        let root = tempdir().expect("temp");
+        setup_with_new_libra_in(root.path()).await;
+        let _cwd = ChangeDirGuard::new(root.path());
+        let _type = ScopedEnvVar::set("LIBRA_STORAGE_TYPE", "gcs-canary");
+        let _hash = set_hash_kind_for_test(HashKind::Sha1);
+        let cached = crate::utils::util::objects_storage();
+        let blob = Blob::from_content("cached");
+        cached
+            .put(&blob.id, &blob.data, blob.get_type())
+            .expect("cached fallback remains writable");
+        let error = must_err(
+            crate::utils::util::resolve_configured_objects_storage(),
+            "new resolver ignores the fail-open cache",
+        );
+        assert_eq!(error.variable(), "LIBRA_STORAGE_TYPE");
+        assert_redacted(&error, "gcs-canary");
+    }
+
+    fn remote_env() -> Vec<ScopedEnvVar> {
+        [
+            ("LIBRA_STORAGE_TYPE", "s3"),
+            ("LIBRA_STORAGE_BUCKET", "bucket"),
+            ("LIBRA_STORAGE_ENDPOINT", "https://example.com"),
+            ("LIBRA_STORAGE_REGION", "auto"),
+            ("LIBRA_STORAGE_ACCESS_KEY", "access"),
+            ("LIBRA_STORAGE_SECRET_KEY", "secret"),
+            ("LIBRA_STORAGE_ALLOW_HTTP", "false"),
+            ("LIBRA_STORAGE_THRESHOLD", "1024"),
+            ("LIBRA_STORAGE_CACHE_SIZE", "1024"),
+        ]
+        .into_iter()
+        .map(|(key, value)| ScopedEnvVar::set(key, value))
+        .collect()
+    }
+
+    async fn write_future_global_db(path: &std::path::Path) {
+        use sea_orm::{ConnectionTrait, Statement};
+        let conn = db::create_database(path.to_str().expect("utf8"))
+            .await
+            .expect("create global fixture");
+        let backend = conn.get_database_backend();
+        conn.execute_raw(Statement::from_string(
+            backend,
+            "CREATE TABLE IF NOT EXISTS configuration_schema_versions (version INTEGER PRIMARY KEY, name TEXT NOT NULL, applied_at TEXT NOT NULL)",
+        ))
+        .await
+        .expect("create ledger");
+        conn.execute_raw(Statement::from_sql_and_values(
+            backend,
+            "INSERT INTO configuration_schema_versions (version, name, applied_at) VALUES (?, ?, ?)",
+            [9_000_000_001i64.into(), "future".into(), "fixture".into()],
+        ))
+        .await
+        .expect("insert future version");
+        conn.close().await.expect("close");
+    }
+
+    #[tokio::test]
+    #[serial(cwd, env)]
+    async fn storage_config_resolve_type_global_schema_stays_local() {
+        let _env = isolate_storage_env();
+        let repo = tempdir().expect("temp");
+        setup_with_new_libra_in(repo.path()).await;
+        let global = repo.path().join("future.db");
+        write_future_global_db(&global).await;
+        let _cwd = ChangeDirGuard::new(repo.path());
+        let _global = ScopedEnvVar::set("LIBRA_CONFIG_GLOBAL_DB", &global);
+        let objects = repo.path().join("schema-objects");
+        must_ok(
+            ClientStorage::resolve_configured_storage(objects.clone()),
+            "future schema while reading the type stays local",
+        );
+        assert!(objects.exists());
+    }
+
+    #[tokio::test]
+    #[serial(cwd, env)]
+    async fn storage_config_resolve_later_global_schema_is_not_local() {
+        let _env = isolate_storage_env();
+        let repo = tempdir().expect("temp");
+        setup_with_new_libra_in(repo.path()).await;
+        let global = repo.path().join("future.db");
+        write_future_global_db(&global).await;
+        let _cwd = ChangeDirGuard::new(repo.path());
+        let _global = ScopedEnvVar::set("LIBRA_CONFIG_GLOBAL_DB", &global);
+        let _type = ScopedEnvVar::set("LIBRA_STORAGE_TYPE", "r2");
+        let objects = repo.path().join("later-schema");
+        let error = must_err(
+            ClientStorage::resolve_configured_storage(objects.clone()),
+            "future schema after a confirmed type",
+        );
+        assert_eq!(error.variable(), "LIBRA_STORAGE_BUCKET");
+        assert!(!objects.exists());
+    }
+
+    /// Ignored probe. Parent tests spawn it with `--ignored --nocapture` so
+    /// `eprintln!` reaches the child stderr under both `cargo test` and nextest.
+    #[test]
+    #[ignore]
+    fn storage_config_init_fallback_probe() {
+        let _hash = set_hash_kind_for_test(HashKind::Sha1);
+        let root = tempdir().expect("temp");
+        let storage = ClientStorage::init(root.path().join("init-objects"));
+        let blob = Blob::from_content("local");
+        storage
+            .put(&blob.id, &blob.data, blob.get_type())
+            .expect("init fallback stays writable");
+    }
+
+    fn assert_init_fallback_warns(env: &[(&str, &str)], warning_needle: &str) {
+        let root = tempdir().expect("temp");
+        let mut command = std::process::Command::new(std::env::current_exe().expect("test bin"));
+        command
+            .current_dir(root.path())
+            .env("HOME", root.path())
+            .env(
+                "LIBRA_CONFIG_GLOBAL_DB",
+                root.path().join("missing-global.db"),
+            )
+            .args([
+                "utils::client_storage::tests::storage_config_init_fallback_probe",
+                "--exact",
+                "--ignored",
+                "--nocapture",
+                "--test-threads=1",
+            ])
+            .env_remove("LIBRA_STORAGE_TYPE")
+            .env_remove("LIBRA_STORAGE_BUCKET")
+            .env_remove("LIBRA_STORAGE_ENDPOINT")
+            .env_remove("LIBRA_STORAGE_REGION")
+            .env_remove("LIBRA_STORAGE_ACCESS_KEY")
+            .env_remove("LIBRA_STORAGE_SECRET_KEY")
+            .env_remove("LIBRA_STORAGE_ALLOW_HTTP")
+            .env_remove("LIBRA_STORAGE_THRESHOLD")
+            .env_remove("LIBRA_STORAGE_CACHE_SIZE");
+        for (key, value) in env {
+            command.env(key, value);
+        }
+        let output = command.output().expect("spawn init fallback probe");
+        let text = format!(
+            "{}{}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+        assert!(output.status.success(), "{text}");
+        assert!(text.contains("Warning:"), "{text}");
+        assert!(text.contains(warning_needle), "{text}");
+    }
+
+    #[test]
+    #[serial(env)]
+    fn storage_config_init_fallback_warning_keeps_raw_value() {
+        assert_init_fallback_warns(
+            &[
+                ("LIBRA_STORAGE_TYPE", "s3"),
+                ("LIBRA_STORAGE_BUCKET", "bucket"),
+                ("LIBRA_STORAGE_ENDPOINT", "endpoint-canary-value"),
+            ],
+            "endpoint-canary-value",
+        );
+    }
+
+    #[test]
+    #[serial(env)]
+    fn storage_config_init_fallback_unsupported_type_warns_and_stays_writable() {
+        assert_init_fallback_warns(
+            &[("LIBRA_STORAGE_TYPE", "gcs-canary-type")],
+            "gcs-canary-type",
+        );
+    }
+
+    #[test]
+    #[serial(env)]
+    fn storage_config_init_fallback_empty_bucket_warns_and_stays_writable() {
+        assert_init_fallback_warns(
+            &[("LIBRA_STORAGE_TYPE", "s3"), ("LIBRA_STORAGE_BUCKET", "")],
+            "LIBRA_STORAGE_BUCKET cannot be empty",
+        );
+    }
+
+    #[test]
+    #[serial(env)]
+    fn storage_config_init_fallback_empty_access_key_warns_and_stays_writable() {
+        assert_init_fallback_warns(
+            &[
+                ("LIBRA_STORAGE_TYPE", "s3"),
+                ("LIBRA_STORAGE_BUCKET", "bucket"),
+                ("LIBRA_STORAGE_ACCESS_KEY", ""),
+            ],
+            "LIBRA_STORAGE_ACCESS_KEY cannot be empty",
+        );
+    }
+
+    #[test]
+    #[serial(env)]
+    fn storage_config_init_fallback_empty_secret_warns_and_stays_writable() {
+        assert_init_fallback_warns(
+            &[
+                ("LIBRA_STORAGE_TYPE", "s3"),
+                ("LIBRA_STORAGE_BUCKET", "bucket"),
+                ("LIBRA_STORAGE_SECRET_KEY", ""),
+            ],
+            "LIBRA_STORAGE_SECRET_KEY cannot be empty",
         );
     }
 }

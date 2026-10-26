@@ -64,6 +64,17 @@ Do not delete or edit SQLite receipts manually. Use `--offline` or
 `LIBRA_READ_POLICY=offline|local` only for intentional local-only object access;
 these modes warn and are not authorization for remote synchronization.
 
+When `LIBRA_STORAGE_TYPE` is `s3` or `r2`, `fetch` checks the rest of the
+object-storage settings before it updates refs or installs a pack. An unreadable setting, an empty bucket, access key, or secret, or an
+endpoint that is not a URL fails with `LBR-IO-001` and reports only the
+setting name. An unset bucket, endpoint, region, key, secret, allow-http
+flag, threshold, or cache size keeps its existing default. The same check applies to
+`pull` and `clone`. If the type is unset and the configuration database cannot
+be read, fetch stays on the historical local path. A type other than `s3` or
+`r2`, including `gcs`, also fails with `LBR-IO-001`. Commands that still
+construct storage through the older `init` path can keep that path's local
+fallback.
+
 ### Prune config defaults (`fetch.prune`, `remote.<name>.prune`)
 
 When neither `--prune`/`-p` nor `--no-prune` is given, Libra resolves the prune

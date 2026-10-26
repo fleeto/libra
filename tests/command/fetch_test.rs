@@ -34,7 +34,7 @@ use tokio::{process::Command as TokioCommand, time::timeout};
 
 use super::{
     assert_cli_success, create_committed_repo_via_cli, parse_cli_error_stderr, parse_json_stdout,
-    run_libra_command,
+    run_libra_command, run_libra_command_with_env,
 };
 
 fn libra_command(cwd: &Path) -> Command {
@@ -3483,4 +3483,82 @@ fn fetch_rejects_sha256_git_source() {
             "no origin tracking refs after reject"
         );
     }
+}
+
+fn storage_config_text(output: &std::process::Output) -> String {
+    format!(
+        "{}{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    )
+}
+
+fn assert_no_pack(repo: &std::path::Path) {
+    let pack = repo.join(".libra").join("objects").join("pack");
+    if !pack.exists() {
+        return;
+    }
+    let found = fs::read_dir(&pack)
+        .expect("read pack dir")
+        .flatten()
+        .any(|entry| entry.path().extension().is_some_and(|ext| ext == "pack"));
+    assert!(!found, "fetch must not install a pack");
+}
+
+#[test]
+#[serial(cwd, env)]
+fn storage_config_failure_hides_values_fetch() {
+    let source = create_committed_repo_via_cli();
+    let dest = create_committed_repo_via_cli();
+    let source_path = source.path().display().to_string();
+    assert_cli_success(
+        &run_libra_command(&["remote", "add", "origin", &source_path], dest.path()),
+        "add local remote",
+    );
+    let canary = "canary-secret-not-a-url";
+    let output = run_libra_command_with_env(
+        &["--json", "fetch", "origin"],
+        dest.path(),
+        &[
+            ("LIBRA_STORAGE_TYPE", "s3"),
+            ("LIBRA_STORAGE_BUCKET", "bucket"),
+            ("LIBRA_STORAGE_ENDPOINT", canary),
+        ],
+    );
+    let text = storage_config_text(&output);
+    assert!(!text.contains(canary), "{text}");
+    assert!(!output.status.success(), "{text}");
+    let (_, report) = parse_cli_error_stderr(&output.stderr);
+    assert_eq!(report.error_code, "LBR-IO-001", "{report:?}");
+    assert!(report.message.contains("LIBRA_STORAGE_ENDPOINT"));
+    assert_no_pack(dest.path());
+}
+
+#[test]
+#[serial(cwd, env)]
+fn storage_config_unresolved_fetch_stays_local_fetch() {
+    let source = create_committed_repo_via_cli();
+    let dest = create_committed_repo_via_cli();
+    let source_path = source.path().display().to_string();
+    assert_cli_success(
+        &run_libra_command(&["remote", "add", "origin", &source_path], dest.path()),
+        "add local remote",
+    );
+    let output = run_libra_command_with_env(
+        &["fetch", "origin"],
+        dest.path(),
+        &[(
+            "LIBRA_CONFIG_GLOBAL_DB",
+            dest.path()
+                .join("missing-global.db")
+                .to_str()
+                .expect("utf8"),
+        )],
+    );
+    let text = storage_config_text(&output);
+    assert!(
+        !text.contains("failed to read object storage configuration"),
+        "{text}"
+    );
+    assert!(output.status.success(), "{text}");
 }

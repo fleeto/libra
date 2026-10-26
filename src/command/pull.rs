@@ -1081,7 +1081,8 @@ fn map_fetch_error_to_cli(error: &fetch::FetchError) -> CliError {
             CliError::fatal(error.to_string()).with_stable_code(StableErrorCode::NetworkProtocol)
         }
         fetch::FetchError::ObjectsDirNotFound { .. }
-        | fetch::FetchError::TagObjectProbe { .. } => {
+        | fetch::FetchError::TagObjectProbe { .. }
+        | fetch::FetchError::StorageConfig { .. } => {
             CliError::fatal(error.to_string()).with_stable_code(StableErrorCode::IoReadFailed)
         }
         fetch::FetchError::PackDirCreate { .. }

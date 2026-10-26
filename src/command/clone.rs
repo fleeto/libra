@@ -829,7 +829,8 @@ fn map_fetch_error(source: fetch::FetchError) -> CliError {
         fetch::FetchError::RemoteBranchNotFound { .. } => CliError::fatal(source.to_string())
             .with_stable_code(StableErrorCode::RepoStateInvalid)
             .with_hint("the specified branch does not exist on the remote"),
-        fetch::FetchError::TagObjectProbe { .. } => CliError::fatal(source.to_string())
+        fetch::FetchError::TagObjectProbe { .. }
+        | fetch::FetchError::StorageConfig { .. } => CliError::fatal(source.to_string())
             .with_stable_code(StableErrorCode::IoReadFailed),
         _ => CliError::fatal(source.to_string())
             .with_stable_code(StableErrorCode::NetworkUnavailable)

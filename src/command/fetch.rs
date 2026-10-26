@@ -1004,6 +1004,11 @@ pub enum FetchError {
     /// AutoFollow could not tell whether a tag object is present.
     #[error("failed to read object storage while checking fetched tags: {message}")]
     TagObjectProbe { message: String },
+    /// Confirmed object-storage settings could not be completed.
+    ///
+    /// `variable` is the setting name. It is never a configured value.
+    #[error("failed to read object storage configuration for {variable}")]
+    StorageConfig { variable: &'static str },
 }
 
 impl From<FetchError> for CliError {
@@ -1074,8 +1079,9 @@ impl From<FetchError> for CliError {
                     "use '<src>:<dst>' with full refs, for example \
                      'refs/heads/main:refs/remotes/origin/main'",
                 ),
-            FetchError::ConfigRead { .. } => CliError::fatal(error.to_string())
-                .with_stable_code(StableErrorCode::IoReadFailed),
+            FetchError::ConfigRead { .. } | FetchError::StorageConfig { .. } => {
+                CliError::fatal(error.to_string()).with_stable_code(StableErrorCode::IoReadFailed)
+            }
             FetchError::ObjectFormatMismatch { remote, local } => {
                 let mut err = CliError::fatal(error.to_string())
                     .with_stable_code(StableErrorCode::RepoStateInvalid);
@@ -2515,6 +2521,11 @@ async fn fetch_repository_with_result_reusing(
         });
     }
 
+    let configured_storage =
+        util::resolve_configured_objects_storage().map_err(|error| FetchError::StorageConfig {
+            variable: error.variable(),
+        })?;
+
     if refs.is_empty() {
         let refs_updated = update_references(
             &remote_config,
@@ -2636,10 +2647,10 @@ async fn fetch_repository_with_result_reusing(
     // deepen request Git does not repeat them in the pack response. Only record
     // boundaries whose commits are present after indexing the fetched pack.
     let mut shallow_updates = fetch_data.shallow;
-    let storage = util::objects_storage();
+    let storage = &configured_storage;
     if validate_network_history {
         shallow_response_validation::validate_response_shallow_updates(
-            &storage,
+            storage,
             &want,
             depth,
             &shallow_boundaries,
@@ -2738,7 +2749,7 @@ async fn fetch_repository_with_result_reusing(
     )?;
     if validate_network_history {
         validate_fetched_history(
-            &storage,
+            storage,
             &want,
             commit_edges.as_mut(),
             &fetch_data.unshallow,
@@ -2772,9 +2783,7 @@ async fn fetch_repository_with_result_reusing(
     let tags_to_persist: Vec<DiscRef> = match tag_mode {
         TagFetchMode::NoTags => Vec::new(),
         TagFetchMode::All => discovered_tags,
-        TagFetchMode::AutoFollow => {
-            select_autofollow_tags(&util::objects_storage(), discovered_tags)?
-        }
+        TagFetchMode::AutoFollow => select_autofollow_tags(&configured_storage, discovered_tags)?,
     };
     let mut fetch_head_records = ref_plans
         .iter()

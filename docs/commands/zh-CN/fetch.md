@@ -26,6 +26,8 @@ Fetch 支持 SSH、HTTPS、本地文件、Git v2 bundle 文件和 `git://` 传�
 `curl --proto '=https' --tlsv1.2 -sSf https://download.libra.tools/install.sh | sh`。
 禁止手工删除或修改 SQLite receipt。仅在明确需要本地对象访问时使用 `--offline` 或 `LIBRA_READ_POLICY=offline|local`；这些模式会告警，并不授权远端同步。
 
+`LIBRA_STORAGE_TYPE` 为 `s3` 或 `r2` 时，`fetch` 会在更新引用或安装 pack 之前检查其余对象存储设置。读不到设置、bucket、access key 或 secret 为空，或 endpoint 不是 URL 时，以 `LBR-IO-001` 失败，并且只报告变量名。未设置的 bucket、endpoint、region、key、secret、allow-http、threshold 或 cache size 仍用原来的默认值。`pull` 和 `clone` 走同一检查。类型未设置且配置库读不到时，fetch 仍走原来的本地路径。`gcs` 这类不受支持的类型同样以 `LBR-IO-001` 失败。仍通过旧 `init` 构造存储的命令可以保留那条本地降级。
+
 ### 抓取相关的 config 默认值（`fetch.prune`、`remote.<name>.prune`）
 
 未传 `--prune`/`--no-prune` 时，Libra 按严格的 local → global → system 级联读取 Git 兼容的修剪默认值：`fetch.prune=true|false` 让每次 fetch 之后默认修剪该远程已不再通告的远程跟踪引用；`remote.<name>.prune=true|false` 针对单个远程覆盖它（远程作用域的键优先，与 Git 一致）。命令行的 `--prune`/`--no-prune` 始终优先于配置。无效值会在联系远程、下载对象或写任何引用之前以 `LBR-CLI-002` fail-closed（带 `--all` 时，会先校验所有远程的修剪模式再开始第一个 fetch）；local/global 配置读取失败以 `LBR-IO-001` 失败。local/global 的加密值先解密再校验；不可读的 system scope 保持跳过行为。只有 dispatch 已证明无需 Global 存储配置时，不支持的 global schema 才可在一次性去重警告后被默认值读取跳过；需要该 Global scope，或 System 含 future／未注册 receipt 时，dispatch 以 `LBR-CONFIG-001` 阻断 fetch，Global 凭据覆盖不豁免 System。已知 Repository receipt 与合法 barrier 保持可读。两个键都未设置时默认为 false（不修剪），与 Git 出厂默认一致。

@@ -1371,6 +1371,15 @@ pub fn try_objects_storage() -> io::Result<ClientStorage> {
     Ok(cached_objects_storage(storage.join("objects")))
 }
 
+/// Resolve object storage for a caller that can handle configuration failure.
+///
+/// This does not read or write [`OBJECTS_STORAGE_CACHE`]. [`try_objects_storage`]
+/// remains the cached, fail-open entry.
+pub fn resolve_configured_objects_storage()
+-> Result<ClientStorage, crate::utils::client_storage::StorageConfigFailure> {
+    crate::utils::client_storage::ClientStorage::resolve_configured_storage(path::objects())
+}
+
 fn cached_objects_storage(base_path: PathBuf) -> ClientStorage {
     let mut cache = OBJECTS_STORAGE_CACHE
         .lock()

@@ -16,6 +16,7 @@ use tempfile::{TempDir, tempdir};
 use super::{
     assert_cli_success, configure_identity_via_cli, create_committed_repo_via_cli,
     init_repo_via_cli, parse_cli_error_stderr, parse_json_stdout, run_libra_command,
+    run_libra_command_with_env,
 };
 
 mod squash_conflicts;
@@ -1995,5 +1996,75 @@ fn pull_rejects_sha256_git_source() {
         String::from_utf8_lossy(&head_after.stdout).trim(),
         head_oid,
         "pull reject must leave HEAD unchanged"
+    );
+}
+
+fn storage_config_text(output: &std::process::Output) -> String {
+    format!(
+        "{}{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    )
+}
+
+#[test]
+#[serial(cwd, env)]
+fn storage_config_failure_hides_values_pull() {
+    let source = create_committed_repo_via_cli();
+    let dest = create_committed_repo_via_cli();
+    let canary = "canary-secret-not-a-url";
+    let output = run_libra_command_with_env(
+        &[
+            "--json",
+            "pull",
+            source.path().to_str().expect("utf8"),
+            "refs/heads/main:refs/heads/main",
+        ],
+        dest.path(),
+        &[
+            ("LIBRA_STORAGE_TYPE", "s3"),
+            ("LIBRA_STORAGE_BUCKET", "bucket"),
+            ("LIBRA_STORAGE_ENDPOINT", canary),
+        ],
+    );
+    let text = storage_config_text(&output);
+    assert!(!text.contains(canary), "{text}");
+    assert!(!output.status.success(), "{text}");
+    let (_, report) = parse_cli_error_stderr(&output.stderr);
+    assert_eq!(report.error_code, "LBR-IO-001", "{report:?}");
+    let pack = dest.path().join(".libra").join("objects").join("pack");
+    if pack.exists() {
+        let found = fs::read_dir(&pack)
+            .expect("pack")
+            .flatten()
+            .any(|entry| entry.path().extension().is_some_and(|ext| ext == "pack"));
+        assert!(!found, "pull must not install a pack");
+    }
+}
+
+#[test]
+#[serial(cwd, env)]
+fn storage_config_unresolved_fetch_stays_local_pull() {
+    let source = create_committed_repo_via_cli();
+    let dest = create_committed_repo_via_cli();
+    let output = run_libra_command_with_env(
+        &[
+            "pull",
+            source.path().to_str().expect("utf8"),
+            "refs/heads/main",
+        ],
+        dest.path(),
+        &[(
+            "LIBRA_CONFIG_GLOBAL_DB",
+            dest.path()
+                .join("missing-global.db")
+                .to_str()
+                .expect("utf8"),
+        )],
+    );
+    let text = storage_config_text(&output);
+    assert!(
+        !text.contains("failed to read object storage configuration"),
+        "{text}"
     );
 }

@@ -953,3 +953,9 @@ every_tool_error_matches_error_schema	lane:env	sets LIBRA_TEST so the in-process
 every_tool_success_example_is_success	lane:env	sets LIBRA_TEST so the in-process MCP registry includes the debug echo tool while the success example runs
 tools_call_span_has_tool_name	lane:env	sets LIBRA_TEST so the MCP request span can name the debug echo tool
 every_tool_success_matches_success_branch	lane:env	sets LIBRA_TEST so the in-process MCP registry includes the debug echo tool while the success schema runs
+storage_config_failure_hides_values_clone	lane:cwd+env	sets LIBRA_STORAGE_* and runs clone in a temporary repository
+storage_config_failure_hides_values_fetch	lane:cwd+env	sets LIBRA_STORAGE_* and runs fetch in a temporary repository
+storage_config_failure_hides_values_pull	lane:cwd+env	sets LIBRA_STORAGE_* and runs pull in a temporary repository
+storage_config_unresolved_fetch_stays_local_clone	lane:cwd+env	points clone at a missing global config database from a temporary repository
+storage_config_unresolved_fetch_stays_local_fetch	lane:cwd+env	points fetch at a missing global config database from a temporary repository
+storage_config_unresolved_fetch_stays_local_pull	lane:cwd+env	points pull at a missing global config database from a temporary repository

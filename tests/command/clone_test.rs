@@ -3170,3 +3170,79 @@ fn test_clone_local_git_large_object_set_completes_in_budget() {
     let status = run_libra_command(&["status", "--short", "--branch"], &dest);
     super::assert_cli_success(&status, "status on cloned repo");
 }
+
+fn storage_config_text(output: &std::process::Output) -> String {
+    format!(
+        "{}{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    )
+}
+
+#[test]
+#[serial(cwd, env)]
+fn storage_config_failure_hides_values_clone() {
+    let source = super::create_committed_repo_via_cli();
+    let parent = tempdir().expect("temp");
+    let dest = parent.path().join("dest");
+    let canary = "canary-secret-not-a-url";
+    let output = super::run_libra_command_with_env(
+        &[
+            "--json",
+            "clone",
+            source.path().to_str().expect("utf8"),
+            dest.to_str().expect("utf8"),
+        ],
+        parent.path(),
+        &[
+            ("LIBRA_STORAGE_TYPE", "s3"),
+            ("LIBRA_STORAGE_BUCKET", "bucket"),
+            ("LIBRA_STORAGE_ENDPOINT", canary),
+        ],
+    );
+    let text = storage_config_text(&output);
+    assert!(!text.contains(canary), "{text}");
+    assert!(!output.status.success(), "{text}");
+    let (_, report) = super::parse_cli_error_stderr(&output.stderr);
+    assert_eq!(report.error_code, "LBR-IO-001", "{report:?}");
+    if dest.join(".libra").exists() {
+        let pack = dest.join(".libra").join("objects").join("pack");
+        if pack.exists() {
+            let found = fs::read_dir(&pack)
+                .expect("pack")
+                .flatten()
+                .any(|entry| entry.path().extension().is_some_and(|ext| ext == "pack"));
+            assert!(!found, "clone must not install a pack");
+        }
+    }
+}
+
+#[test]
+#[serial(cwd, env)]
+fn storage_config_unresolved_fetch_stays_local_clone() {
+    let source = super::create_committed_repo_via_cli();
+    let parent = tempdir().expect("temp");
+    let dest = parent.path().join("dest");
+    let output = super::run_libra_command_with_env(
+        &[
+            "clone",
+            source.path().to_str().expect("utf8"),
+            dest.to_str().expect("utf8"),
+        ],
+        parent.path(),
+        &[(
+            "LIBRA_CONFIG_GLOBAL_DB",
+            parent
+                .path()
+                .join("missing-global.db")
+                .to_str()
+                .expect("utf8"),
+        )],
+    );
+    let text = storage_config_text(&output);
+    assert!(
+        !text.contains("failed to read object storage configuration"),
+        "{text}"
+    );
+    assert!(output.status.success(), "{text}");
+}

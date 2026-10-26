@@ -1389,8 +1389,19 @@ fn cached_objects_storage(base_path: PathBuf) -> ClientStorage {
     }
 
     let storage = ClientStorage::init(base_path.clone());
+    if storage.configuration_variable().is_some() {
+        return storage;
+    }
     cache.insert(base_path, storage.clone());
     storage
+}
+
+#[cfg(test)]
+pub(crate) fn objects_storage_cache_contains(base_path: &Path) -> bool {
+    OBJECTS_STORAGE_CACHE
+        .lock()
+        .expect("objects storage cache mutex poisoned")
+        .contains_key(base_path)
 }
 
 pub fn reset_objects_storage_cache_for_path(base_path: &Path) {

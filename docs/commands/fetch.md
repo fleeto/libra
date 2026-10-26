@@ -71,9 +71,11 @@ setting name. An unset bucket, endpoint, region, key, secret, allow-http
 flag, threshold, or cache size keeps its existing default. The same check applies to
 `pull` and `clone`. If the type is unset and the configuration database cannot
 be read, fetch stays on the historical local path. A type other than `s3` or
-`r2`, including `gcs`, also fails with `LBR-IO-001`. Commands that still
-construct storage through the older `init` path can keep that path's local
-fallback.
+`r2`, including `gcs`, also fails with `LBR-IO-001`. `ClientStorage::init`
+uses the same confirmed-failure rule and does not build a writable local
+backend. `LIBRA_STORAGE_TYPE=local` still warns and stays local. Fetch, pull,
+and clone already reject that exact value. Unset type with an unreadable
+configuration database stays on the historical local path.
 
 ### Prune config defaults (`fetch.prune`, `remote.<name>.prune`)
 

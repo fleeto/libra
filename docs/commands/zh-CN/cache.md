@@ -13,7 +13,7 @@ libra cache info
 `cache info` 按分层存储后端解析配置的同一方式报告已解析的存储/缓存参数（先环境变量，再全局 config DB），因此报告值与后端实际使用值一致：
 
 - **storage** — 原始 `LIBRA_STORAGE_TYPE` 值（未设置时为 `local`；否则保留你的精确值，例如 `s3` / `r2` — 大小写错误的 `R2` 会原样显示并报告为非分层）。
-- **tier** — 配置是否选择了持久层：`LIBRA_STORAGE_TYPE` 必须是区分大小写的 `s3` / `r2`，并通过后端连接前应用的所有静态检查（非空 bucket、可解析的 `LIBRA_STORAGE_ENDPOINT`、非空 `LIBRA_STORAGE_ACCESS_KEY` / `LIBRA_STORAGE_SECRET_KEY`）。因此大小写错误的 `R2`、空 key 或格式错误的 endpoint 会报告为非分层，而不是误导你。缓存参数只在启用分层时生效；纯本地仓库不会缓存任何内容。实际连接还需要有效凭证，本静态报告不会验证凭证。
+- **tier** — 配置是否选择了持久层：`LIBRA_STORAGE_TYPE` 必须是区分大小写的 `s3` / `r2`，并通过后端连接前应用的所有静态检查（非空 bucket、可解析的 `LIBRA_STORAGE_ENDPOINT`、非空 `LIBRA_STORAGE_ACCESS_KEY` / `LIBRA_STORAGE_SECRET_KEY`）。因此大小写错误的 `R2`、空 key 或格式错误的 endpoint 会报告为非分层。这不表示 `init` 造出了可写的本地后端；这些已确认的设置会让对象命令失败，并且只报告设置名。`LIBRA_STORAGE_TYPE=local` 仍打印原来的警告并保持本地。缓存参数只在启用分层时生效；纯本地仓库不会缓存任何内容。实际连接还需要有效凭证，本静态报告不会验证凭证。
 - **threshold** — 小/大对象阈值，单位字节（`LIBRA_STORAGE_THRESHOLD`，默认 1 MiB）。大小达到或超过此值的对象会进入 LRU 缓存，而不是永久存储。
 - **cache** — 大型缓存对象的本地 LRU 磁盘预算，单位字节（`LIBRA_STORAGE_CACHE_SIZE`，默认 200 MiB）。
 

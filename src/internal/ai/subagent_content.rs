@@ -7865,7 +7865,14 @@ async fn capture_discovered_subagent_contents_inner(
             std::fs::create_dir_all(&objects_dir)
                 .context("create objects directory for subagent content")?;
             let manager = HistoryManager::new_with_ref(
-                Arc::new(ClientStorage::init(objects_dir)),
+                Arc::new(
+                    ClientStorage::open_init_storage(objects_dir).map_err(|error| {
+                        anyhow!(
+                            "failed to read storage configuration for {}",
+                            error.variable()
+                        )
+                    })?,
+                ),
                 storage_root.to_path_buf(),
                 Arc::new(conn.clone()),
                 crate::internal::branch::TRACES_BRANCH,
@@ -19044,5 +19051,42 @@ mod codex_child_usage_enumeration_local_tests {
                 assert_eq!(old.bytes, new.bytes);
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod storage_config_upcast_subagent_tests {
+    use super::ClientStorage;
+
+    #[tokio::test]
+    #[serial_test::serial(env)]
+    async fn storage_config_upcast_subagent_rejects_confirmed_type() {
+        let _type = crate::utils::test::ScopedEnvVar::set("LIBRA_STORAGE_TYPE", "gcs-canary");
+        let dir = tempfile::tempdir().expect("temp");
+        let error = match ClientStorage::open_init_storage(dir.path().join("objects")) {
+            Ok(_) => panic!("confirmed type must not open storage"),
+            Err(error) => error,
+        };
+        let text = format!(
+            "failed to read storage configuration for {}",
+            error.variable()
+        );
+        assert_eq!(
+            text,
+            "failed to read storage configuration for LIBRA_STORAGE_TYPE"
+        );
+        assert!(!text.contains("gcs-canary"));
+    }
+
+    #[tokio::test]
+    #[serial_test::serial(env)]
+    async fn storage_config_upcast_subagent_local_word_is_ready() {
+        let _type = crate::utils::test::ScopedEnvVar::set("LIBRA_STORAGE_TYPE", "local");
+        let dir = tempfile::tempdir().expect("temp");
+        let storage = match ClientStorage::open_init_storage(dir.path().join("objects")) {
+            Ok(storage) => storage,
+            Err(error) => panic!("local word must stay ready: {error}"),
+        };
+        assert!(storage.configuration_variable().is_none());
     }
 }

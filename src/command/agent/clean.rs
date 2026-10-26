@@ -295,7 +295,15 @@ pub async fn execute_safe(args: CleanArgs, output: &OutputConfig) -> CliResult<(
     };
     let repo_path = util::try_get_storage_path(None)
         .map_err(|e| CliError::fatal(format!("failed to locate .libra directory: {e}")))?;
-    let storage = Arc::new(ClientStorage::init(repo_path.join("objects")));
+    let storage = Arc::new(
+        crate::utils::client_storage::ClientStorage::open_init_storage(repo_path.join("objects"))
+            .map_err(|error| {
+            CliError::fatal(format!(
+                "failed to read storage configuration for {}",
+                error.variable()
+            ))
+        })?,
+    );
     // Resolve the run-state root before `repo_path` is moved into the history
     // manager; the stderr- and findings-window GCs below prune under it.
     let sessions_root = repo_path.join("sessions");
@@ -1716,5 +1724,41 @@ mod stderr_gc_tests {
             "a symlinked reviewers dir must never be followed"
         );
         assert!(victim_log.exists(), "a file outside the store must survive");
+    }
+
+    #[tokio::test]
+    #[serial_test::serial(env)]
+    async fn storage_config_upcast_clean_rejects_confirmed_type() {
+        let _type = crate::utils::test::ScopedEnvVar::set("LIBRA_STORAGE_TYPE", "gcs-canary");
+        let dir = tempfile::tempdir().expect("temp");
+        let error = match crate::utils::client_storage::ClientStorage::open_init_storage(
+            dir.path().join("objects"),
+        ) {
+            Ok(_) => panic!("confirmed type must not open storage"),
+            Err(error) => error,
+        };
+        let text = format!(
+            "failed to read storage configuration for {}",
+            error.variable()
+        );
+        assert_eq!(
+            text,
+            "failed to read storage configuration for LIBRA_STORAGE_TYPE"
+        );
+        assert!(!text.contains("gcs-canary"));
+    }
+
+    #[tokio::test]
+    #[serial_test::serial(env)]
+    async fn storage_config_upcast_clean_local_word_is_ready() {
+        let _type = crate::utils::test::ScopedEnvVar::set("LIBRA_STORAGE_TYPE", "local");
+        let dir = tempfile::tempdir().expect("temp");
+        let storage = match crate::utils::client_storage::ClientStorage::open_init_storage(
+            dir.path().join("objects"),
+        ) {
+            Ok(storage) => storage,
+            Err(error) => panic!("local word must stay ready: {error}"),
+        };
+        assert!(storage.configuration_variable().is_none());
     }
 }

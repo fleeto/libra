@@ -4882,9 +4882,19 @@ impl CheckpointStore for TracesCheckpointStore<'_> {
                         stage: CheckpointStoreStage::ObjectWrite,
                     });
                 }
-                std::sync::Arc::new(crate::utils::client_storage::ClientStorage::init(
-                    objects_dir,
-                ))
+                match crate::utils::client_storage::ClientStorage::open_init_storage(objects_dir) {
+                    Ok(storage) => std::sync::Arc::new(storage),
+                    Err(_error) => {
+                        self.retire_failed_attempt_with_diagnostic(
+                            "storage_config",
+                            request.deadline(),
+                        )
+                        .await;
+                        return Err(CheckpointStoreError::StoreFailure {
+                            stage: CheckpointStoreStage::ObjectWrite,
+                        });
+                    }
+                }
             }
             CheckpointStorageMode::LocalExisting => std::sync::Arc::new(
                 crate::utils::client_storage::ClientStorage::init_local_existing(objects_dir),
@@ -5079,6 +5089,7 @@ mod tests {
     use std::time::Duration;
 
     use sea_orm::{ConnectionTrait, Database, Statement};
+    use serial_test::serial;
     use sha2::Digest;
 
     use super::*;
@@ -7547,6 +7558,57 @@ mod tests {
         Takeover,
         /// The ref/catalog committed; an ordinary marker awaits cleanup.
         CommittedOrdinary,
+    }
+
+    #[tokio::test]
+    #[serial(env)]
+    async fn storage_config_upcast_checkpoint_confirmed_type_retires_marker() {
+        let _type = crate::utils::test::ScopedEnvVar::set("LIBRA_STORAGE_TYPE", "gcs-canary");
+        let fixture = store_replay_fixture().await;
+        let result = fixture.write().await;
+        let marker = fixture.marker().await;
+        assert_eq!(
+            result,
+            Err(CheckpointStoreError::StoreFailure {
+                stage: CheckpointStoreStage::ObjectWrite,
+            })
+        );
+        assert!(
+            marker.is_none(),
+            "ordinary marker must be retired: {marker:?}"
+        );
+    }
+
+    #[tokio::test]
+    #[serial(env)]
+    async fn storage_config_upcast_checkpoint_retire_failure_still_returns_object_write() {
+        let _type = crate::utils::test::ScopedEnvVar::set("LIBRA_STORAGE_TYPE", "gcs-canary");
+        let fixture = store_replay_fixture().await;
+        test_support::fail_once_at(test_support::CheckpointFaultPoint::MarkerCleanup);
+        let result = fixture.write().await;
+        assert_eq!(
+            test_support::armed_fault(),
+            None,
+            "MarkerCleanup must fire while retiring the failed attempt"
+        );
+        assert_eq!(
+            result,
+            Err(CheckpointStoreError::StoreFailure {
+                stage: CheckpointStoreStage::ObjectWrite,
+            })
+        );
+    }
+
+    #[tokio::test]
+    #[serial(env)]
+    async fn storage_config_upcast_checkpoint_local_word_succeeds() {
+        let _type = crate::utils::test::ScopedEnvVar::set("LIBRA_STORAGE_TYPE", "local");
+        let fixture = store_replay_fixture().await;
+        let result = fixture.write().await;
+        assert!(
+            result.is_ok(),
+            "TYPE=local must keep the historical writable path: {result:?}"
+        );
     }
 
     /// AC4/AC7 step-by-step fault matrix through the concrete store. Each

@@ -1178,13 +1178,48 @@ pub enum ObjectReadFailure {
     Other,
 }
 
+#[derive(Clone)]
+enum HeldStorage {
+    Ready(Arc<dyn Storage>),
+    Rejected(&'static str),
+}
+
 /// Wraps a `dyn Storage` (local, remote, or tiered) and adapts every operation to a
 /// blocking call by routing through the dedicated `RUNTIME`. Cheap to clone —
-/// internally it is an `Arc` plus a `PathBuf`.
+/// internally it is an `Arc` plus a `PathBuf`. A rejected configuration keeps only
+/// the setting name.
 #[derive(Clone)]
 pub struct ClientStorage {
-    storage: Arc<dyn Storage>,
+    held: HeldStorage,
     base_path: PathBuf, // Keep base_path for legacy access if needed
+}
+
+#[cfg(test)]
+thread_local! {
+    static STORAGE_TYPE_READS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
+fn read_storage_type() -> Result<Option<String>, StorageConfigResolutionError> {
+    #[cfg(test)]
+    STORAGE_TYPE_READS.with(|reads| reads.set(reads.get().saturating_add(1)));
+    resolve_env_sync_typed("LIBRA_STORAGE_TYPE")
+}
+
+fn storage_config_git_error(variable: &'static str) -> GitError {
+    GitError::CustomError(format!(
+        "failed to read storage configuration for {variable}"
+    ))
+}
+
+fn storage_config_io_error(variable: &'static str) -> std::io::Error {
+    std::io::Error::other(format!(
+        "failed to read storage configuration for {variable}"
+    ))
+}
+
+fn refuse_rejected_presence(variable: &'static str) -> ! {
+    eprintln!("failed to read storage configuration for {variable}");
+    std::process::exit(1);
 }
 
 /// Parse only the reference-bearing commit headers. Commit messages are byte
@@ -1489,22 +1524,17 @@ pub struct CacheConfig {
     pub cache_size_bytes: usize,
 }
 
-/// Resolve the cache/storage tunables the way [`ClientStorage::create_storage_backend`]
-/// does (env first, then the global config DB via `resolve_env_sync`), mirroring
-/// its lenient parse — an unparseable numeric value falls back to the default,
-/// exactly as the storage backend would use it. Used by `libra cache info` so
-/// the reported values match what the running backend applies.
+/// Resolve the cache/storage tunables from the environment and then the global
+/// config database. An unparseable numeric value falls back to the default.
+/// `libra cache info` uses this static report. It does not open a writable
+/// object backend: a wrong-case type, an empty key, or a bad endpoint reports
+/// `tiered=false`, while `ClientStorage::init` rejects those confirmed settings.
 ///
 /// # Errors
 /// Propagates a config-resolution failure (e.g. an unreadable global config DB).
-/// Whether the S3/R2 static pre-connection checks pass, resolved in the SAME
-/// order as [`ClientStorage::create_storage_backend`] and short-circuiting to
-/// `false` at the first static fallback (empty bucket / unparseable endpoint /
-/// empty access or secret key). Each var is resolved in order so a
-/// config-resolution error only surfaces for a var the backend would actually
-/// have reached — `tiered` is thus never over-reported. `REGION`/`ALLOW_HTTP`
-/// values do not gate tiering (the backend accepts any), but a resolution error
-/// on either still degrades the backend to local, so they are resolved too.
+/// Static checks short-circuit to `false` at the first empty bucket, unparseable
+/// endpoint, or empty access or secret key. `REGION` and `ALLOW_HTTP` do not
+/// gate the report, but a resolution error on either still fails the report.
 fn tiered_static_checks_pass() -> Result<bool, String> {
     if resolve_env_sync("LIBRA_STORAGE_BUCKET")?.is_some_and(|bucket| bucket.is_empty()) {
         return Ok(false);
@@ -1527,9 +1557,8 @@ fn tiered_static_checks_pass() -> Result<bool, String> {
 
 pub fn resolve_cache_config() -> Result<CacheConfig, String> {
     let (storage_type, mut tiered) = match resolve_env_sync("LIBRA_STORAGE_TYPE")? {
-        // Raw, case-sensitive match — identical to create_storage_backend, so a
-        // value the backend rejects (e.g. `R2`, `" r2 "`) reports non-tiered
-        // rather than misleading the user into thinking tiering is active.
+        // Raw, case-sensitive match. A value other than `s3` or `r2`
+        // (for example `R2` or `" r2 "`) reports non-tiered.
         Some(raw) => {
             let tiered = matches!(raw.as_str(), "s3" | "r2");
             (raw, tiered)
@@ -1563,13 +1592,41 @@ pub fn resolve_cache_config() -> Result<CacheConfig, String> {
 }
 
 impl ClientStorage {
+    fn ready(storage: Arc<dyn Storage>, base_path: PathBuf) -> Self {
+        Self {
+            held: HeldStorage::Ready(storage),
+            base_path,
+        }
+    }
+
+    fn rejected(base_path: PathBuf, variable: &'static str) -> Self {
+        Self {
+            held: HeldStorage::Rejected(variable),
+            base_path,
+        }
+    }
+
+    pub(crate) fn configuration_variable(&self) -> Option<&'static str> {
+        match self.held {
+            HeldStorage::Rejected(variable) => Some(variable),
+            HeldStorage::Ready(_) => None,
+        }
+    }
+
+    fn ready_storage(&self) -> Result<Arc<dyn Storage>, GitError> {
+        match &self.held {
+            HeldStorage::Ready(storage) => Ok(Arc::clone(storage)),
+            HeldStorage::Rejected(variable) => Err(storage_config_git_error(variable)),
+        }
+    }
+
     /// Evict verified-durable large objects until under budget (lore.md
     /// 2.9). `Ok(None)` when the backing store is not tiered.
     pub async fn evict_local(
         &self,
         request: crate::utils::storage::EvictRequest,
     ) -> Result<Option<crate::utils::storage::EvictReport>, git_internal::errors::GitError> {
-        self.storage.evict_local(request).await
+        self.ready_storage()?.evict_local(request).await
     }
 
     pub fn base_path(&self) -> &PathBuf {
@@ -1579,18 +1636,18 @@ impl ClientStorage {
     /// Construct a `ClientStorage` rooted at `base_path` (typically `.libra/objects`).
     ///
     /// Functional scope:
-    /// - Picks the storage backend based on env / vault config (see
-    ///   `Self::create_storage_backend`). Local-only when `LIBRA_STORAGE_TYPE` is
-    ///   absent.
+    /// - Uses [`Self::open_init_storage`]. Unset type and `local` stay on a
+    ///   local backend. A confirmed remote or unsupported type that cannot be
+    ///   completed does not construct `LocalStorage`.
     ///
     /// Boundary conditions:
-    /// - Never panics on misconfiguration: any unrecoverable env error degrades to
-    ///   `LocalStorage` with a one-line error written to stderr. This means a broken
-    ///   `LIBRA_STORAGE_*` setting silently disables remote backup instead of stopping
-    ///   the CLI.
+    /// - Does not panic on misconfiguration. Confirmed failures name only the
+    ///   setting. An unreadable type still uses the historical local result.
     pub fn init(base_path: PathBuf) -> ClientStorage {
-        let storage = Self::create_storage_backend(base_path.clone());
-        ClientStorage { storage, base_path }
+        match Self::open_init_storage(base_path.clone()) {
+            Ok(storage) => storage,
+            Err(failure) => Self::rejected(base_path, failure.variable()),
+        }
     }
 
     /// Construct a strictly **local** `ClientStorage` rooted at `base_path`,
@@ -1602,7 +1659,7 @@ impl ClientStorage {
     /// objects back into that foreign directory using cloud credentials.
     pub fn init_local(base_path: PathBuf) -> ClientStorage {
         let storage = Arc::new(LocalStorage::new(base_path.clone()));
-        ClientStorage { storage, base_path }
+        Self::ready(storage, base_path)
     }
 
     /// Construct a local backend without touching the filesystem.
@@ -1612,7 +1669,7 @@ impl ClientStorage {
     /// creation must not occur synchronously on the foreground thread.
     pub fn init_local_existing(base_path: PathBuf) -> ClientStorage {
         let storage = Arc::new(LocalStorage::open_no_create(base_path.clone()));
-        ClientStorage { storage, base_path }
+        Self::ready(storage, base_path)
     }
 
     /// Local-only reader that still resolves `objects/info/alternates` and
@@ -1622,238 +1679,12 @@ impl ClientStorage {
         let storage = Arc::new(LocalStorage::open_no_create_with_alternates(
             base_path.clone(),
         ));
-        ClientStorage { storage, base_path }
+        Self::ready(storage, base_path)
     }
 
     #[cfg(test)]
     pub(crate) fn from_test_storage(storage: Arc<dyn Storage>, base_path: PathBuf) -> Self {
-        Self { storage, base_path }
-    }
-
-    /// Create a storage backend.
-    ///
-    /// # Remote Storage
-    /// If `LIBRA_STORAGE_TYPE` is set to "s3" or "r2", it configures a tiered storage
-    /// with local cache and remote persistence.
-    ///
-    /// ## Repo ID Isolation
-    /// When remote storage is enabled, it attempts to read `libra.repoid` from the configuration.
-    /// If found, it uses `repo_id` as a key prefix (`<repo_id>/objects/...`) for isolation.
-    /// If not found (e.g., during init before config exists), it defaults to no prefix (root of bucket),
-    /// which might be risky for multi-tenant buckets but acceptable for single-repo buckets.
-    ///
-    /// Boundary conditions:
-    /// - Any env-var resolution error degrades to `LocalStorage` (see
-    ///   [`Self::storage_config_resolution_fallback`]); the user sees the failure on
-    ///   stderr but the CLI continues.
-    /// - An empty bucket / access key / secret key, or a non-URL endpoint, also
-    ///   triggers a degrade-to-local with an error message.
-    /// - Unknown `LIBRA_STORAGE_TYPE` values (anything other than `s3`/`r2`) print
-    ///   "Unsupported storage type" and degrade to local.
-    /// - `LIBRA_STORAGE_THRESHOLD` and `LIBRA_STORAGE_CACHE_SIZE` accept any
-    ///   parseable usize and silently fall back to defaults (1 MiB, 200 MiB) when the
-    ///   value is not a valid number.
-    /// - The `expect("Failed to build S3 storage")` is the one panicking path: it
-    ///   only fires if the partial AWS builder is missing a required field, which
-    ///   should be impossible given the explicit checks above.
-    fn create_storage_backend(base_path: PathBuf) -> Arc<dyn Storage> {
-        // Check for object storage configuration.
-        // Uses the typed resolver so vault-stored secrets are picked up without
-        // turning a too-new global config schema into a silent local fallback.
-        let storage_type = match resolve_env_sync_typed("LIBRA_STORAGE_TYPE") {
-            Ok(Some(storage_type)) => storage_type,
-            Ok(None) => {
-                return Arc::new(LocalStorage::new_with_alternates(base_path));
-            }
-            Err(err) => {
-                return Self::storage_config_resolution_fallback(
-                    &base_path,
-                    "LIBRA_STORAGE_TYPE",
-                    &err,
-                );
-            }
-        };
-
-        let bucket = match resolve_env_sync_typed("LIBRA_STORAGE_BUCKET") {
-            Ok(Some(bucket)) => bucket,
-            Ok(None) => "libra".to_string(),
-            Err(err) => {
-                return Self::storage_config_resolution_fallback(
-                    &base_path,
-                    "LIBRA_STORAGE_BUCKET",
-                    &err,
-                );
-            }
-        };
-        if bucket.is_empty() {
-            eprintln!(
-                "Warning: LIBRA_STORAGE_BUCKET cannot be empty. Falling back to local storage."
-            );
-            return Arc::new(LocalStorage::new_with_alternates(base_path));
-        }
-
-        // Build ObjectStore
-        let object_store: Arc<dyn object_store::ObjectStore> = match storage_type.as_str() {
-            "s3" | "r2" => {
-                let mut builder =
-                    object_store::aws::AmazonS3Builder::new().with_bucket_name(&bucket);
-
-                // Bound object_store's built-in retry (which already backs off on
-                // 429/`SlowDown`/5xx and honours `Retry-After`) to the same caps
-                // as `utils::backoff::RetryPolicy`, so no remote path can hammer
-                // the backend or hang unbounded. See `docs/development/gap/lore.md`
-                // §0.2 / §7.6.
-                builder = builder.with_retry(object_store::RetryConfig {
-                    backoff: object_store::BackoffConfig {
-                        init_backoff: Duration::from_millis(200),
-                        max_backoff: Duration::from_secs(10),
-                        base: 2.0,
-                    },
-                    max_retries: 5,
-                    retry_timeout: Duration::from_secs(60),
-                });
-
-                let endpoint = match resolve_env_sync_typed("LIBRA_STORAGE_ENDPOINT") {
-                    Ok(endpoint) => endpoint,
-                    Err(err) => {
-                        return Self::storage_config_resolution_fallback(
-                            &base_path,
-                            "LIBRA_STORAGE_ENDPOINT",
-                            &err,
-                        );
-                    }
-                };
-                if let Some(endpoint) = endpoint {
-                    if url::Url::parse(&endpoint).is_err() {
-                        eprintln!(
-                            "Warning: Invalid LIBRA_STORAGE_ENDPOINT URL: {}. Falling back to local storage.",
-                            endpoint
-                        );
-                        return Arc::new(LocalStorage::new_with_alternates(base_path));
-                    }
-                    builder = builder.with_endpoint(endpoint);
-                }
-                let region = match resolve_env_sync_typed("LIBRA_STORAGE_REGION") {
-                    Ok(region) => region,
-                    Err(err) => {
-                        return Self::storage_config_resolution_fallback(
-                            &base_path,
-                            "LIBRA_STORAGE_REGION",
-                            &err,
-                        );
-                    }
-                };
-                if let Some(region) = region {
-                    builder = builder.with_region(region);
-                }
-                let key = match resolve_env_sync_typed("LIBRA_STORAGE_ACCESS_KEY") {
-                    Ok(key) => key,
-                    Err(err) => {
-                        return Self::storage_config_resolution_fallback(
-                            &base_path,
-                            "LIBRA_STORAGE_ACCESS_KEY",
-                            &err,
-                        );
-                    }
-                };
-                if let Some(key) = key {
-                    if key.is_empty() {
-                        eprintln!(
-                            "Warning: LIBRA_STORAGE_ACCESS_KEY cannot be empty. Falling back to local storage."
-                        );
-                        return Arc::new(LocalStorage::new_with_alternates(base_path));
-                    }
-                    builder = builder.with_access_key_id(key);
-                }
-                let secret = match resolve_env_sync_typed("LIBRA_STORAGE_SECRET_KEY") {
-                    Ok(secret) => secret,
-                    Err(err) => {
-                        return Self::storage_config_resolution_fallback(
-                            &base_path,
-                            "LIBRA_STORAGE_SECRET_KEY",
-                            &err,
-                        );
-                    }
-                };
-                if let Some(secret) = secret {
-                    if secret.is_empty() {
-                        eprintln!(
-                            "Warning: LIBRA_STORAGE_SECRET_KEY cannot be empty. Falling back to local storage."
-                        );
-                        return Arc::new(LocalStorage::new_with_alternates(base_path));
-                    }
-                    builder = builder.with_secret_access_key(secret);
-                }
-
-                let allow_http = match resolve_env_sync_typed("LIBRA_STORAGE_ALLOW_HTTP") {
-                    Ok(allow_http) => allow_http,
-                    Err(err) => {
-                        return Self::storage_config_resolution_fallback(
-                            &base_path,
-                            "LIBRA_STORAGE_ALLOW_HTTP",
-                            &err,
-                        );
-                    }
-                };
-                if allow_http.as_deref() == Some("true") {
-                    builder = builder.with_allow_http(true);
-                }
-
-                Arc::new(builder.build().unwrap_or_else(|err| {
-                    panic!(
-                        "ClientStorage::with_remote: failed to build S3 storage with endpoint/\
-                         bucket/region/credentials from LIBRA_STORAGE_* env: {err}"
-                    )
-                }))
-            }
-            _ => {
-                eprintln!(
-                    "Warning: Unsupported storage type: {}. Falling back to local storage.",
-                    storage_type
-                );
-                return Arc::new(LocalStorage::new_with_alternates(base_path));
-            }
-        };
-
-        let remote = match get_or_create_repo_id_for_prefix() {
-            Some(repo_id) => RemoteStorage::new_with_prefix(object_store, repo_id),
-            None => RemoteStorage::new(object_store),
-        };
-        let local = LocalStorage::new_with_alternates(base_path.clone());
-
-        let threshold = match resolve_env_sync_typed("LIBRA_STORAGE_THRESHOLD") {
-            Ok(Some(raw_threshold)) => raw_threshold
-                .parse()
-                .unwrap_or(DEFAULT_STORAGE_THRESHOLD_BYTES),
-            Ok(None) => DEFAULT_STORAGE_THRESHOLD_BYTES,
-            Err(err) => {
-                return Self::storage_config_resolution_fallback(
-                    &base_path,
-                    "LIBRA_STORAGE_THRESHOLD",
-                    &err,
-                );
-            }
-        };
-
-        // Parse cache size (previously hardcoded/magic number)
-        let disk_cache_limit_bytes = match resolve_env_sync_typed("LIBRA_STORAGE_CACHE_SIZE") {
-            Ok(Some(raw_size)) => raw_size.parse().unwrap_or(DEFAULT_CACHE_SIZE_BYTES),
-            Ok(None) => DEFAULT_CACHE_SIZE_BYTES,
-            Err(err) => {
-                return Self::storage_config_resolution_fallback(
-                    &base_path,
-                    "LIBRA_STORAGE_CACHE_SIZE",
-                    &err,
-                );
-            }
-        };
-
-        Arc::new(TieredStorage::new(
-            local,
-            remote,
-            threshold,
-            disk_cache_limit_bytes,
-        ))
+        Self::ready(storage, base_path)
     }
 
     /// Emit a stderr warning and degrade to `LocalStorage` when a storage env
@@ -1893,7 +1724,28 @@ impl ClientStorage {
     pub fn resolve_configured_storage(
         base_path: PathBuf,
     ) -> Result<ClientStorage, StorageConfigFailure> {
-        let storage_type = match resolve_env_sync_typed("LIBRA_STORAGE_TYPE") {
+        Self::open_after_type_read(base_path, read_storage_type())
+    }
+
+    /// Open storage for `init` and the legacy `Arc<dyn Storage>` callers.
+    ///
+    /// `LIBRA_STORAGE_TYPE=local` keeps the historical warning and a writable
+    /// local backend. Every other confirmed failure is [`StorageConfigFailure`].
+    pub fn open_init_storage(base_path: PathBuf) -> Result<ClientStorage, StorageConfigFailure> {
+        let type_read = read_storage_type();
+        if let Ok(Some(value)) = &type_read
+            && value == "local"
+        {
+            return Ok(Self::historical_local_word(base_path));
+        }
+        Self::open_after_type_read(base_path, type_read)
+    }
+
+    fn open_after_type_read(
+        base_path: PathBuf,
+        type_read: Result<Option<String>, StorageConfigResolutionError>,
+    ) -> Result<ClientStorage, StorageConfigFailure> {
+        let storage_type = match type_read {
             Ok(Some(storage_type)) => storage_type,
             Ok(None) => return Ok(Self::local_configured_client(base_path)),
             Err(error) => {
@@ -1902,7 +1754,7 @@ impl ClientStorage {
                     "LIBRA_STORAGE_TYPE",
                     &error,
                 );
-                return Ok(ClientStorage { storage, base_path });
+                return Ok(Self::ready(storage, base_path));
             }
         };
         if storage_type != "s3" && storage_type != "r2" {
@@ -1994,20 +1846,45 @@ impl ClientStorage {
             None => RemoteStorage::new(object_store),
         };
         let local = LocalStorage::new_with_alternates(base_path.clone());
-        Ok(ClientStorage {
-            storage: Arc::new(TieredStorage::new(
+        Ok(Self::ready(
+            Arc::new(TieredStorage::new(
                 local,
                 remote,
                 threshold,
                 disk_cache_limit_bytes,
             )),
             base_path,
-        })
+        ))
+    }
+
+    /// `LIBRA_STORAGE_TYPE=local` follows the historical bucket check, then
+    /// the unsupported-type warning. The word `local` is not a secret.
+    fn historical_local_word(base_path: PathBuf) -> ClientStorage {
+        let bucket = match resolve_env_sync_typed("LIBRA_STORAGE_BUCKET") {
+            Ok(Some(bucket)) => bucket,
+            Ok(None) => "libra".to_string(),
+            Err(error) => {
+                let storage = Self::storage_config_resolution_fallback(
+                    &base_path,
+                    "LIBRA_STORAGE_BUCKET",
+                    &error,
+                );
+                return Self::ready(storage, base_path);
+            }
+        };
+        if bucket.is_empty() {
+            eprintln!(
+                "Warning: LIBRA_STORAGE_BUCKET cannot be empty. Falling back to local storage."
+            );
+            return Self::local_configured_client(base_path);
+        }
+        eprintln!("Warning: Unsupported storage type: local. Falling back to local storage.");
+        Self::local_configured_client(base_path)
     }
 
     fn local_configured_client(base_path: PathBuf) -> ClientStorage {
         let storage = Arc::new(LocalStorage::new_with_alternates(base_path.clone()));
-        ClientStorage { storage, base_path }
+        Self::ready(storage, base_path)
     }
 
     /// Helper to execute async task on dedicated runtime and block waiting for result.
@@ -2106,6 +1983,9 @@ impl ClientStorage {
     /// publishes up to 256 markers per generation lock and then enqueues the
     /// messages. Nested calls are depth-counted.
     pub(crate) fn begin_object_index_batch(&self) {
+        if self.configuration_variable().is_some() {
+            return;
+        }
         if let Some(key) = Self::index_db_path_from_base(&self.base_path) {
             with_object_index_batch_state(&key, |state| {
                 state.depth = state.depth.saturating_add(1)
@@ -2116,6 +1996,9 @@ impl ClientStorage {
     /// Close the innermost publication batch; at depth 0 everything
     /// accumulated is published and enqueued (ADR-OI-04 item 1).
     pub(crate) fn end_object_index_batch(&self) -> io::Result<()> {
+        if let Some(variable) = self.configuration_variable() {
+            return Err(storage_config_io_error(variable));
+        }
         if let Some(key) = Self::index_db_path_from_base(&self.base_path) {
             let done = with_object_index_batch_state(&key, |state| {
                 state.depth = state.depth.saturating_sub(1);
@@ -2133,6 +2016,9 @@ impl ClientStorage {
     /// stored payloads stay in place and a retry re-registers them via
     /// [`Self::ensure_existing_object_index`].
     pub(crate) fn abort_object_index_batch(&self) {
+        if self.configuration_variable().is_some() {
+            return;
+        }
         if let Some(key) = Self::index_db_path_from_base(&self.base_path) {
             with_object_index_batch_state(&key, |state| {
                 state.depth = state.depth.saturating_sub(1);
@@ -2147,6 +2033,9 @@ impl ClientStorage {
     /// before an index write so durable markers never lag behind index
     /// content (ADR-OI-04 item 3).
     pub(crate) fn flush_object_index_batch(&self) -> io::Result<()> {
+        if let Some(variable) = self.configuration_variable() {
+            return Err(storage_config_io_error(variable));
+        }
         if let Some(key) = Self::index_db_path_from_base(&self.base_path) {
             return flush_pending_object_index_batch(&key);
         }
@@ -2290,7 +2179,7 @@ impl ClientStorage {
     /// - Blocks the calling thread on the storage runtime; safe to call from sync or
     ///   async contexts.
     pub fn get(&self, object_id: &ObjectHash) -> Result<Vec<u8>, GitError> {
-        let storage = self.storage.clone();
+        let storage = self.ready_storage()?;
         let hash = *object_id;
         self.block_on_storage(async move { storage.get(&hash).await.map(|(data, _)| data) })
     }
@@ -2303,7 +2192,7 @@ impl ClientStorage {
         object_id: &ObjectHash,
         limit: u64,
     ) -> Result<(Vec<u8>, ObjectType), GitError> {
-        let storage = self.storage.clone();
+        let storage = self.ready_storage()?;
         let hash = *object_id;
         self.block_on_storage(async move { storage.get_typed_bounded(&hash, limit).await })
     }
@@ -2334,7 +2223,7 @@ impl ClientStorage {
         max_total_parents: usize,
     ) -> Result<HashMap<ObjectHash, Vec<ObjectHash>>, GitError> {
         let unique: HashSet<ObjectHash> = hashes.iter().copied().collect();
-        let storage = self.storage.clone();
+        let storage = self.ready_storage()?;
         let max_in_flight = crate::utils::resource_limits::max_connections().min(16);
         self.block_on_storage(async move {
             let mut remaining: VecDeque<_> = unique.into_iter().collect();
@@ -2420,7 +2309,7 @@ impl ClientStorage {
     /// Read an object only when the backend can enforce `limit` before
     /// materializing its payload.
     pub fn get_with_limit(&self, object_id: &ObjectHash, limit: u64) -> Result<Vec<u8>, GitError> {
-        let storage = self.storage.clone();
+        let storage = self.ready_storage()?;
         let hash = *object_id;
         self.block_on_storage(async move {
             storage
@@ -2472,14 +2361,14 @@ impl ClientStorage {
 
     /// Compute a conservative bounded load cost without materializing its payload.
     pub fn object_size(&self, object_id: &ObjectHash) -> Result<Option<u64>, GitError> {
-        let storage = self.storage.clone();
+        let storage = self.ready_storage()?;
         let hash = *object_id;
         self.block_on_storage(async move { storage.object_size(&hash).await })
     }
 
     /// Batch bounded load-cost preflight with one storage-runtime round trip.
     pub fn object_sizes(&self, object_ids: &[ObjectHash]) -> Result<Vec<Option<u64>>, GitError> {
-        let storage = self.storage.clone();
+        let storage = self.ready_storage()?;
         let hashes = object_ids.to_vec();
         self.block_on_storage(async move { storage.object_sizes(&hashes).await })
     }
@@ -2491,7 +2380,7 @@ impl ClientStorage {
         object_ids: &[ObjectHash],
         aggregate_limit: u64,
     ) -> Result<Vec<Option<u64>>, GitError> {
-        let storage = self.storage.clone();
+        let storage = self.ready_storage()?;
         let hashes = object_ids.to_vec();
         self.block_on_storage(async move {
             storage
@@ -2509,7 +2398,7 @@ impl ClientStorage {
     /// payload that verifies against `object_id` is persisted. See
     /// [`crate::utils::storage::Storage::heal`].
     pub fn heal(&self, object_id: &ObjectHash) -> Result<bool, GitError> {
-        let storage = self.storage.clone();
+        let storage = self.ready_storage()?;
         let hash = *object_id;
         self.block_on_storage(async move { storage.heal(&hash).await })
     }
@@ -2540,7 +2429,10 @@ impl ClientStorage {
         content: &[u8],
         obj_type: ObjectType,
     ) -> Result<String, io::Error> {
-        let storage = self.storage.clone();
+        let storage = match &self.held {
+            HeldStorage::Ready(storage) => Arc::clone(storage),
+            HeldStorage::Rejected(variable) => return Err(storage_config_io_error(variable)),
+        };
         let hash = *obj_id;
         let data = content.to_vec();
         let data_len = data.len();
@@ -2570,6 +2462,9 @@ impl ClientStorage {
         content_len: usize,
         obj_type: ObjectType,
     ) -> io::Result<()> {
+        if let Some(variable) = self.configuration_variable() {
+            return Err(storage_config_io_error(variable));
+        }
         match self.exist_checked(obj_id) {
             Ok(true) => {}
             Ok(false) => {
@@ -2640,7 +2535,7 @@ impl ClientStorage {
     /// Physically delete an object's payload (lore.md 2.5) from the durable
     /// tier and the in-memory cache; a no-op for a local-only store.
     pub async fn delete_payload(&self, hash: &ObjectHash) -> Result<(), GitError> {
-        self.storage.delete_payload(hash).await
+        self.ready_storage()?.delete_payload(hash).await
     }
 
     /// Check whether an object exists in the configured backend.
@@ -2649,14 +2544,17 @@ impl ClientStorage {
     /// - For tiered storage, returns `true` if the object lives in either tier; does
     ///   not promote the object to the local cache.
     pub fn exist(&self, obj_id: &ObjectHash) -> bool {
-        let storage = self.storage.clone();
+        let storage = match &self.held {
+            HeldStorage::Ready(storage) => Arc::clone(storage),
+            HeldStorage::Rejected(variable) => refuse_rejected_presence(variable),
+        };
         let hash = *obj_id;
         self.block_on_storage(async move { storage.exist(&hash).await })
     }
 
     /// Probe presence without turning a storage or pack error into absence.
     pub fn exist_checked(&self, obj_id: &ObjectHash) -> Result<bool, GitError> {
-        let storage = self.storage.clone();
+        let storage = self.ready_storage()?;
         let hash = *obj_id;
         self.block_on_storage(async move { storage.exist_checked(&hash).await })
     }
@@ -2667,7 +2565,7 @@ impl ClientStorage {
         &self,
         hashes: &[ObjectHash],
     ) -> Result<HashMap<ObjectHash, bool>, GitError> {
-        let storage = self.storage.clone();
+        let storage = self.ready_storage()?;
         let hashes = hashes.to_vec();
         self.block_on_storage(async move { storage.exist_checked_batch(&hashes).await })
     }
@@ -2679,7 +2577,7 @@ impl ClientStorage {
     ///   may decode the entire body and discard the payload. Prefer
     ///   [`Self::is_object_type`] when only checking a single type.
     pub fn get_object_type(&self, obj_id: &ObjectHash) -> Result<ObjectType, GitError> {
-        let storage = self.storage.clone();
+        let storage = self.ready_storage()?;
         let hash = *obj_id;
         self.block_on_storage(async move { storage.get(&hash).await.map(|(_, t)| t) })
     }
@@ -2688,7 +2586,7 @@ impl ClientStorage {
     /// and pack objects use header-only probes; a remote-only object is read
     /// through the verified 4 MiB typed bound or rejected if larger.
     pub fn get_object_type_bounded(&self, obj_id: &ObjectHash) -> Result<ObjectType, GitError> {
-        let storage = self.storage.clone();
+        let storage = self.ready_storage()?;
         let hash = *obj_id;
         self.block_on_storage(async move { storage.object_type_bounded_probe(&hash).await })
     }
@@ -2699,7 +2597,7 @@ impl ClientStorage {
         &self,
         hashes: &[ObjectHash],
     ) -> Result<HashMap<ObjectHash, ObjectType>, GitError> {
-        let storage = self.storage.clone();
+        let storage = self.ready_storage()?;
         let hashes = hashes.to_vec();
         self.block_on_storage(async move { storage.object_types_bounded_probe(&hashes).await })
     }
@@ -2712,7 +2610,7 @@ impl ClientStorage {
         hashes: &[ObjectHash],
         remaining_remote_bytes: u64,
     ) -> Result<(HashMap<ObjectHash, ObjectType>, u64), GitError> {
-        let storage = self.storage.clone();
+        let storage = self.ready_storage()?;
         let hashes = hashes.to_vec();
         self.block_on_storage(async move {
             storage
@@ -2726,6 +2624,9 @@ impl ClientStorage {
     /// because callers typically use this in match arms where missing-or-wrong-type
     /// have the same effect.
     pub fn is_object_type(&self, obj_id: &ObjectHash, obj_type: ObjectType) -> bool {
+        if let Some(variable) = self.configuration_variable() {
+            refuse_rejected_presence(variable);
+        }
         match self.get_object_type(obj_id) {
             Ok(t) => t == obj_type,
             Err(_) => false,
@@ -2751,6 +2652,9 @@ impl ClientStorage {
     /// - On any error, returns an empty vector and logs an `error!`. Use
     ///   [`Self::search_result`] when the caller needs to react to the error.
     pub async fn search(&self, obj_id: &str) -> Vec<ObjectHash> {
+        if let Some(variable) = self.configuration_variable() {
+            refuse_rejected_presence(variable);
+        }
         match self.search_result(obj_id).await {
             Ok(matches) => matches,
             Err(error) => {
@@ -2764,7 +2668,7 @@ impl ClientStorage {
     /// not resolve `HEAD`, branch names, or `~` / `^` navigation, and a
     /// directory or pack-index read failure stays an error.
     pub async fn search_checked(&self, prefix: &str) -> Result<Vec<ObjectHash>, GitError> {
-        let mut matches = self.storage.search_checked(prefix).await?;
+        let mut matches = self.ready_storage()?.search_checked(prefix).await?;
         matches.sort_unstable();
         matches.dedup();
         Ok(matches)
@@ -2790,6 +2694,7 @@ impl ClientStorage {
     /// - See: `test_search_result_surfaces_corrupt_branch_storage`,
     ///   `test_search_result_rejects_empty_base_ref_navigation`.
     pub async fn search_result(&self, obj_id: &str) -> Result<Vec<ObjectHash>, GitError> {
+        self.ready_storage()?;
         if obj_id == "HEAD" {
             return Ok(Head::current_commit_result()
                 .await
@@ -2850,7 +2755,7 @@ impl ClientStorage {
                                     return Ok(Vec::new());
                                 }
 
-                                let matches = self.storage.search(base_ref).await;
+                                let matches = self.ready_storage()?.search(base_ref).await;
                                 let mut commits = Vec::new();
                                 for hash in matches {
                                     match self.is_object_type_checked(&hash, ObjectType::Commit) {
@@ -2878,7 +2783,7 @@ impl ClientStorage {
             }
         }
 
-        let mut matches = self.storage.search(obj_id).await;
+        let mut matches = self.ready_storage()?.search(obj_id).await;
         // The same object may exist in a loose object and one or more pack
         // indexes; collapse duplicates before returning so callers that count
         // matches never mistake a duplicate for genuine ambiguity (ADR-MX-04).
@@ -3280,7 +3185,7 @@ pub(crate) async fn count_object_index_rows_with_conn<C: ConnectionTrait>(
 #[async_trait]
 impl Storage for ClientStorage {
     async fn get(&self, hash: &ObjectHash) -> Result<(Vec<u8>, ObjectType), GitError> {
-        let storage = self.storage.clone();
+        let storage = self.ready_storage()?;
         let hash = *hash;
         self.block_on_storage(async move { storage.get(&hash).await })
     }
@@ -3295,7 +3200,7 @@ impl Storage for ClientStorage {
         // timeout/cancellation can be polled; routing through the synchronous
         // `block_on_storage` facade would park the caller thread in recv() and
         // make an outer timeout ineffective on a blocked local/pack read.
-        self.storage.get_with_limit(hash, limit).await
+        self.ready_storage()?.get_with_limit(hash, limit).await
     }
 
     async fn get_typed_bounded(
@@ -3303,7 +3208,7 @@ impl Storage for ClientStorage {
         hash: &ObjectHash,
         max_payload_bytes: u64,
     ) -> Result<(Vec<u8>, ObjectType), GitError> {
-        self.storage
+        self.ready_storage()?
             .get_typed_bounded(hash, max_payload_bytes)
             .await
     }
@@ -3313,20 +3218,22 @@ impl Storage for ClientStorage {
         hash: &ObjectHash,
         max_payload_bytes: u64,
     ) -> Result<(Vec<u8>, ObjectType), GitError> {
-        self.storage
+        self.ready_storage()?
             .get_commit_bounded(hash, max_payload_bytes)
             .await
     }
 
     async fn object_type_bounded_probe(&self, hash: &ObjectHash) -> Result<ObjectType, GitError> {
-        self.storage.object_type_bounded_probe(hash).await
+        self.ready_storage()?.object_type_bounded_probe(hash).await
     }
 
     async fn object_types_bounded_probe(
         &self,
         hashes: &[ObjectHash],
     ) -> Result<HashMap<ObjectHash, ObjectType>, GitError> {
-        self.storage.object_types_bounded_probe(hashes).await
+        self.ready_storage()?
+            .object_types_bounded_probe(hashes)
+            .await
     }
 
     async fn object_types_bounded_probe_with_budget(
@@ -3334,7 +3241,7 @@ impl Storage for ClientStorage {
         hashes: &[ObjectHash],
         remaining_remote_bytes: u64,
     ) -> Result<(HashMap<ObjectHash, ObjectType>, u64), GitError> {
-        self.storage
+        self.ready_storage()?
             .object_types_bounded_probe_with_budget(hashes, remaining_remote_bytes)
             .await
     }
@@ -3345,6 +3252,9 @@ impl Storage for ClientStorage {
         data: &[u8],
         obj_type: ObjectType,
     ) -> Result<String, GitError> {
+        if let Some(variable) = self.configuration_variable() {
+            return Err(storage_config_git_error(variable));
+        }
         ClientStorage::put(self, hash, data, obj_type).map_err(GitError::IOError)
     }
 
@@ -3374,6 +3284,72 @@ impl Storage for ClientStorage {
 
     async fn search_checked(&self, prefix: &str) -> Result<Vec<ObjectHash>, GitError> {
         ClientStorage::search_checked(self, prefix).await
+    }
+
+    async fn exist_checked(&self, hash: &ObjectHash) -> Result<bool, GitError> {
+        if let Some(variable) = self.configuration_variable() {
+            return Err(storage_config_git_error(variable));
+        }
+        Ok(ClientStorage::exist(self, hash))
+    }
+
+    async fn exist_checked_batch(
+        &self,
+        hashes: &[ObjectHash],
+    ) -> Result<HashMap<ObjectHash, bool>, GitError> {
+        if let Some(variable) = self.configuration_variable() {
+            return Err(storage_config_git_error(variable));
+        }
+        let max_in_flight = crate::utils::resource_limits::max_connections().min(16);
+        let unique: HashSet<ObjectHash> = hashes.iter().copied().collect();
+        stream::iter(unique)
+            .map(|hash| async move {
+                let exists = <Self as crate::utils::storage::Storage>::exist_checked(self, &hash)
+                    .await
+                    .map_err(|error| crate::utils::storage::checked_probe_error(&hash, error))?;
+                Ok((hash, exists))
+            })
+            .buffer_unordered(max_in_flight)
+            .try_collect()
+            .await
+    }
+
+    async fn exist_batch(&self, hashes: &[ObjectHash]) -> Vec<bool> {
+        if let Some(variable) = self.configuration_variable() {
+            refuse_rejected_presence(variable);
+        }
+        let mut results = Vec::with_capacity(hashes.len());
+        for hash in hashes {
+            results.push(ClientStorage::exist(self, hash));
+        }
+        results
+    }
+
+    async fn heal(&self, hash: &ObjectHash) -> Result<bool, GitError> {
+        if let Some(variable) = self.configuration_variable() {
+            return Err(storage_config_git_error(variable));
+        }
+        let _ = hash;
+        Ok(false)
+    }
+
+    async fn delete_payload(&self, hash: &ObjectHash) -> Result<(), GitError> {
+        if let Some(variable) = self.configuration_variable() {
+            return Err(storage_config_git_error(variable));
+        }
+        let _ = hash;
+        Ok(())
+    }
+
+    async fn evict_local(
+        &self,
+        request: crate::utils::storage::EvictRequest,
+    ) -> Result<Option<crate::utils::storage::EvictReport>, GitError> {
+        if let Some(variable) = self.configuration_variable() {
+            return Err(storage_config_git_error(variable));
+        }
+        let _ = request;
+        Ok(None)
     }
 }
 
@@ -3650,48 +3626,6 @@ async fn read_config_env_value(
 ///   global config is unavailable.
 fn storage_global_config_path() -> Option<PathBuf> {
     crate::internal::config::global_config_path()
-}
-
-/// Resolve (and lazily create) the per-repo `libra.repoid` used as a key prefix in
-/// shared S3/R2 buckets.
-///
-/// Functional scope:
-/// - Reads `libra.repoid` from the local config; if missing or set to the legacy
-///   placeholder `"unknown-repo"`, generates a fresh UUID and persists it so future
-///   invocations stay aligned with the same prefix.
-///
-/// Boundary conditions:
-/// - Returns `None` if there is no resolvable storage path or no database file yet
-///   (`libra init` has not run); the caller falls back to no prefix in that case.
-/// - The whole computation runs on RUNTIME via mpsc, mirroring the rest of this
-///   module's blocking-into-async pattern.
-fn get_or_create_repo_id_for_prefix() -> Option<String> {
-    let storage_path = try_get_storage_path(None).ok()?;
-    let db_path = storage_path.join(DATABASE);
-    if !db_path.exists() {
-        return None;
-    }
-
-    let (tx, rx) = mpsc::channel();
-    RUNTIME.spawn(async move {
-        let mut repo_id = ConfigKv::get("libra.repoid")
-            .await
-            .ok()
-            .flatten()
-            .map(|e| e.value);
-        let needs_init = repo_id
-            .as_deref()
-            .map(|s| s.is_empty() || s == "unknown-repo")
-            .unwrap_or(true);
-        if needs_init {
-            let new_id = Uuid::new_v4().to_string();
-            let _ = ConfigKv::set("libra.repoid", &new_id, false).await;
-            repo_id = Some(new_id);
-        }
-        let _ = tx.send(repo_id);
-    });
-
-    rx.recv().ok().flatten()
 }
 
 /// Prefix for a remote whose storage settings are already confirmed.
@@ -4174,8 +4108,8 @@ async fn update_object_index_batch(
 ///
 /// Boundary conditions:
 /// - Returns the literal string `"unknown-repo"` only when the entry is missing or
-///   blank. This sentinel is also recognised by `get_or_create_repo_id_for_prefix`
-///   as a placeholder that should be re-rolled on first use.
+///   blank. A blank or placeholder id is re-rolled when a confirmed remote
+///   prefix is created.
 /// - Propagates query failures. Import turns them into its durable partial/repair
 ///   contract; ordinary writers retain an atomic repair marker and the top-level
 ///   CLI warns until a later schema-aware preflight replays it.
@@ -7378,10 +7312,18 @@ mod tests {
         let _type = ScopedEnvVar::set("LIBRA_STORAGE_TYPE", "gcs-canary");
         let _hash = set_hash_kind_for_test(HashKind::Sha1);
         let cached = crate::utils::util::objects_storage();
+        assert_eq!(cached.configuration_variable(), Some("LIBRA_STORAGE_TYPE"));
         let blob = Blob::from_content("cached");
-        cached
+        let put_error = cached
             .put(&blob.id, &blob.data, blob.get_type())
-            .expect("cached fallback remains writable");
+            .expect_err("rejected client is not a writable cache entry");
+        assert_eq!(
+            put_error.to_string(),
+            "failed to read storage configuration for LIBRA_STORAGE_TYPE"
+        );
+        assert!(!crate::utils::util::objects_storage_cache_contains(
+            &crate::utils::path::objects()
+        ));
         let error = must_err(
             crate::utils::util::resolve_configured_objects_storage(),
             "new resolver ignores the fail-open cache",
@@ -7467,21 +7409,383 @@ mod tests {
         assert!(!objects.exists());
     }
 
-    /// Ignored probe. Parent tests spawn it with `--ignored --nocapture` so
-    /// `eprintln!` reaches the child stderr under both `cargo test` and nextest.
-    #[test]
-    #[ignore]
-    fn storage_config_init_fallback_probe() {
-        let _hash = set_hash_kind_for_test(HashKind::Sha1);
+    const CONFIG_SENTENCE: &str = "failed to read storage configuration for LIBRA_STORAGE_TYPE";
+
+    fn rejected_storage() -> (tempfile::TempDir, ClientStorage) {
+        let _env = isolate_storage_env();
+        let _type = ScopedEnvVar::set("LIBRA_STORAGE_TYPE", "gcs-canary");
         let root = tempdir().expect("temp");
-        let storage = ClientStorage::init(root.path().join("init-objects"));
-        let blob = Blob::from_content("local");
-        storage
-            .put(&blob.id, &blob.data, blob.get_type())
-            .expect("init fallback stays writable");
+        let objects = root.path().join("objects");
+        let storage = ClientStorage::init(objects.clone());
+        assert!(!objects.exists(), "rejected init must not create storage");
+        assert_eq!(storage.configuration_variable(), Some("LIBRA_STORAGE_TYPE"));
+        (root, storage)
     }
 
-    fn assert_init_fallback_warns(env: &[(&str, &str)], warning_needle: &str) {
+    fn assert_config_display(text: &str) {
+        assert_eq!(text, CONFIG_SENTENCE);
+    }
+
+    #[test]
+    #[serial(env)]
+    fn storage_config_hold_result_methods_name_only_the_variable() {
+        let _hash = set_hash_kind_for_test(HashKind::Sha1);
+        let (_root, storage) = rejected_storage();
+        let blob = Blob::from_content("hold");
+        let hash = blob.id;
+        assert_config_display(&storage.get(&hash).expect_err("get").to_string());
+        assert_config_display(
+            &storage
+                .get_with_limit(&hash, 16)
+                .expect_err("limit")
+                .to_string(),
+        );
+        assert_config_display(
+            &storage
+                .get_typed_with_limit(&hash, 16)
+                .expect_err("typed")
+                .to_string(),
+        );
+        assert_config_display(
+            &storage
+                .put(&hash, &blob.data, blob.get_type())
+                .expect_err("put")
+                .to_string(),
+        );
+        assert_config_display(&storage.exist_checked(&hash).expect_err("exist").to_string());
+        assert_config_display(
+            &storage
+                .exist_checked_many(&[])
+                .expect_err("exist many")
+                .to_string(),
+        );
+        assert_config_display(
+            &storage
+                .get_object_type(&hash)
+                .expect_err("type")
+                .to_string(),
+        );
+        assert_config_display(
+            &storage
+                .get_object_type_bounded(&hash)
+                .expect_err("bounded type")
+                .to_string(),
+        );
+        assert_config_display(
+            &storage
+                .get_object_types_bounded_many(&[])
+                .expect_err("types")
+                .to_string(),
+        );
+        assert_config_display(
+            &storage
+                .get_object_types_bounded_many_with_budget(&[], 0)
+                .expect_err("types budget")
+                .to_string(),
+        );
+        assert_config_display(
+            &storage
+                .is_object_type_checked(&hash, ObjectType::Blob)
+                .expect_err("type checked")
+                .to_string(),
+        );
+        assert_config_display(&storage.object_size(&hash).expect_err("size").to_string());
+        assert_config_display(&storage.object_sizes(&[]).expect_err("sizes").to_string());
+        assert_config_display(
+            &storage
+                .object_sizes_with_total_limit(&[], 1)
+                .expect_err("sizes limit")
+                .to_string(),
+        );
+        assert_config_display(
+            &storage
+                .commit_parents_many(&[])
+                .expect_err("parents")
+                .to_string(),
+        );
+        assert_config_display(
+            &storage
+                .ensure_existing_object_index(&hash, 1, ObjectType::Blob)
+                .expect_err("index")
+                .to_string(),
+        );
+        assert_config_display(
+            &storage
+                .end_object_index_batch()
+                .expect_err("end batch")
+                .to_string(),
+        );
+        assert_config_display(
+            &storage
+                .flush_object_index_batch()
+                .expect_err("flush batch")
+                .to_string(),
+        );
+        storage.begin_object_index_batch();
+        storage.abort_object_index_batch();
+    }
+
+    #[tokio::test]
+    #[serial(env)]
+    async fn storage_config_hold_async_methods_reject_empty_batches() {
+        let _hash = set_hash_kind_for_test(HashKind::Sha1);
+        let (_root, storage) = rejected_storage();
+        let hash = Blob::from_content("hold").id;
+        assert_config_display(
+            &storage
+                .delete_payload(&hash)
+                .await
+                .expect_err("delete")
+                .to_string(),
+        );
+        assert_config_display(&storage.heal(&hash).expect_err("heal").to_string());
+        assert_config_display(
+            &storage
+                .evict_local(crate::utils::storage::EvictRequest {
+                    budget_bytes: 1,
+                    min_age_secs: 0,
+                    dry_run: true,
+                })
+                .await
+                .expect_err("evict")
+                .to_string(),
+        );
+        assert_config_display(
+            &storage
+                .search_checked("")
+                .await
+                .expect_err("search")
+                .to_string(),
+        );
+        assert_config_display(
+            &storage
+                .search_result("abc")
+                .await
+                .expect_err("search result")
+                .to_string(),
+        );
+        assert_config_display(
+            &storage
+                .search_result("HEAD")
+                .await
+                .expect_err("head")
+                .to_string(),
+        );
+        assert_config_display(
+            &storage
+                .search_result("~1")
+                .await
+                .expect_err("tilde")
+                .to_string(),
+        );
+        assert_config_display(
+            &storage
+                .search_result("^2")
+                .await
+                .expect_err("caret")
+                .to_string(),
+        );
+        let as_storage = &storage as &dyn crate::utils::storage::Storage;
+        assert_config_display(
+            &as_storage
+                .get(&hash)
+                .await
+                .expect_err("trait get")
+                .to_string(),
+        );
+        assert_config_display(
+            &as_storage
+                .get_with_limit(&hash, 8)
+                .await
+                .expect_err("trait limit")
+                .to_string(),
+        );
+        assert_config_display(
+            &as_storage
+                .get_typed_bounded(&hash, 8)
+                .await
+                .expect_err("trait typed")
+                .to_string(),
+        );
+        assert_config_display(
+            &as_storage
+                .get_commit_bounded(&hash, 8)
+                .await
+                .expect_err("trait commit")
+                .to_string(),
+        );
+        assert_config_display(
+            &as_storage
+                .object_type_bounded_probe(&hash)
+                .await
+                .expect_err("trait probe")
+                .to_string(),
+        );
+        assert_config_display(
+            &as_storage
+                .object_types_bounded_probe(&[])
+                .await
+                .expect_err("trait probes")
+                .to_string(),
+        );
+        assert_config_display(
+            &as_storage
+                .object_types_bounded_probe_with_budget(&[], 0)
+                .await
+                .expect_err("trait probe budget")
+                .to_string(),
+        );
+        assert_config_display(
+            &as_storage
+                .put(&hash, b"x", ObjectType::Blob)
+                .await
+                .expect_err("trait put")
+                .to_string(),
+        );
+        assert_config_display(
+            &as_storage
+                .exist_checked(&hash)
+                .await
+                .expect_err("trait exist")
+                .to_string(),
+        );
+        assert_config_display(
+            &as_storage
+                .exist_checked_batch(&[])
+                .await
+                .expect_err("trait exist batch")
+                .to_string(),
+        );
+        assert_config_display(
+            &as_storage
+                .object_size(&hash)
+                .await
+                .expect_err("trait size")
+                .to_string(),
+        );
+        assert_config_display(
+            &as_storage
+                .object_sizes(&[])
+                .await
+                .expect_err("trait sizes")
+                .to_string(),
+        );
+        assert_config_display(
+            &as_storage
+                .object_sizes_with_total_limit(&[], 1)
+                .await
+                .expect_err("trait size limit")
+                .to_string(),
+        );
+        assert_config_display(
+            &as_storage
+                .search_checked("")
+                .await
+                .expect_err("trait search")
+                .to_string(),
+        );
+        assert_config_display(
+            &as_storage
+                .delete_payload(&hash)
+                .await
+                .expect_err("trait delete")
+                .to_string(),
+        );
+        assert_config_display(
+            &as_storage
+                .heal(&hash)
+                .await
+                .expect_err("trait heal")
+                .to_string(),
+        );
+        assert_config_display(
+            &as_storage
+                .evict_local(crate::utils::storage::EvictRequest {
+                    budget_bytes: 1,
+                    min_age_secs: 0,
+                    dry_run: true,
+                })
+                .await
+                .expect_err("trait evict")
+                .to_string(),
+        );
+    }
+
+    #[test]
+    #[ignore]
+    fn storage_config_hold_probe() {
+        let _hash = set_hash_kind_for_test(HashKind::Sha1);
+        let root = tempdir().expect("temp");
+        let storage = ClientStorage::init(root.path().join("objects"));
+        let hash = Blob::from_content("probe").id;
+        match std::env::var("STORAGE_CONFIG_HOLD_PROBE")
+            .expect("probe mode")
+            .as_str()
+        {
+            "exist" => {
+                storage.exist(&hash);
+            }
+            "is_object_type" => {
+                storage.is_object_type(&hash, ObjectType::Blob);
+            }
+            "search" => {
+                let runtime = tokio::runtime::Builder::new_current_thread()
+                    .enable_all()
+                    .build()
+                    .expect("runtime");
+                runtime.block_on(storage.search("ab"));
+            }
+            "trait_exist" => {
+                let runtime = tokio::runtime::Builder::new_current_thread()
+                    .enable_all()
+                    .build()
+                    .expect("runtime");
+                runtime.block_on(async {
+                    let storage = &storage as &dyn crate::utils::storage::Storage;
+                    storage.exist(&hash).await;
+                });
+            }
+            "trait_search" => {
+                let runtime = tokio::runtime::Builder::new_current_thread()
+                    .enable_all()
+                    .build()
+                    .expect("runtime");
+                runtime.block_on(async {
+                    let storage = &storage as &dyn crate::utils::storage::Storage;
+                    storage.search("ab").await;
+                });
+            }
+            "exist_batch_empty" => {
+                let runtime = tokio::runtime::Builder::new_current_thread()
+                    .enable_all()
+                    .build()
+                    .expect("runtime");
+                runtime.block_on(async {
+                    let storage = &storage as &dyn crate::utils::storage::Storage;
+                    storage.exist_batch(&[]).await;
+                });
+            }
+            "exist_batch_one" => {
+                let runtime = tokio::runtime::Builder::new_current_thread()
+                    .enable_all()
+                    .build()
+                    .expect("runtime");
+                runtime.block_on(async {
+                    let storage = &storage as &dyn crate::utils::storage::Storage;
+                    storage.exist_batch(&[hash]).await;
+                });
+            }
+            "local_put" => {
+                let blob = Blob::from_content("local-word");
+                storage
+                    .put(&blob.id, &blob.data, blob.get_type())
+                    .expect("local stays writable");
+            }
+            other => panic!("unknown probe {other}"),
+        }
+    }
+
+    fn spawn_hold_probe(mode: &str, env: &[(&str, &str)]) -> std::process::Output {
         let root = tempdir().expect("temp");
         let mut command = std::process::Command::new(std::env::current_exe().expect("test bin"));
         command
@@ -7491,8 +7795,9 @@ mod tests {
                 "LIBRA_CONFIG_GLOBAL_DB",
                 root.path().join("missing-global.db"),
             )
+            .env("STORAGE_CONFIG_HOLD_PROBE", mode)
             .args([
-                "utils::client_storage::tests::storage_config_init_fallback_probe",
+                "utils::client_storage::tests::storage_config_hold_probe",
                 "--exact",
                 "--ignored",
                 "--nocapture",
@@ -7510,71 +7815,145 @@ mod tests {
         for (key, value) in env {
             command.env(key, value);
         }
-        let output = command.output().expect("spawn init fallback probe");
+        // The temp dir must live until the child finishes. `output` waits.
+        let output = command.output().expect("spawn hold probe");
+        // Keep the directory until the child has exited. `output` already waited.
+        drop(root);
+        output
+    }
+
+    #[test]
+    #[serial(env)]
+    fn storage_config_hold_bool_queries_exit_without_a_presence_bit() {
+        let confirmed = [("LIBRA_STORAGE_TYPE", "gcs-canary")];
+        for mode in [
+            "exist",
+            "is_object_type",
+            "search",
+            "trait_exist",
+            "trait_search",
+            "exist_batch_empty",
+            "exist_batch_one",
+        ] {
+            let output = spawn_hold_probe(mode, &confirmed);
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            assert_eq!(output.status.code(), Some(1), "{mode}: {stderr}");
+            assert_eq!(stderr.trim(), CONFIG_SENTENCE, "{mode}");
+            assert!(!stderr.contains("gcs-canary"), "{mode}");
+            assert!(!stderr.contains("Warning"), "{mode}");
+        }
+    }
+
+    #[test]
+    #[serial(env)]
+    fn storage_config_init_fallback_local_word_stays_writable() {
+        let output = spawn_hold_probe("local_put", &[("LIBRA_STORAGE_TYPE", "local")]);
         let text = format!(
             "{}{}",
             String::from_utf8_lossy(&output.stdout),
             String::from_utf8_lossy(&output.stderr)
         );
         assert!(output.status.success(), "{text}");
-        assert!(text.contains("Warning:"), "{text}");
-        assert!(text.contains(warning_needle), "{text}");
+        assert!(
+            text.contains("Warning: Unsupported storage type: local"),
+            "{text}"
+        );
     }
 
     #[test]
     #[serial(env)]
-    fn storage_config_init_fallback_warning_keeps_raw_value() {
-        assert_init_fallback_warns(
+    fn storage_config_init_fallback_local_empty_bucket_keeps_bucket_warning() {
+        let output = spawn_hold_probe(
+            "local_put",
             &[
-                ("LIBRA_STORAGE_TYPE", "s3"),
-                ("LIBRA_STORAGE_BUCKET", "bucket"),
-                ("LIBRA_STORAGE_ENDPOINT", "endpoint-canary-value"),
+                ("LIBRA_STORAGE_TYPE", "local"),
+                ("LIBRA_STORAGE_BUCKET", ""),
             ],
-            "endpoint-canary-value",
+        );
+        let text = format!(
+            "{}{}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+        assert!(output.status.success(), "{text}");
+        assert!(
+            text.contains("LIBRA_STORAGE_BUCKET cannot be empty"),
+            "{text}"
         );
     }
 
     #[test]
     #[serial(env)]
-    fn storage_config_init_fallback_unsupported_type_warns_and_stays_writable() {
-        assert_init_fallback_warns(
-            &[("LIBRA_STORAGE_TYPE", "gcs-canary-type")],
-            "gcs-canary-type",
+    fn storage_config_hold_type_is_read_once() {
+        let _env = isolate_storage_env();
+        let _type = ScopedEnvVar::set("LIBRA_STORAGE_TYPE", "gcs-canary");
+        let root = tempdir().expect("temp");
+        super::STORAGE_TYPE_READS.with(|reads| reads.set(0));
+        let error = must_err(
+            ClientStorage::open_init_storage(root.path().join("once")),
+            "open",
         );
+        assert_eq!(error.variable(), "LIBRA_STORAGE_TYPE");
+        assert_eq!(super::STORAGE_TYPE_READS.with(|reads| reads.get()), 1);
+        super::STORAGE_TYPE_READS.with(|reads| reads.set(0));
+        let error = must_err(
+            ClientStorage::resolve_configured_storage(root.path().join("resolve-once")),
+            "resolve",
+        );
+        assert_eq!(error.variable(), "LIBRA_STORAGE_TYPE");
+        assert_eq!(super::STORAGE_TYPE_READS.with(|reads| reads.get()), 1);
     }
 
     #[test]
     #[serial(env)]
-    fn storage_config_init_fallback_empty_bucket_warns_and_stays_writable() {
-        assert_init_fallback_warns(
-            &[("LIBRA_STORAGE_TYPE", "s3"), ("LIBRA_STORAGE_BUCKET", "")],
-            "LIBRA_STORAGE_BUCKET cannot be empty",
+    fn storage_config_upcast_open_init_rejects_unsupported_type() {
+        let _env = isolate_storage_env();
+        let _type = ScopedEnvVar::set("LIBRA_STORAGE_TYPE", "gcs-canary");
+        let root = tempdir().expect("temp");
+        let error = must_err(
+            ClientStorage::open_init_storage(root.path().join("upcast")),
+            "upcast",
         );
+        assert_eq!(
+            error.to_string(),
+            "failed to read storage configuration for LIBRA_STORAGE_TYPE"
+        );
+        assert!(!error.to_string().contains("gcs-canary"));
     }
 
     #[test]
     #[serial(env)]
-    fn storage_config_init_fallback_empty_access_key_warns_and_stays_writable() {
-        assert_init_fallback_warns(
-            &[
-                ("LIBRA_STORAGE_TYPE", "s3"),
-                ("LIBRA_STORAGE_BUCKET", "bucket"),
-                ("LIBRA_STORAGE_ACCESS_KEY", ""),
-            ],
-            "LIBRA_STORAGE_ACCESS_KEY cannot be empty",
+    fn storage_config_upcast_open_init_local_is_ready() {
+        let _env = isolate_storage_env();
+        let _type = ScopedEnvVar::set("LIBRA_STORAGE_TYPE", "local");
+        let root = tempdir().expect("temp");
+        let storage = must_ok(
+            ClientStorage::open_init_storage(root.path().join("local-upcast")),
+            "local upcast",
         );
+        assert!(storage.configuration_variable().is_none());
     }
 
-    #[test]
-    #[serial(env)]
-    fn storage_config_init_fallback_empty_secret_warns_and_stays_writable() {
-        assert_init_fallback_warns(
-            &[
-                ("LIBRA_STORAGE_TYPE", "s3"),
-                ("LIBRA_STORAGE_BUCKET", "bucket"),
-                ("LIBRA_STORAGE_SECRET_KEY", ""),
-            ],
-            "LIBRA_STORAGE_SECRET_KEY cannot be empty",
-        );
+    #[tokio::test]
+    #[serial(cwd, env)]
+    async fn storage_config_hold_cache_does_not_keep_rejection() {
+        let _hash = set_hash_kind_for_test(HashKind::Sha1);
+        let _env = isolate_storage_env();
+        let repo = tempdir().expect("temp");
+        setup_with_new_libra_in(repo.path()).await;
+        let _cwd = ChangeDirGuard::new(repo.path());
+        let _type = ScopedEnvVar::set("LIBRA_STORAGE_TYPE", "gcs-canary");
+        let cached = crate::utils::util::objects_storage();
+        assert_eq!(cached.configuration_variable(), Some("LIBRA_STORAGE_TYPE"));
+        assert!(!crate::utils::util::objects_storage_cache_contains(
+            &crate::utils::path::objects()
+        ));
+        drop(_type);
+        let restored = crate::utils::util::objects_storage();
+        assert!(restored.configuration_variable().is_none());
+        let blob = Blob::from_content("recovered");
+        restored
+            .put(&blob.id, &blob.data, blob.get_type())
+            .expect("recovered storage can put");
     }
 }

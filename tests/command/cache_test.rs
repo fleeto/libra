@@ -66,7 +66,7 @@ fn cache_info_falls_back_to_default_on_bad_numeric() {
 }
 
 /// Faithful mirroring: a wrong-case `LIBRA_STORAGE_TYPE=R2` is NOT a durable
-/// tier (the backend matches `s3`/`r2` case-sensitively and falls back to local),
+/// tier (the report matches `s3`/`r2` case-sensitively; this is not a writable local backend),
 /// so `cache info` must report `tiered=false` — never over-report tiering.
 #[test]
 fn cache_info_does_not_over_report_wrong_case_storage_type() {
@@ -129,7 +129,7 @@ fn cache_info_reports_not_tiered_when_access_key_is_empty() {
     assert_eq!(
         json["data"]["tiered"].as_bool(),
         Some(false),
-        "empty access key must report non-tiered (backend falls back to local)"
+        "empty access key must report non-tiered (not a writable local backend)"
     );
 }
 

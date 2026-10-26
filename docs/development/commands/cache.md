@@ -16,11 +16,11 @@
 
 - 入口与分发：`src/cli.rs::Commands::Cache` → `command::cache::execute_safe`；
   列入 `CommandPreflight::none()`（无需仓库/hash-kind preflight）。
-- 配置收口：`src/utils/client_storage.rs::resolve_cache_config` 复用
-  `create_storage_backend` 相同的解析（`resolve_env_sync`：先 env 再全局 config DB），
+- 配置收口：`src/utils/client_storage.rs::resolve_cache_config` 用
+  `resolve_env_sync`（先 env 再全局 config DB）做静态报告，
   并共享默认值常量 `DEFAULT_STORAGE_THRESHOLD_BYTES`（1 MiB）/`DEFAULT_CACHE_SIZE_BYTES`
-  （200 MiB），且**镜像其宽松解析**——非法数值回落默认，与后端实际使用值一致，故
-  `cache info` 报告的即后端会应用的值（单一事实源，避免漂移）。
+  （200 MiB）。非法数值回落默认。`tiered=false` 只表示静态检查没过，不是 `init`
+  造出了可写本地后端。
 - 源码分层：`src/command/cache.rs`：`CacheArgs`（子命令 `CacheCommand::Info`）、
   `CacheInfo`（serde）、`execute_safe`/`info`。`CacheConfig` 结构与 `resolve_cache_config`
   在 `client_storage.rs`。
@@ -34,7 +34,7 @@
 ## 实现历史
 
 - 2026-07-02（`lore.md` Phase 0 / 0.10）：`cache info` 暴露分层存储/LRU 可调参数；
-  抽出 `resolve_cache_config` + 默认常量，`create_storage_backend` 复用常量。
+  抽出 `resolve_cache_config` + 默认常量。确认失败的对象存储不再由 `init` 降级到本地。
 
 ## 当前状态
 
@@ -54,4 +54,4 @@
 
 - 改进本命令前先阅读 [docs/development/commands/_general.md](_general.md)。
 - 任何对存储/缓存 env 语义或默认值的改动必须同时改 `client_storage.rs`（
-  `resolve_cache_config` 与 `create_storage_backend` 共享常量与解析），不得各自解析。
+  `resolve_cache_config` 与对象存储打开路径共享默认常量），不得各自解析。

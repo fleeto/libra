@@ -23,8 +23,10 @@ DB), so the reported values match what the backend uses:
   a case-sensitive `s3` / `r2` that also passes every static check the backend
   applies before connecting (non-empty bucket, parseable `LIBRA_STORAGE_ENDPOINT`,
   non-empty `LIBRA_STORAGE_ACCESS_KEY` / `LIBRA_STORAGE_SECRET_KEY`). So a
-  wrong-case `R2`, an empty key, or a malformed endpoint reports non-tiered
-  rather than misleading you. The cache tunables only take effect when tiered; a
+  wrong-case `R2`, an empty key, or a malformed endpoint reports non-tiered.
+  That report does not mean `init` built a writable local backend. Those
+  confirmed settings make object commands fail and name only the setting.
+  `LIBRA_STORAGE_TYPE=local` still warns and stays local. The cache tunables only take effect when tiered; a
   local-only repository caches nothing. An actual connection additionally needs
   valid credentials, which this static report does not validate.
 - **threshold** — the small/large object threshold in bytes
@@ -72,7 +74,8 @@ leading probe failures abort the run with nothing deleted. `--dry-run` writes no
 reports the outcome (probes still run); `--min-age` (default 600s) skips
 freshly materialized objects. Reads of evicted objects self-heal
 transparently from the durable tier (re-verified, re-cached) — but are
-unavailable offline. Local-only repositories have nothing evictable; the
+unavailable offline. A confirmed remote setting that cannot be read fails `cache evict` instead of
+reporting that nothing is evictable. Local-only repositories have nothing evictable; the
 offline read policy refuses (probes impossible). Background use:
 `libra maintenance run --task cache-evict` (not in the default task set).
 Residual risk (documented): presence is not integrity — a corrupt remote

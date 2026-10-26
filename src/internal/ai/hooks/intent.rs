@@ -626,7 +626,14 @@ async fn persist_session_history(
     let objects_dir = storage_path.join("objects");
     std::fs::create_dir_all(&objects_dir)?;
 
-    let storage = Arc::new(ClientStorage::init(objects_dir));
+    let storage = Arc::new(
+        ClientStorage::open_init_storage(objects_dir).map_err(|error| {
+            anyhow!(
+                "failed to read storage configuration for {}",
+                error.variable()
+            )
+        })?,
+    );
     let db_conn = Arc::new(db_conn.clone());
     let payload = build_ai_session_payload(session, provider);
     let blob_data = serde_json::to_vec(&normalize_json_value(payload))
@@ -946,5 +953,95 @@ fn cx01_interrupt_keeps_legacy_phase_without_reviving_ended_state() {
             .insert(SESSION_PHASE_METADATA_KEY.into(), json!(phase));
         transition_phase(&mut session, LifecycleEventKind::TurnInterrupted);
         assert_eq!(session.metadata[SESSION_PHASE_METADATA_KEY], json!(phase));
+    }
+}
+
+#[cfg(test)]
+mod storage_config_upcast_intent_tests {
+    use anyhow::Result;
+
+    use super::{HookProvider, LifecycleEvent, SessionHookEnvelope, SessionState};
+
+    struct StorageConfigStub;
+
+    impl crate::internal::ai::hooks::provider::HookProviderIdentity for StorageConfigStub {
+        fn agent_kind(&self) -> crate::internal::ai::observed_agents::adapter::AgentKind {
+            crate::internal::ai::observed_agents::adapter::AgentKind::ClaudeCode
+        }
+    }
+
+    impl HookProvider for StorageConfigStub {
+        fn provider_name(&self) -> &'static str {
+            "storage-config-stub"
+        }
+        fn source_name(&self) -> &'static str {
+            "storage-config-stub"
+        }
+        fn supported_commands(
+            &self,
+        ) -> &'static [crate::internal::ai::hooks::provider::ProviderHookCommand] {
+            &[]
+        }
+        fn parse_hook_event(
+            &self,
+            _hook_event_name: &str,
+            _envelope: &SessionHookEnvelope,
+        ) -> Result<LifecycleEvent> {
+            anyhow::bail!("unused")
+        }
+        fn dedup_identity_keys(&self) -> &'static [&'static str] {
+            &[]
+        }
+        fn install_hooks(
+            &self,
+            _options: &crate::internal::ai::hooks::provider::ProviderInstallOptions,
+        ) -> Result<()> {
+            Ok(())
+        }
+        fn uninstall_hooks(&self) -> Result<()> {
+            Ok(())
+        }
+        fn hooks_are_installed(&self) -> Result<bool> {
+            Ok(false)
+        }
+    }
+
+    #[tokio::test]
+    #[serial_test::serial(env)]
+    async fn storage_config_upcast_intent_rejects_confirmed_type() {
+        let _type = crate::utils::test::ScopedEnvVar::set("LIBRA_STORAGE_TYPE", "gcs-canary");
+        let dir = tempfile::tempdir().expect("temp");
+        let db = sea_orm::Database::connect("sqlite::memory:")
+            .await
+            .expect("memory db");
+        let session = SessionState::new(dir.path().to_str().expect("utf8"));
+        let error = super::persist_session_history(dir.path(), &session, &StorageConfigStub, &db)
+            .await
+            .expect_err("confirmed type");
+        let text = format!("{error:#}");
+        assert!(
+            text.contains("failed to read storage configuration for LIBRA_STORAGE_TYPE"),
+            "{text}"
+        );
+        assert!(!text.contains("gcs-canary"), "{text}");
+    }
+
+    #[tokio::test]
+    #[serial_test::serial(env)]
+    async fn storage_config_upcast_intent_local_word_passes_storage_open() {
+        let _type = crate::utils::test::ScopedEnvVar::set("LIBRA_STORAGE_TYPE", "local");
+        let dir = tempfile::tempdir().expect("temp");
+        let db = sea_orm::Database::connect("sqlite::memory:")
+            .await
+            .expect("memory db");
+        let session = SessionState::new(dir.path().to_str().expect("utf8"));
+        let error = super::persist_session_history(dir.path(), &session, &StorageConfigStub, &db)
+            .await
+            .expect_err("later history work");
+        let text = format!("{error:#}");
+        assert!(
+            !text.contains("failed to read storage configuration"),
+            "local must not be a confirmed storage failure: {text}"
+        );
     }
 }

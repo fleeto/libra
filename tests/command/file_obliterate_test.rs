@@ -338,3 +338,29 @@ fn obliterate_takes_the_maintenance_lock_before_recovering() {
         "the interrupted obliteration finishes once nothing else is deleting"
     );
 }
+
+#[test]
+fn file_obliterate_storage_read_error_is_not_absent() {
+    let repo = create_committed_repo_via_cli();
+    let repo_path = repo.path();
+    let pack_dir = repo_path.join(".libra/objects/pack");
+    fs::create_dir_all(&pack_dir).expect("pack dir");
+    fs::write(pack_dir.join("orphan.pack"), b"not-a-pack").expect("unindexed pack");
+    let output = run_libra_command(
+        &[
+            "file",
+            "obliterate",
+            "0123456789abcdef0123456789abcdef01234567",
+            "--yes",
+        ],
+        repo_path,
+    );
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let (_message, report) = parse_cli_error_stderr(&output.stderr);
+    assert_eq!(report.error_code, "LBR-IO-001", "{stderr}");
+    for word in ["absent", "loose", "packed"] {
+        assert!(!stderr.contains(word), "{word} in stderr: {stderr}");
+        assert!(!stdout.contains(word), "{word} in stdout: {stdout}");
+    }
+}

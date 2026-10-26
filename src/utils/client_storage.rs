@@ -2550,6 +2550,15 @@ impl ClientStorage {
         }
     }
 
+    /// Like [`Self::is_object_type`], but a storage read failure stays an error.
+    pub fn is_object_type_checked(
+        &self,
+        obj_id: &ObjectHash,
+        obj_type: ObjectType,
+    ) -> Result<bool, GitError> {
+        Ok(self.get_object_type(obj_id)? == obj_type)
+    }
+
     /// Search for objects matching the provided revision-ish identifier.
     ///
     /// Functional scope:
@@ -4190,6 +4199,51 @@ mod tests {
             }
             Ok(*hash == self.present)
         }
+    }
+
+    struct FailingTypeRead;
+
+    #[async_trait::async_trait]
+    impl Storage for FailingTypeRead {
+        async fn get(&self, _hash: &ObjectHash) -> Result<(Vec<u8>, ObjectType), GitError> {
+            Err(GitError::IOError(std::io::Error::other(
+                "simulated type read failure",
+            )))
+        }
+
+        async fn put(
+            &self,
+            _hash: &ObjectHash,
+            _data: &[u8],
+            _obj_type: ObjectType,
+        ) -> Result<String, GitError> {
+            unreachable!("type-read test never stores objects")
+        }
+
+        async fn exist(&self, _hash: &ObjectHash) -> bool {
+            false
+        }
+
+        async fn search(&self, _prefix: &str) -> Vec<ObjectHash> {
+            Vec::new()
+        }
+    }
+
+    #[test]
+    fn is_object_type_checked_returns_read_error() {
+        let hash = ObjectHash::new_for_kind(git_internal::hash::get_hash_kind(), &[7; 20]);
+        let client = ClientStorage::from_test_storage(Arc::new(FailingTypeRead), PathBuf::new());
+        let error = client
+            .is_object_type_checked(&hash, ObjectType::Blob)
+            .expect_err("a storage read failure must stay an error");
+        assert!(
+            matches!(error, GitError::IOError(_)),
+            "unexpected error: {error}"
+        );
+        assert!(
+            !client.is_object_type(&hash, ObjectType::Blob),
+            "the legacy bool probe still collapses the same failure"
+        );
     }
 
     #[test]

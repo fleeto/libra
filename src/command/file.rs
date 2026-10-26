@@ -179,7 +179,7 @@ async fn run_obliterate(
     }
 
     // Phase A — evaluate (read-only).
-    let presence = obliteration::classify_presence(&hash);
+    let presence = obliteration::classify_presence(&hash)?;
     match presence {
         ObjectPresence::Absent => {
             return Err(CliError::fatal(format!(

@@ -1700,3 +1700,32 @@ fn fsck_blake3_hash_mismatch() {
         "must report hash mismatch (BLAKE3 digest), got: {combined}"
     );
 }
+
+#[test]
+fn fsck_storage_read_error_is_not_missing() {
+    let repo = create_committed_repo_via_cli();
+    let repo_path = repo.path();
+    let head =
+        String::from_utf8_lossy(&run_libra_command(&["rev-parse", "HEAD"], repo_path).stdout)
+            .trim()
+            .to_string();
+    let loose = repo_path
+        .join(".libra/objects")
+        .join(&head[..2])
+        .join(&head[2..]);
+    fs::remove_file(&loose).expect("remove loose commit");
+    let pack_dir = repo_path.join(".libra/objects/pack");
+    fs::create_dir_all(&pack_dir).expect("pack dir");
+    fs::write(pack_dir.join("orphan.pack"), b"not-a-pack").expect("unindexed pack");
+
+    let output = run_libra_command(&["fsck"], repo_path);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("LBR-IO-001"),
+        "storage read failure must keep its stable code, got: {stderr}"
+    );
+    assert!(
+        !stderr.contains("missing"),
+        "a pack read failure must not be reported as missing: {stderr}"
+    );
+}

@@ -251,22 +251,26 @@ pub enum ObjectPresence {
 
 /// Classify where `hash`'s payload physically lives (loose vs packed vs
 /// absent). v1 refuses packed-only objects (no pack surgery).
-pub fn classify_presence(hash: &ObjectHash) -> ObjectPresence {
+pub fn classify_presence(hash: &ObjectHash) -> CliResult<ObjectPresence> {
     let loose = loose_payload_path(hash).is_some_and(|p| p.exists());
     if loose {
-        return ObjectPresence::LooseOnly;
+        return Ok(ObjectPresence::LooseOnly);
     }
     // Packed presence: check the LOCAL store ONLY (no alternates — lore.md
     // 2.3). Obliteration must never reach into a parent's borrowed store: an
     // object resolvable only via an alternate is NOT ours to obliterate, so it
     // classifies as Absent here and the driver refuses it. A local pack
-    // (present locally, not loose) is PackedOnly.
+    // (present locally, not loose) is PackedOnly. A storage read error is not
+    // absence and must not authorize a delete.
     let storage =
         crate::utils::client_storage::ClientStorage::init_local(crate::utils::path::objects());
-    if storage.exist(hash) {
-        ObjectPresence::PackedOnly
-    } else {
-        ObjectPresence::Absent
+    match storage.exist_checked(hash) {
+        Ok(true) => Ok(ObjectPresence::PackedOnly),
+        Ok(false) => Ok(ObjectPresence::Absent),
+        Err(error) => Err(CliError::fatal(format!(
+            "failed to read object storage while classifying {hash}: {error}"
+        ))
+        .with_stable_code(StableErrorCode::IoReadFailed)),
     }
 }
 
@@ -441,5 +445,31 @@ mod tests {
             is_tombstoned_cached(&oid),
             "snapshot sees the new tombstone"
         );
+    }
+
+    #[test]
+    #[serial_test::serial(cwd, env)]
+    fn classify_presence_storage_read_error_is_not_absent() {
+        let tmp = tempfile::tempdir().expect("tmp");
+        let _guard = ChangeDirGuard::new(tmp.path());
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("runtime");
+        runtime.block_on(setup_with_new_libra_in(tmp.path()));
+        let pack_dir = tmp.path().join(".libra/objects/pack");
+        std::fs::create_dir_all(&pack_dir).expect("pack dir");
+        std::fs::write(pack_dir.join("orphan.pack"), b"not-a-pack").expect("unindexed pack");
+        let hash = blob_oid(b"not-present-as-loose");
+        let error = classify_presence(&hash).expect_err("unindexed pack is a read failure");
+        assert_eq!(
+            error.stable_code(),
+            crate::utils::error::StableErrorCode::IoReadFailed
+        );
+        let rendered = error.to_string();
+        assert!(!rendered.contains("Absent"), "{rendered}");
+        assert!(!rendered.contains("absent"), "{rendered}");
+        assert!(!rendered.contains("loose"), "{rendered}");
+        assert!(!rendered.contains("packed"), "{rendered}");
     }
 }

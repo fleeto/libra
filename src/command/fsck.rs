@@ -72,6 +72,16 @@ fn clear_messages() {
         .clear();
 }
 
+/// Presence probe that keeps a storage read failure distinct from absence.
+fn storage_has_object(storage: &ClientStorage, hash: &ObjectHash) -> CliResult<bool> {
+    storage.exist_checked(hash).map_err(|error| {
+        CliError::fatal(format!(
+            "failed to read object storage while checking {hash}: {error}"
+        ))
+        .with_stable_code(StableErrorCode::IoReadFailed)
+    })
+}
+
 fn take_messages() -> Vec<FsckMessage> {
     std::mem::take(&mut *MESSAGES.lock().expect("fsck message buffer poisoned"))
 }
@@ -464,11 +474,11 @@ fn check_broken_links(
                 let Ok(commit) = Commit::from_bytes(&data, *hash) else {
                     continue;
                 };
-                if !storage.exist(&commit.tree_id) {
+                if !storage_has_object(storage, &commit.tree_id)? {
                     record_missing_link(result, "commit", hash, "tree", &commit.tree_id);
                 }
                 for parent in parents_to_check(hash, &commit.parent_commit_ids, shallow) {
-                    if !storage.exist(parent) {
+                    if !storage_has_object(storage, parent)? {
                         record_missing_link(result, "commit", hash, "commit", parent);
                     }
                 }
@@ -478,7 +488,7 @@ fn check_broken_links(
                     continue;
                 };
                 for item in &tree.tree_items {
-                    if !storage.exist(&item.id) {
+                    if !storage_has_object(storage, &item.id)? {
                         record_missing_link(
                             result,
                             "tree",
@@ -928,11 +938,12 @@ async fn collect_heal_candidates(
     // only inventories loose objects, so a packed object would otherwise be
     // mis-classified as missing and (with no durable tier) falsely reported
     // unrecoverable.
-    let missing: Vec<ObjectHash> = reachable
-        .iter()
-        .filter(|hash| !local.exist(hash))
-        .copied()
-        .collect();
+    let mut missing = Vec::new();
+    for hash in &reachable {
+        if !storage_has_object(local, hash)? {
+            missing.push(*hash);
+        }
+    }
 
     // Corrupt = a present loose object whose bytes no longer hash to its OID.
     // Only loose objects are re-hashed here; packed-object integrity is covered
@@ -1766,7 +1777,7 @@ async fn check_reflogs(
 
         if !is_null_oid(&entry.old_oid)
             && let Some(hash) = parse_object_hash(&entry.old_oid)
-            && !storage.exist(&hash)
+            && !storage_has_object(storage, &hash)?
             && !exempt_missing.contains(&hash)
             && !is_intentionally_absent(&hash)
         {
@@ -1776,7 +1787,7 @@ async fn check_reflogs(
 
         if !is_null_oid(&entry.new_oid)
             && let Some(hash) = parse_object_hash(&entry.new_oid)
-            && !storage.exist(&hash)
+            && !storage_has_object(storage, &hash)?
             && !exempt_missing.contains(&hash)
             && !is_intentionally_absent(&hash)
         {
@@ -2385,7 +2396,7 @@ async fn verify_object(
     let mut has_error = false;
 
     // Check if object exists.
-    if !storage.exist(hash) {
+    if !storage_has_object(storage, hash)? {
         // lore.md 2.5: an intentionally-obliterated object is a DIAGNOSTIC,
         // distinct from Missing, and never flips the exit code.
         let intentional = is_intentionally_absent(hash);
@@ -2559,7 +2570,7 @@ async fn verify_object(
                     if strict && report_errors {
                         for item in &tree.tree_items {
                             // Each entry's target must exist with a matching type.
-                            if !storage.exist(&item.id) {
+                            if !storage_has_object(storage, &item.id)? {
                                 has_error |= report_absent_or_intentional(
                                     &item.id,
                                     "tree",
@@ -2653,7 +2664,7 @@ async fn verify_object(
                                 report(FsckMsgId::BadTimezone, "commit", &hash.to_string());
                         }
                         // The tree must exist and be a tree.
-                        if !storage.exist(&commit.tree_id) {
+                        if !storage_has_object(storage, &commit.tree_id)? {
                             has_error |= report_absent_or_intentional(
                                 &commit.tree_id,
                                 "commit",
@@ -2668,7 +2679,7 @@ async fn verify_object(
                         // Parents must exist and be commits. Shallow-boundary
                         // commits are treated as roots (ADR-CL-04 / M-FSCK F1).
                         for parent in parents_to_check(hash, &commit.parent_commit_ids, shallow) {
-                            if !storage.exist(parent) {
+                            if !storage_has_object(storage, parent)? {
                                 has_error |= report_absent_or_intentional(
                                     parent,
                                     "commit",
@@ -2747,7 +2758,7 @@ async fn verify_object(
                 ));
             }
 
-            if !storage.exist(&tag.object_hash) {
+            if !storage_has_object(storage, &tag.object_hash)? {
                 // lore.md 2.5: an obliterated tag TARGET is intentionally
                 // absent, not corruption — reflect it in the returned status
                 // too (Codex P1: aggregation/JSON must not count it as
@@ -2861,7 +2872,7 @@ async fn check_refs(storage: &ClientStorage, connectivity_only: bool) -> CliResu
 
         if let Some(commit_hash_str) = &ref_entry.commit {
             if let Some(hash) = parse_object_hash(commit_hash_str) {
-                if storage.exist(&hash) {
+                if storage_has_object(storage, &hash)? {
                     // Verify the object is actually valid
                     match verify_object(
                         &hash,
@@ -2944,7 +2955,7 @@ fn check_index_file(storage: &ClientStorage) -> CliResult<IndexCheckResult> {
     for entry in entries {
         result.entries_checked += 1;
 
-        if let Some(msg_id) = validate_index_entry(entry, storage) {
+        if let Some(msg_id) = validate_index_entry(entry, storage)? {
             // An intentionally-absent (obliterated) blob is a DIAGNOSTIC, not
             // index corruption — report it but keep the index valid.
             if msg_id == FsckMsgId::IntentionalAbsence {
@@ -2992,33 +3003,33 @@ fn is_valid_index_mode(mode: u32) -> bool {
 fn validate_index_entry(
     entry: &git_internal::internal::index::IndexEntry,
     storage: &ClientStorage,
-) -> Option<FsckMsgId> {
+) -> CliResult<Option<FsckMsgId>> {
     if !is_valid_index_mode(entry.mode) {
         eprintln!("invalid index mode: {}", entry.name);
-        return Some(FsckMsgId::InvalidIndexMode);
+        return Ok(Some(FsckMsgId::InvalidIndexMode));
     }
 
     if entry.flags.stage > 3 {
         eprintln!("invalid index stage: {}", entry.name);
-        return Some(FsckMsgId::InvalidIndexStage);
+        return Ok(Some(FsckMsgId::InvalidIndexStage));
     }
 
-    if !storage.exist(&entry.hash) {
+    if !storage_has_object(storage, &entry.hash)? {
         // lore.md 2.5: an obliterated blob still referenced by the index is
         // intentionally absent, not corruption.
         if is_intentionally_absent(&entry.hash) {
-            return Some(FsckMsgId::IntentionalAbsence);
+            return Ok(Some(FsckMsgId::IntentionalAbsence));
         }
-        return Some(FsckMsgId::Missing);
+        return Ok(Some(FsckMsgId::Missing));
     }
 
     if let Ok(obj_type) = storage.get_object_type(&entry.hash)
         && obj_type != ObjectType::Blob
     {
-        return Some(FsckMsgId::IndexEntryWrongType);
+        return Ok(Some(FsckMsgId::IndexEntryWrongType));
     }
 
-    None
+    Ok(None)
 }
 
 #[cfg(test)]

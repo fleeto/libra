@@ -1577,6 +1577,25 @@ fn test_cat_file_batch_accepts_non_utf8_input() {
     );
 }
 
+#[test]
+fn cat_file_storage_read_error_is_not_absent() {
+    let temp_dir = init_temp_repo();
+    let temp_path = temp_dir.path();
+    let pack_dir = temp_path.join(".libra/objects/pack");
+    std::fs::create_dir_all(&pack_dir).expect("pack dir");
+    std::fs::write(pack_dir.join("orphan.pack"), b"not-a-pack").expect("unindexed pack");
+    let output = Command::new(env!("CARGO_BIN_EXE_libra"))
+        .current_dir(temp_path)
+        .args(["cat-file", "-e", "0123456789abcdef0123456789abcdef01234567"])
+        .output()
+        .expect("cat-file");
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    let (_message, report) = parse_cli_error_stderr(&output.stderr);
+    assert_eq!(report.error_code, "LBR-IO-001", "{stderr}");
+    assert_ne!(output.status.code(), Some(1), "{stderr}");
+    assert!(!stderr.contains("absent"), "{stderr}");
+}
+
 /// Drive `libra <args>` interactively: send each request without closing
 /// stdin and wait (bounded) for a stdout line starting with the expected
 /// prefix before sending the next request. A batch mode that reads stdin to

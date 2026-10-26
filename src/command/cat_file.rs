@@ -514,7 +514,12 @@ async fn execute_with_output_contract(args: CatFileArgs, output: &OutputConfig) 
         // Git's 128) and emits no `exists` envelope.
         let storage = ClientStorage::init(path::objects());
         let hash = resolve_object_safe(object_ref, &storage).await?;
-        let exists = storage.exist(&hash);
+        let exists = storage.exist_checked(&hash).map_err(|error| {
+            CliError::fatal(format!(
+                "failed to read object storage while checking {hash}: {error}"
+            ))
+            .with_stable_code(StableErrorCode::IoReadFailed)
+        })?;
         emit_json_data(
             "cat-file",
             &serde_json::json!({
@@ -1216,8 +1221,15 @@ async fn resolve_object(object_ref: &str, storage: &ClientStorage) -> ObjectHash
 
 /// Exit with 0 if the object exists, 1 otherwise, without printing diagnostics.
 fn check_object_exists(hash: &ObjectHash, storage: &ClientStorage) {
-    if !storage.exist(hash) {
-        std::process::exit(1);
+    match storage.exist_checked(hash) {
+        Ok(true) => {}
+        Ok(false) => std::process::exit(1),
+        Err(error) => cat_file_exit_error(
+            CliError::fatal(format!(
+                "failed to read object storage while checking {hash}: {error}"
+            ))
+            .with_stable_code(StableErrorCode::IoReadFailed),
+        ),
     }
 }
 

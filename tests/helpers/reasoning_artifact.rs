@@ -399,6 +399,47 @@ async fn seed_checkpoint(repo: &Path) -> String {
     )
     .await
     .expect("retire seeded checkpoint writer marker");
+    // The writer marker is gone. Drain the object-index queue before erase
+    // so a leftover repair marker cannot outlive the checkpoint.
+    assert!(
+        ClientStorage::wait_for_background_tasks_until(
+            std::time::Instant::now() + Duration::from_secs(10),
+        )
+        .await,
+        "seeded checkpoint object indexing did not finish within 10 seconds"
+    );
+    let marker_dir = repo.join(".libra").join("object-index-repair");
+    let marker_names = match std::fs::read_dir(&marker_dir) {
+        Ok(entries) => entries
+            .collect::<std::io::Result<Vec<_>>>()
+            .unwrap_or_else(|error| {
+                panic!(
+                    "cannot enumerate object-index repair markers at {}: {error}",
+                    marker_dir.display()
+                )
+            })
+            .into_iter()
+            .map(|entry| entry.file_name().to_string_lossy().into_owned())
+            .collect::<Vec<_>>(),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Vec::new(),
+        Err(error) => panic!(
+            "cannot inspect object-index repair markers at {}: {error}",
+            marker_dir.display()
+        ),
+    };
+    assert!(
+        marker_names.is_empty(),
+        "seeded checkpoint left object-index repair markers: {marker_names:?}"
+    );
+    if let Ok(Some(entry)) =
+        libra::internal::config::ConfigKv::get_with_conn(&conn, "libra.repoid").await
+        && !entry.encrypted
+    {
+        eprintln!(
+            "reasoning fixture index drain complete repo_id={}",
+            entry.value
+        );
+    }
     conn.close().await.expect("close seed conn");
     checkpoint_id
 }

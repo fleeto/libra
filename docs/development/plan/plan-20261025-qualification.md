@@ -25,9 +25,9 @@
 | FIX-LTR-05X | family child，实现审查 PASS | ER03 `8059d2f4` PASS；实现审查 `bd0e229d` PASS；已在 main `a729384`；不消耗 v0.30.88 |
 | FIX-LTR-05Y | family child，已在 main `ec98926` | ER03 `db7a5d7f` PASS；实现审查 `a2a2af14` PASS；不消耗 v0.30.88 |
 | FIX-LTR-05Z | family child，实现审查 PASS | ER03 `272c8d7d` PASS；实现审查 `4a42ec63` PASS；不消耗 v0.30.88；不开始 FIX04 |
-| FIX-LTR-05 | 本地 C 已过，tag 与 D 待观察 | 父卡 VER-1 至 VER-5 与失败关闭的缓存、fetch pack 已在 ae50414 满足。审查 d9641b0d PASS。本提交占用 v0.30.88。F2 仍 unknown。RISK-QUAL-ADD-LOOSE 未修。不开始 FIX04 |
-| FIX-LTR-04 | 依赖例外已记录，准入待本次执行审查，F2 仍 unknown | 2026-10-26T19:12:37Z 修订：历史 TRY1 stderr 不可恢复，CLOSE 保持 unknown，P1 不关闭。本卡仍只加两行 cfg。旧 A1 勾选不是这次 C |
-| FIX-LTR-02 | blocked/locally-accepted | 在 FIX04 发布后精确恢复索引结清 helper 候选；保留原断言并完成新来源完整 C/D |
+| FIX-LTR-05 | done，v0.30.88 D 已观察 | 父卡 VER-1 至 VER-5 与失败关闭的缓存、fetch pack 已在 ae50414 满足。审查 d9641b0d PASS。发布 e85470a。D 于 2026-10-26T18:23:07Z 成功：base 40349034162 attempt 2、CodeQL 40349034316、release 40349204443。F2 仍 unknown。RISK-QUAL-ADD-LOOSE 未修 |
+| FIX-LTR-04 | done，v0.30.89 D 已观察，F2 仍 unknown | 2026-10-26T19:12:37Z 修订：历史 TRY1 stderr 不可恢复，CLOSE 保持 unknown，P1 不关闭。实现审查 354b5170 PASS。发布 ff30d4a。D 于 2026-10-26T20:44:43Z 成功：base 40391580491、CodeQL 40391580303、release 40391698253。本卡只加了两行 cfg |
+| FIX-LTR-02 | 本地实现已接入，本卡 D 未观察 | `seed_checkpoint` 在 writer marker 退休后用现有 10 秒 `wait_for_background_tasks_until` 结清索引，再枚举 `.libra/object-index-repair`。真实云用例已通过并留下 fixture UUID。不关闭 F2 |
 | FIX-LTR-03 | pending/空 | 修复 MCP 测试拥有的暂停 worker 的清理，完成自己的 C/D，随后执行计划最终资格与受控整合 |
 | F3 / RISK-QUAL-STDIN | 具名 P2，未修 | `subagent_content` fixture 的 BrokenPipe/时序风险单独处理；不能混入 FIX05；若升级为 P1 或阻断当前门，先另立 FIX 卡和依赖 |
 | RISK-QUAL-ADD-LOOSE | 具名 P2，未修 | 操作日志在命令前用 `ClientStorage::init_local` 写快照，忽略 `LIBRA_STORAGE_TYPE`。`LIBRA_STORAGE_TYPE=gcs-canary` 时 `libra add` 以 LBR-IO-002 失败且不写 index，仍留下 loose 对象（含 blob `45b983be`）。不宣称失败配置下所有命令零对象写入。不混入本卡发布，也不开始 FIX04 |
@@ -1008,7 +1008,7 @@ R1真实ER03/RECOVERY PASS、H0/VERDICT FAIL（sessionbb82411c-1e59-4e52-a7f1-93
 
 ## 实施顺序与发布窗口
 
-`DEP-QUAL-SECURITY + DEP-QUAL-SOURCE + DEP-QUAL-PUBLISH -> FIX-LTR-01 -> FIX-LTR-05P -> FIX-LTR-05Q -> FIX-LTR-05R -> FIX-LTR-05S -> FIX-LTR-05T -> FIX-LTR-05U -> FIX-LTR-05V -> FIX-LTR-05W -> FIX-LTR-05X -> FIX-LTR-05Y -> FIX-LTR-05Z -> FIX-LTR-05 -> FIX-LTR-04 -> FIX-LTR-02 -> FIX-LTR-03 -> DEP-QUAL-HANDOFF`；另有 `DEP-QUAL-F2-ATTRIB + DEC-QUAL-05-RELEASE-WARNING -> FIX-LTR-05`，另有 `FIX05/具名新FIX -> DEP-QUAL-F2-CLOSE -> FIX04`。`FIX-LTR-05W` 已推送 `2a80a10`，只含 `resolve_configured_storage` 与 fetch 写入前检查。`FIX-LTR-05X` 已推送 `a729384`，只含 `init` 的确认失败拒绝状态和不缓存该状态。`FIX-LTR-05Y` 已推送 `ec98926`，只含未决 TYPE 不进入对象缓存。`FIX-LTR-05Z` 只含未决 TYPE 这一次调用不再构造 `LocalStorage`。ER03 `272c8d7d` PASS，实现审查 `4a42ec63` PASS。父卡 VER-1 至 VER-5 已在 ae50414 通过。本提交占用 v0.30.88。v0.30.88 的 D 已于 2026-10-26T18:23:07Z 观察成功：base 40349034162 attempt 2、CodeQL 40349034316、release 40349204443，SHA e85470a。F2 仍是 unknown。依 2026-10-26T19:12:37Z 例外，FIX04 对 CLOSE=unknown 豁免。顺序用于共享本计划/版本面的串行发布，不表示合并发布。先修确定性全量阻断，再修共享fixture，最后完成MCP测试清理与整份修复计划的最终资格。每卡真正 C/D 闭合后才发布下一卡。`FIX-LTR-05P` 到 `FIX-LTR-05Z` 都是 family child，不占用 v0.30.88。
+`DEP-QUAL-SECURITY + DEP-QUAL-SOURCE + DEP-QUAL-PUBLISH -> FIX-LTR-01 -> FIX-LTR-05P -> FIX-LTR-05Q -> FIX-LTR-05R -> FIX-LTR-05S -> FIX-LTR-05T -> FIX-LTR-05U -> FIX-LTR-05V -> FIX-LTR-05W -> FIX-LTR-05X -> FIX-LTR-05Y -> FIX-LTR-05Z -> FIX-LTR-05 -> FIX-LTR-04 -> FIX-LTR-02 -> FIX-LTR-03 -> DEP-QUAL-HANDOFF`；另有 `DEP-QUAL-F2-ATTRIB + DEC-QUAL-05-RELEASE-WARNING -> FIX-LTR-05`，另有 `FIX05/具名新FIX -> DEP-QUAL-F2-CLOSE -> FIX04`。`FIX-LTR-05W` 已推送 `2a80a10`，只含 `resolve_configured_storage` 与 fetch 写入前检查。`FIX-LTR-05X` 已推送 `a729384`，只含 `init` 的确认失败拒绝状态和不缓存该状态。`FIX-LTR-05Y` 已推送 `ec98926`，只含未决 TYPE 不进入对象缓存。`FIX-LTR-05Z` 只含未决 TYPE 这一次调用不再构造 `LocalStorage`。ER03 `272c8d7d` PASS，实现审查 `4a42ec63` PASS。父卡 VER-1 至 VER-5 已在 ae50414 通过。本提交占用 v0.30.88。v0.30.88 的 D 已于 2026-10-26T18:23:07Z 观察成功：base 40349034162 attempt 2、CodeQL 40349034316、release 40349204443，SHA e85470a。F2 仍是 unknown。依 2026-10-26T19:12:37Z 例外，FIX04 对 CLOSE=unknown 豁免。顺序用于共享本计划/版本面的串行发布，不表示合并发布。先修确定性全量阻断，再修共享fixture，最后完成MCP测试清理与整份修复计划的最终资格。每卡真正 C/D 闭合后才发布下一卡。`FIX-LTR-05P` 到 `FIX-LTR-05Z` 都是 family child，不占用 v0.30.88。FIX04 已发布 ff30d4a / v0.30.89，D 于 2026-10-26T20:44:43Z 观察成功：base 40391580491、CodeQL 40391580303、release 40391698253。FIX02 从该发布树接续，不把 F2 写成已修复。
 
 ### 实际 D 映射与现场复核
 
@@ -1098,7 +1098,7 @@ R1真实ER03/RECOVERY PASS、H0/VERDICT FAIL（sessionbb82411c-1e59-4e52-a7f1-93
 
 **Task type:** `implementation`
 
-**Lifecycle / Acceptance:** `in-progress` / 依赖例外已记录，准入待本次执行审查（旧A1勾选和失败C1都不是这次C。2026-10-26T19:12:37Z：历史 TRY1 stderr 不可恢复，CLOSE 保持 unknown，P1 不关闭。审查 a929a323 VERDICT PASS，AMENDMENT_ALLOWS_FIX04 yes。实现审查 354b5170 VERDICT PASS，CFG_ONLY yes。ingress.rs sha256 2b7aa33698c2072d160cc6bea7801ffb8fb180a13bb0ebe78901ff888b7bb778。这是执行器依当前目标记录的修订，不是用户批准。本卡仍只在 `from_payload` 与 `from_payload_with_hint_policy` 前加 `#[cfg(any(test, debug_assertions))]`。若这次 C 重现 TRY1 形状，即 exit 129 之后整段 stderr 不能解析为 JSON，则 ER10 STOP，不用 nextest 重试成功当作通过）
+**Lifecycle / Acceptance:** `done` / v0.30.89 D 已观察（旧A1勾选和失败C1都不是这次C。2026-10-26T19:12:37Z：历史 TRY1 stderr 不可恢复，CLOSE 保持 unknown，P1 不关闭。审查 a929a323 VERDICT PASS，AMENDMENT_ALLOWS_FIX04 yes。实现审查 354b5170 VERDICT PASS，CFG_ONLY yes。ingress.rs sha256 2b7aa33698c2072d160cc6bea7801ffb8fb180a13bb0ebe78901ff888b7bb778。这是执行器依当前目标记录的修订，不是用户批准。本卡仍只在 `from_payload` 与 `from_payload_with_hint_policy` 前加 `#[cfg(any(test, debug_assertions))]`。若这次 C 重现 TRY1 形状，即 exit 129 之后整段 stderr 不能解析为 JSON，则 ER10 STOP，不用 nextest 重试成功当作通过。发布 `ff30d4ad28517d77d44f10e4753734b30a0b3677`，tag v0.30.89。D 于 2026-10-26T20:44:43Z 观察成功：base 40391580491、CodeQL 40391580303、release 40391698253。F2 仍 unknown，P1 不关闭）
 
 **历史退出前Lifecycle字段：** **Lifecycle / Acceptance:** `blocked` / `locally-accepted`（仅原A1/源审限域保留；C1 native审查FAIL/root STOP，具体退出待审/待执行，未发布）
 
@@ -1181,7 +1181,7 @@ R1真实ER03/RECOVERY PASS、H0/VERDICT FAIL（sessionbb82411c-1e59-4e52-a7f1-93
 
 **Task type:** `implementation`
 
-**Lifecycle / Acceptance:** `blocked` / `locally-accepted`（保存helper5025候选A2/ownR2；C1项目release警告STOP，不视完成；待FIX04实际C/D后重新ER03 source/version/new C）
+**Lifecycle / Acceptance:** `in-progress` / FIX04 的 v0.30.89 D 已观察后按本卡重建索引结清（不 pop 旧 stash。真实云 nextest `219d5a37-340f-4a92-900d-3f1c52112e7f` 1 passed，fixture `b5c92ec6-90ec-4a3e-a1c4-2faa9b2ae259`，清理在场景断言传播前完成。导出模块 `6bbd9880-c208-4fd8-aba3-20371cce847c` 15 passed。默认全量 `58f94c1b-0af6-4909-aaec-559cc382a2ac`：10822 passed，0 failed，22 skipped；`rename_limit_warning_exit_nine_over_dirty` 第一次失败后重试通过，不是 reset TRY1。F2 仍 unknown。实现审查 `0a4e9544-9fe1-47f7-ae29-b409040a0ec3` VERDICT PASS，HELPER_ONLY yes，LIVE_NOT_SKIP yes，RELEASE_BUMP_ALLOWED yes。本卡发布与 D 未完成）
 
 **Description:** 在 `seed_checkpoint` 中既有writer marker退休成功后、`conn.close()`之前建立有界、可失败的索引结清前置（在调用方直接INSERT索引及CLI erase之前），保留原删除保护和所有reasoning隐私/生命周期断言；不是修改生产erase为等待或重试。
 
@@ -1191,16 +1191,16 @@ R1真实ER03/RECOVERY PASS、H0/VERDICT FAIL（sessionbb82411c-1e59-4e52-a7f1-93
 
 **Acceptance criteria:**
 
-- [ ] 使用现有有界后台任务等待，界限不超过已有同类fixture的10秒；超界明确失败，不sleep固定延迟或重试erase。
-- [ ] 等待返回后只读枚举本fixture `.libra/object-index-repair/`，目录不存在或为空才通过，存在任何marker或枚举错误均失败；不扩大私有常量/失败计数生产API。消费者失败留下marker时必须失败，安全诊断仅OID/类型/文件名，不打印body/secret。
-- [ ] 原erase及GC、reasoning私密refs/export和坏digest断言保持，生产删除栅栏与队列实现不改。
-- [ ] 两个直接消费者均验收：完整agent_checkpoint_export_test模块及真实云reasoning生命周期用例；真实云缺凭据不可skip通过。
+- [x] 使用现有有界后台任务等待，界限不超过已有同类fixture的10秒；超界明确失败，不sleep固定延迟或重试erase。
+- [x] 等待返回后只读枚举本fixture `.libra/object-index-repair/`，目录不存在或为空才通过，存在任何marker或枚举错误均失败；不扩大私有常量/失败计数生产API。消费者失败留下marker时必须失败，安全诊断仅OID/类型/文件名，不打印body/secret。
+- [x] 原erase及GC、reasoning私密refs/export和坏digest断言保持，生产删除栅栏与队列实现不改。
+- [x] 两个直接消费者均验收：完整agent_checkpoint_export_test模块及真实云reasoning生命周期用例；真实云缺凭据不可skip通过。
 
 **Verification:**
 
-- [ ] `source .env.test && source .env.live-test && cargo nextest run --test command_test -E 'test(command::agent_checkpoint_export_test::)' --no-fail-fast --retries 0`；按实际完整模块listing非零逐名核对。
-- [ ] `source .env.test && source .env.live-test && cargo nextest run --features test-live-cloud --test agent_cloud_tombstone_test -E 'test(=reasoning_artifact_mirrors_and_erases_with_checkpoint)' --retries 0`；精确1例真实D1/R2，保留fixture唯一repo UUID及cleanup证据，禁止early-return冒PASS。
-- [ ] 检查失败路径仍fail-closed：保留marker不擦除、不放宽erase断言；只读核该helper两个直接消费者及无新增生产API。新增确定性回归如必需，须在同一行为轴/I中先登记selector并审查，不以重复跑同一flake代替因果。
+- [x] `source .env.test && source .env.live-test && cargo nextest run --test command_test -E 'test(command::agent_checkpoint_export_test::)' --no-fail-fast --retries 0`；按实际完整模块listing非零逐名核对。run `6bbd9880-c208-4fd8-aba3-20371cce847c`：15 passed，0 failed。
+- [x] `source .env.test && source .env.live-test && cargo nextest run --features test-live-cloud --test agent_cloud_tombstone_test -E 'test(=reasoning_artifact_mirrors_and_erases_with_checkpoint)' --retries 0`；精确1例真实D1/R2，保留fixture唯一repo UUID及cleanup证据，禁止early-return冒PASS。run `219d5a37-340f-4a92-900d-3f1c52112e7f`：1 passed，141.309s，fixture `b5c92ec6-90ec-4a3e-a1c4-2faa9b2ae259`。清理在场景断言传播前 `expect` 成功，不是 early-return skip。
+- [x] 检查失败路径仍fail-closed：保留marker不擦除、不放宽erase断言；只读核该helper两个直接消费者及无新增生产API。新增确定性回归如必需，须在同一行为轴/I中先登记selector并审查，不以重复跑同一flake代替因果。helper 相对 ff30d4a 只在 marker 退休后、`conn.close()` 前增加结清；残留 marker 或枚举错误使 fixture 失败，erase 实现未改。
 
 **Full-suite trigger:** T-4/T-5：修改tests/helpers共享测试基建，A及最终C完整默认套件；真实云selector另跑，不被默认feature的PASS替代。
 
@@ -1308,7 +1308,7 @@ R1真实ER03/RECOVERY PASS、H0/VERDICT FAIL（sessionbb82411c-1e59-4e52-a7f1-93
 
 五张实现卡分别实际A/B、Claude ER-05 PASS、精确signed/DCO提交、独立patch/PR/merge/tag/人工Release、实际CI与发布artifact D完成；全部P0/P1关闭，P2具名处置。FIX-LTR-03 的C④在bump后树执行完整默认套件、`cargo test --doc`及原3例network；merge树与被测树不等即STOP。五张实现卡各自实际D完成后，在与FIX03发布merge树相同的冻结来源执行上述一次10800秒计划最终资格窗口（fmt、strict Clippy、双env完整默认套件、doc、原3例network），核全部身份/退出/ignored/flake/runtime skip与owned资源；根因未知的缺口不得改成已证。最终实际本地Claude来源资格PASS后，才把五个具体发布SHA/版本及适用覆盖交给原scoped-traces计划；其H1、原merge签名政策、LTR自身A/B/C/D仍独立。
 
-当前（2026-10-26）两原计划正式23/118、0/26、23/144；本外部五实现卡1/5，DOC01/02另记，不增加原26卡。联合依赖按文首ATTRIB→FIX05、FIX05/新FIX→CLOSE→FIX04→FIX02→FIX03与H0/H1/LIVE/LTR10核无环；任一卡/末端证据不足均未完成。旧17/118、1/4统计保留于下方2026-10-25快照。
+当前（2026-10-26）两原计划正式23/118、0/26、23/144；本外部五实现卡 3/5（FIX01、FIX05、FIX04 的 D 已观察），FIX02 尚未发布，DOC01/02另记，不增加原26卡。联合依赖按文首ATTRIB→FIX05、FIX05/新FIX→CLOSE→FIX04→FIX02→FIX03与H0/H1/LIVE/LTR10核无环；任一卡/末端证据不足均未完成。旧17/118、1/4统计保留于下方2026-10-25快照。
 
 > 历史初稿统计：原Mega14/112、Libra0/26、联合14/138；外部0/3，保留其原时点。
 

@@ -1,3 +1,284 @@
+# Libra 2026-10-25 来源资格前滚修复
+
+## 2026-10-26 跨机器接续入口（当前要求）
+
+用户本轮明确要求：「请把 Libra 需要的前置任务写入 docs/development/plan/plan-20261025-qualification.md 这个文件中，把要求的任务写明细，然后单独提交，我会在其他的机器上启动一个 agent 完成」；随后指定「libra 的交接任务卡，请在 main 分支提交，我也会在 main 分支开发」。本次交接只提交本文件到 `main`，不携带程序候选、版本修改或原 scoped-traces 三份治理 WIP。接收 Agent 在本机定位真实目录，用原生 Libra 拉取并核验最新 main 后接续；不得复制旧机器绝对路径。
+
+本文的任务定义和交接审查不等于实现准入、验收通过或新增发布豁免。用户已改为仅调用本地 `claude` 命令审查，不调用 API，不使用隔离 Codex。后文带旧日期的双审、feature branch/PR、旧版本、预算和 pending 字样按原时点保留；当前开发分支遵守本次用户 `main` 指令，质量门、签名、无 force 和实际 D 不变。远端保护若要求 PR/他人批准，记录真实阻塞并按保护规则处理，不能 admin bypass。
+
+### 当前事实、范围与任务表
+
+文档准备时已只读核验远端 `main=b73e98a77ecc7c3db1ea905ab55478785d76c041`，版本 `0.30.87`。这是核对时点，不是要求接收方退回的固定基线；本交接提交及其后新增提交均须保留。FIX01 的 PR635 合并为 `f33be958dcc3266df3a6ab796ed90d1766f3cd93`，v0.30.87 完整发布已核；PR636 合并为 b73，104 项项目 Rustdoc warnings 已修。`proc-macro-error2 2.0.1` 的 future-incompatibility 提示按用户要求排除，不修改第三方库。
+
+| 前置事项 | 当前状态 | 接收 Agent 必须交付的结果 |
+|---|---|---|
+| FIX-LTR-01 | done/complete | 按当前来源限域消费已有 schema doctor 修复，保留原签名、C/D 与失败历史；不重做已完成卡 |
+| DEP-QUAL-F2-ATTRIB / DEP-QUAL-F2-CLOSE | 归属待审 / 关闭未解决，暂定 P1 | 先作可为unknown的只读归属决定，再另核关闭证据；查明 `command::reset_test::reset_pathspec_from_file_missing_path_errors` 的真实 stderr/退出；不能根据别的用例推断为 SQLite 锁定 |
+| FIX-LTR-05 | 新登记，blocked/空 | 修复配置解析失败被错误当作 LocalStorage 成功的单一行为轴；具体卡见下；发布例外未获授权 |
+| FIX-LTR-04 | blocked/locally-accepted | 只保留两行 cfg 候选与旧 A/源审的有限效力；F1/F2 关闭后重新准入、完整新 C/D，消除两方法 release warning |
+| FIX-LTR-02 | blocked/locally-accepted | 在 FIX04 发布后精确恢复索引结清 helper 候选；保留原断言并完成新来源完整 C/D |
+| FIX-LTR-03 | pending/空 | 修复 MCP 测试拥有的暂停 worker 的清理，完成自己的 C/D，随后执行计划最终资格与受控整合 |
+| F3 / RISK-QUAL-STDIN | 具名 P2，未修 | `subagent_content` fixture 的 BrokenPipe/时序风险单独处理；不能混入 FIX05；若升级为 P1 或阻断当前门，先另立 FIX 卡和依赖 |
+| DOC-LTR-01 | locally-accepted | PR636 的文档修复与实际 main D 已发生，仍按原声明由 FIX03 覆盖；不因本交接晋升 |
+| DOC-LTR-02 | 本次任务定义交接 | 仅本文件、main、signed/DCO、实际本地 Claude；无产品版本发布，覆盖由 FIX03 承载 |
+
+新增 FIX05 后，本外部计划实现卡为 **1/5**；DOC01、DOC02 单独记账。原 Libra scoped-traces 计划仍 **0/26**，不增加其分母；Mega2 已完成 MTR103，**23/118**，联合 **23/144**。卡片数不表示工时比例。两仓原计划、plan-status 的本轮单文件交接后置同步由 root 在既有协调写集中完成；用户本次明确只提交此文件，不能为满足索引同步而混入原工作区整份 plan-status。
+
+### 实际失败与可移植证据
+
+FIX04 C1 的 11 个命令机械退出 0、10761 个最终通过、21 个原 ignored，不能替代 review。该轮存在 4 个 flaky 身份、5 次失败尝试；Claude session `c7f9fbae-734f-416c-9d9d-3650ede3f824` 的四项结论均 FAIL，root 已记录 STOP。原失败版本四面已精确退出 0.30.87；未提交该失败树、未发布 0.30.88。旧 A1 的两项 flake、37 项 runtime 覆盖缺口、C1 的 F1/F2、旧 FIX3 的诊断 3/3、A/B 8/8 与 B8 失败全部保留，迁机不重置。
+
+| 证据 | 可核事实 / SHA256 |
+|---|---|
+| F1 源文件 | b73 的 `src/utils/client_storage.rs` SHA256 `c5a60476681ab325cd70b41634b1fc8df29536a8f94bcc13e2b311a34a576b4d`；`create_storage_backend` 将 typed resolver 的 `Other` 错误送入 `storage_config_resolution_fallback`；后者无条件 stderr Warning 并返回 LocalStorage；repository config open 的锁超时为 200ms |
+| F1 原失败观察 | fetch 的 machine-error 用例实际收到 `SqliteError code 5: database is locked` 的额外 Warning，破坏 JSON 错误输出；尚未证明历史锁 owner/SQL，也不能称所有 SQLite 错误均来自此处 |
+| F2 源文件与缺口 | b73 `tests/command/reset_test.rs` SHA256 `72dbdbc3ff385198b21814cf26512fd757ddc256bc5fc99fa8213dc02f026cd3`；原 TRY1 JSON parse 失败、TRY2 PASS，原失败未输出 subprocess stderr；历史根因未知，不能靠新一次 PASS 关闭 |
+| 原 C1 review | output SHA256 `b110df54dbe47f75636ef98fbbabc7a1f4e4e74c1585ae207844a4930b13cafd`；结论 FAIL，不追写成 PASS |
+| 发布次序审查 | 本地 Claude `2891a30b-0b77-417a-b18e-c18591bc9236`：`SOURCE_BASELINE_VERDICT: PASS`、`RELEASE_ORDER_VERDICT: FAIL`、`VERDICT: FAIL`；manifest `724b5d4f137838722582d2689122b9fad98e6c340475ce7a411c865ced19a1bd`，output `72719067e04e448dcf9bd5c3ad47281e27f44e1cd6fb9cf1c9c59f215cbe96fe` |
+| FIX04 保存候选 | ingress 基线 SHA256 `6ef6f6aa2d4dbf2374f9764039f83a981c8140838d4e4903eaa220500e48cd2c`；仅在 `from_payload` 与 `from_payload_with_hint_policy` 定义前加 `#[cfg(any(test, debug_assertions))]`，候选 SHA256 `2b7aa33698c2072d160cc6bea7801ffb8fb180a13bb0ebe78901ff888b7bb778`；不能将其提前放入 FIX05 |
+| FIX04 迁机前保存像 | 原native stash `c763911e0c73699ad5f739309c203da3945a7405`包含两cfg候选、本计划旧稿SHA256 `5316f6478095374fdb33150504386105bae85de209fa2e3955bc9ea5439e8fa0`及status旧稿 `8d2d1193cea451230e84be04971ad5ea321f083eebdd0c603e730acabb3621cc`；只在当前交付机器，未推送且接收方不能假定可用。恢复只能精确取当前卡路径，不能stash-pop整份治理。 |
+| FIX02 保存候选 | 原 native stash `988ded20adb6be7ebbc43ad195fd55768ed69a26` 仅在旧机器；不能假定远端含该对象。按 FIX02 卡的函数/断言重建时先核当前来源并重新审查，不把新文件当旧已测候选 |
+
+这些摘要可以随仓库迁移，但不是原始输出本身。接收方如需 carry-forward，必须取得并核验原件/manifest/脱敏衍生件关系；只有摘要或旧 `/tmp` 路径时记录「原件不可得」，不能重造历史 PASS。原 SHA256 `217cea13519e3b9e8e23e818e669f8f73c5b5391921018f460a68a32a186484b` 的更早交接包已丢失，不是本次可获取产物。本机旧绝对路径只作历史定位线索；当前执行合同、工具链、数据库、服务、凭据与预算须在接收机器重新核验。
+
+### 发布顺序与待决事项
+
+合法恢复的**候选**顺序是：
+
+`FIX01(done) → FIX05 → FIX04 → FIX02 → FIX03 → 计划最终资格 → 终态登记及受控整合 → 原 LTR10 的资格前置闭合`。
+
+FIX05 前需要只读的 `DEP-QUAL-F2-ATTRIB` 决定与当前本地Claude ER03；ATTRIB可以明确为unknown，不代表P1关闭。真正的 `DEP-QUAL-F2-CLOSE` 在FIX05或另一个具名FIX实际C/D及关闭审查之后，且在FIX04之前；FIX05不依赖CLOSE。若F2不同根因，先登记新的FIX卡、写集与独立发布顺序；若unknown仍保留CLOSE阻塞FIX04和最终资格，不能靠FIX05全量一次PASS关闭。FIX05自己的实际新失败/flake仍按ER10 STOP，不能以F2另记为由放行。新F2卡不受FIX05唯一warning例外覆盖，必须另取得其具体发布决定。不得将不同缺陷合并成 G08 家族、移植 Mega G13，或省略各卡 patch/C/D。
+
+**DEC-QUAL-05-RELEASE-WARNING（pending，非已批准 EX）：** 既定 release 零项目 warning 门使两种顺序均不合规：FIX05 先发布会留下 ingress 两方法的既存 dead_code；FIX04 先发布又留下未关闭的 F1/F2 P1。最小待决事项仅是：是否允许 **FIX05 这一次独立版本发布**在 default/keyring release 构建保留 b73 的 `from_payload`、`from_payload_with_hint_policy` 这一个具名 dead_code 诊断，紧接着由 FIX04 的下一 patch 消除。它不是模板 G-* waiver、不是第三方 proc-macro 提示，也不允许其它 warning、全量失败、Clippy warning 或未关闭 P1。用户本次要求写卡、main 提交和跨机开发，**未等同批准此例外**。接收 Agent 先完成可独立的只读核验及候选设计，再向用户取得具体决定、记录原话/UTC与范围，并获得真实本地 Claude 的发布次序 PASS；在此之前 FIX05 不进入实现/A/C/发布。若决定维持零警告，保持阻塞并提出新可审方案，不擅自扩大例外。
+
+### 接收 Agent 的第一轮动作
+
+1. 定位原生 Libra 仓库，核 main、工作区、index、远端、提交祖先与实际写者；保留 COV/OG、SCAP 等上游成果以及未知改动。原工作区 `7541e9ba...` ahead 10 的 scoped-traces 历史与本计划修复来源分开，禁止将整条旧本地 main 推到远端。独立 clone 的 `.libra` 必须是实目录，不能采用共享 HEAD/index 的 worktree。
+2. 读取当前 AGENTS、CLAUDE、plan-template 和本入口，核原生 CLI 版本、vault 签名、DCO、gh 权限及 workflow。只把 `gh auth status` 的有效 repo/workflow 权限作为能力证据，不能再误判为不能使用 `gh release`；实际动作仍核返回值与远端 ref。
+3. 完成 F2-ATTRIB 的只读归属决定（允许明确unknown但不关闭P1），审计 F1 的 `ClientStorage::init` 调用者、所有 `Storage` 方法和错误映射，再冻结 FIX05 实际 I/AC/VER/规模。下面的窄实现路线不是对未实现方案的 PASS；若超出卡范围，先 ER03 拆分。
+4. 取得 DEC-QUAL-05-RELEASE-WARNING 决定和本地 Claude 准入，再实现 FIX05。两份 env 文件缺失、所需 live 凭据缺失或新机器预算无依据时，先完成无依赖的准备，再报告具体缺项，不能 skip 对应必需门。
+5. 每卡把源码、验收、Claude、提交、main push、版本 tag/Release、CI/D分别记账。每次 main push 前重新核远端；有新增提交先原生前滚整合并重验受影响门，不 force。用户在另一机器 main 开发不代表可以并发发布；接收方是 Libra 当前唯一实现/发布者，跨仓 root 继续 Mega2，共享协议修改须先协调。
+
+### F2：先归属、后关闭，诊断由已准入FIX05承载
+
+`DEP-QUAL-F2-ATTRIB`只读核原case `command::reset_test::reset_pathspec_from_file_missing_path_errors`、原TRY1退出断言已过而JSON解析失败/TRY2通过的原件缺口及当前控制流；本地Claude须给出「同一机制 / 独立缺陷 / unknown」具名决定。unknown允许完成归属登记，但不是根因证明或P1关闭。该只读阶段不得改跟踪文件或启动Cargo；不新增独立1800秒窗口。
+
+只有FIX05本身获准后，才由FIX05在已登记 `tests/command/reset_test.rs` 中补失败时的合成stdout/stderr/exit诊断，保留原命令、参数、JSON/code/exit断言，禁止剥离Warning、过滤前缀或弱化断言。诊断属于FIX05自己的VER-4完整reset模块，单次 `source .env.test && source .env.live-test && cargo nextest run --test command_test -E 'test(command::reset_test::)' --no-fail-fast --retries 0`，编译与执行计入其已准入A预算；其全量A/C继续保留真实并发，不以单case通过替代。诊断输入、资源归属及执行器须在该卡ER03中审定，无前置跟踪写集空档。
+
+`DEP-QUAL-F2-CLOSE`须真实证据及本地Claude明确关闭：同机制时依赖FIX05完整C/D；独立缺陷依赖另立FIX的完整C/D；未知时保持P1/阻塞FIX04。新的受控实验只能证明当前机制，不能补造已经缺失的历史stderr，也不能把未复现/原native retry成功写成旧C1接受。归属与关闭是两个不同节点，故不存在FIX05等待自己的环。
+
+### Task FIX-LTR-05: 存储配置读取失败时停止错误的本地降级
+
+**Task type:** `implementation`
+
+**Lifecycle / Acceptance:** `blocked` / 空（已登记任务定义；DEC-QUAL-05-RELEASE-WARNING、F2-ATTRIB与本机ER03/Claude准入待；无源码/A/C/提交/版本）
+
+**Description:** 单一行为轴是对象存储配置解析失败的 fail-closed 语义。普通解析/数据库/解密错误不能自动创建可继续写入的 LocalStorage，也不能用额外 stderr Warning 破坏 machine/JSON 输出。保留明确 local-only、合法 remote 配置、配置角色隔离及 COV/OG 已有 GlobalSchemaFuture 处理策略。优先审计保持 `ClientStorage::init -> Self` 签名的私有失败后端方案，避免把现有约99处调用点改成新的 fallible API；不是只移除 eprintln。候选后端必须审计并覆写所有可能返回成功/执行副作用的方法，尤其 `exist_checked`、`object_size`、`heal`、`evict_local`、`delete_payload` 的默认实现及其batch路径；legacy bool/search 方法不能将未知持久化状态当成功或删除依据。实际调用链若无法在本卡写集内保证正确性，先拆卡，不以返回 false 或空集合掩盖错误。
+
+**Out of scope:** ingress cfg 属 FIX04；reasoning fixture 属 FIX02；MCP worker teardown 属 FIX03；F3/BrokenPipe 不混入。F2 不同根因时另卡。无 schema 迁移、无全局 `ClientStorage::init` 签名重构、无新增依赖、无延长 SQLite busy timeout、无额外重试，也不把配置读取错误假装成配置不存在。
+
+**Current evidence:** 上表F1及实际fetch失败可核；历史锁owner/SQL仍未知。R1本地Claude已识别以下真实源码限制，故“只加一个失败后端”的设计未获准：①env未设置时resolver仍读repository DB，锁住时无法区分local-only与remote，直接fail-closed可能把普通local操作变成另一错误码；②`src/utils/util.rs::cached_objects_storage`按路径永久缓存ClientStorage，一次busy不能永久毒化长进程；③`src/command/fetch.rs`先write_pack_and_index，再objects_storage，单后端不能保证pack/index零副作用；④Storage的exist_checked默认折叠bool，object_size默认Ok(None)，delete_payload默认Ok(())且obliteration driver可能先unlink。`GlobalSchemaFuture`另有既定策略，不能顺带改变；create_storage_backend中的builder panic也须在同一配置失败轴内移除，不能在被改函数保留生产panic。
+
+**设计准入待办（不是已通过的粒度结论）：** 先完成VER-6，只读确定实际缓存恢复、配置busy政策与写入前检查的落点。下列I是3生产文件候选范围，不表示实现已自洽。原local-only正常读取必须继续成功；配置busy时若需要改变既有local命令错误码/可用性，必须先提交明确兼容方案与具名用户决定，更新本卡AC/双语文档/测试，不能直接改旧预期让新错误通过。所有普通配置/构造失败应有安全错误路径；不能把未知状态写成“没有remote”。若无法在本轴下完成、需要改Storage trait/其他删除调用者或突破3文件候选，先更新I/G-*并真实ER03，必要时拆卡。
+
+**Acceptance criteria:**
+
+- [ ] AC-1: 普通配置解析错误不产生可操作的 LocalStorage 后端。
+- [ ] AC-2: 经ClientStorage/Storage的写入和状态变更拒绝失败配置；fetch在pack/index安装前完成同一配置检查，无错误成功及本卡调用路径的对象/index/ref副作用。全局绕过Storage的删除路径先VER-6核清，不把此条伪称覆盖所有命令。
+- [ ] AC-3: machine/JSON 失败输出保持原结构与退出约定，不夹入未结构化 Warning。
+- [ ] AC-4: 错误诊断不泄漏配置值、凭据或解密原文。
+- [ ] AC-5: local-only配置可正常读取时保持原可用行为；DB busy无法判定local/remote时不得静默降级，行为/错误码兼容方案先审定，未经具名决定不改变既有local命令契约。
+- [ ] AC-6: 合法 remote 配置保持原存储选择与持久化行为。
+- [ ] AC-7: COV/OG 的全局 future-schema/配置角色策略保持原契约。
+- [ ] AC-8: 配置瞬时失败不被路径缓存永久固定；配置恢复后同一长进程按已审定策略恢复，无自动无限重试。
+
+**Verification:**
+
+- [ ] VER-1: `source .env.test && source .env.live-test && cargo nextest run --lib -E 'test(utils::client_storage::)' --no-fail-fast --retries 0`；完整模块非零，新增 `storage_config_failure_` 用例覆盖受控真实 SQLite 锁、失败后端全部方法、无落盘副作用、canary不泄漏、local/remote有效路径。使用同步屏障证明锁持有，保持原200ms，不用延长timeout掩盖故障。
+- [ ] VER-2: `source .env.test && source .env.live-test && cargo nextest run --test command_test -E 'test(command::fetch_test::)' --no-fail-fast --retries 0`；完整fetch模块非零，原machine/JSON、code、exit断言保持。
+- [ ] VER-3: `source .env.test && source .env.live-test && cargo nextest run --test command_test -E 'test(command::output_flags_test::)' --no-fail-fast --retries 0`；完整输出模式模块，不能靠过滤stderr使其通过。
+- [ ] VER-4: `source .env.test && source .env.live-test && cargo nextest run --test command_test -E 'test(command::reset_test::)' --no-fail-fast --retries 0`；完整reset模块；F2诊断、归属和已有断言分别记录，未证明根因不记修复。
+- [ ] VER-5: `source .env.test && source .env.live-test && cargo nextest run --test compat_global_config_schema_future --no-fail-fast --retries 0`；完整COV/OG兼容目标，保留权限、只读与future-schema断言。
+- [ ] VER-6: 准入前逐方法/调用者只读审计 `Storage`、`ClientStorage::init`、util缓存、fetch写入顺序、exist_checked/batch、object_size、先unlink后delete_payload、bool/search与错误输出映射；以当前源码列出可能吞错的方法、对应真实测试及残余限制。发现写集外消费者违反fail-closed即ER03，不仅审计get/put。
+
+**Full-suite trigger:** T-1：跨命令共享存储核心；A、C均完整默认套件，沿本文双env/nextest原命令；不以focused PASS替代。
+
+**Dependencies:** `FIX-LTR-01`、`DEP-QUAL-SOURCE`、`DEP-QUAL-PUBLISH`、`DEP-QUAL-F2-ATTRIB`、`DEC-QUAL-05-RELEASE-WARNING`。F2-CLOSE不是本卡前驱；独立缺陷必须另外登记其FIX-ID和边；不以未来FIX04的C/D为前驱，避免环。
+
+**Deliverables:** 单轴生产修复、完整测试、下列同卡文档与证据摘要；不是仅输出诊断报告。
+
+**Implementation write set:** 候选 `src/utils/client_storage.rs`（配置失败路径、消除该路径panic及模块测试）、`src/utils/util.rs`（缓存失败恢复与相邻单测）、`src/command/fetch.rs`（必要的写入前同轴检查及相邻单测）；VER-6审定前不得实施；`tests/command/fetch_test.rs`、`tests/command/output_flags_test.rs`、`tests/command/reset_test.rs`（诊断/同轴回归）；`docs/commands/config.md`、`docs/commands/zh-CN/config.md`、`docs/commands/fetch.md`、`docs/commands/zh-CN/fetch.md`、`docs/development/commands/config.md`、`docs/development/commands/fetch.md`、`COMPATIBILITY.md`、`tests/INDEX.md`、本计划、`docs/development/plan/plan-status.md`仅本计划行。网站同卡范围为已定位libra-backend的 `apps/tanstack-app/content/docs/commands/config.en.md`、`fetch.en.md`（本机当前仅有英文对应页，不虚构不存在的zh文件），在真实cf分支按ER06a交付；接收机器先核实际文件/命令/部署。若受影响公开命令或错误码超出上述清单，先逐文件补I并ER03，不遗漏同卡文档。
+
+**Release write set:** Inherited；当前 `Cargo.toml`、`install.sh`、`install.ps1` 三版本面及工具链刷新 `Cargo.lock`、artifact；以执行时 `compat_version_surface_sync` 为权威。
+
+**Files likely touched:** 与I/R相同；不修改ingress、reasoning helper、MCP worker或模板。锁测试须防env优先级遮蔽真实DB路径：用受审隔离guard清除合成LIBRA_STORAGE控制变量、保存并恢复原环境，匹配env/cwd串行lane；如新增serial影响 `tests/SERIAL_REGISTRY.tsv` / `.config/nextest.toml`，先逐文件补I并按仓库生成脚本重生成，ER03后才能修改，不手改并发组来掩盖故障。
+
+**Docs and compatibility impact:** 这是用户可见的错误处理变化；先中文后英文，同卡同步config/fetch、开发说明、COMPATIBILITY与网站。明确「未配置remote」与「读取remote配置失败」的区别、错误后的恢复指引及machine输出；保留GlobalSchemaFuture已有特殊策略。不预造新的错误码；若需要新增，先更新I、错误码文档及对应Display/CLI测试。网站命令/typecheck/build、Claude、签名cf提交/push和部署HTTP均实际核验，缺外部条件不能宣称文档完成。
+
+**Rollback mode:** `immutable-release`
+
+**Migration and rollback:** 无schema迁移；已发布提交/版本不可撤回，若回归则新patch前滚。失败配置下不得新写数据；用户修正配置后重新发起操作。不得自动降级、重试、移除数据或重置已有ref。
+
+**Security and privacy:** 不降低远端持久化保证，不输出secret/配置值/真实token；测试用合成canary与owned隔离库，失败清理须证明所有权。`exist=false`不能授权危险删除或把未知远端状态当已确认不存在。
+
+**Performance budget:** 维持现有200ms配置DB锁上限，不增加重试，不新增无界扫描。F2诊断归入VER-4，无额外窗口；FIX05 A/C各候选一次10800秒，包含编译、listing、全部门、release构建、安装与资源后检。这些基于旧机器暖缓存耗时，仅为待审上限；新机必须先核工具链/资源/缓存与具体命令成本，由本地Claude准入。旧claim不能复用；未预审、冷缓存超预算或失败均STOP/ER03，不在claim外预编译或到时续窗。
+
+**Estimated scope:** `pending VER-6`；候选3生产文件（client_storage/util/fetch），随附测试/双语文档完整登记。尚未通过G-04/ER03；冻结实际落点、文件数和恢复自洽性后填正式S/M，禁止以本次文档PASS代替实施准入。
+
+**Version increment:** `patch`；当前0.30.87之后的0.30.88只是未被占用时的候选，必须现场核main/tag/Release；不得把本交接文档提交当版本占用。
+
+**Release boundary:** `independent`；独立完整C/D及下一patch，不合并FIX04。
+
+**C/D coverage from:** `self`；实际C/D后置证据由FIX04重新开工时在本计划与plan-status本计划行补记，不新建未登记补记提交。
+
+**Granularity（未准入候选，禁止作为G-* PASS消费）:** `type=implementation; axis=配置读取失败时对象存储fail-closed; recovery=immutable-release前滚同轴修复; complete=pending VER-6; self-contained=pending VER-6; AC=8/8; VER=6/8; landing=pending VER-6; prod-files=3候选; scope=pending VER-6; deps=FIX-LTR-01,DEP-QUAL-SOURCE,DEP-QUAL-PUBLISH,DEP-QUAL-F2-ATTRIB,DEC-QUAL-05-RELEASE-WARNING; writeset=串行于FIX04之前; release=independent; split-from=FIX04-C1-F1; exception=N/A`。接收方必须把pending项变成真实满足模板的正式字段并获得本地Claude ER03 PASS，才可实施。本次交接审查只评价缺口/要求登记是否准确，不准入不自洽设计。
+
+**明确的release profile门：** A/C均运行 `source .env.test && source .env.live-test && cargo build --release` 及 `source .env.test && source .env.live-test && cargo build --release --features keyring`。项目warning默认零；只有DEC实际获批时才按其唯一FIX05版本/两方法诊断范围核对。除此之外任何项目warning均STOP，不能把候选例外写入通用模板。
+
+### FIX04、FIX02、FIX03 的接续细则（覆盖旧开工快照）
+
+- **FIX04：** Dependencies现为FIX05完整C/D、DEP-QUAL-F2-CLOSE已审定关闭、SOURCE/PUBLISH。从实际已发布main重新建源；仅两cfg与本计划/status行，不携带helper5025。原A1、源B、自己ER05仅在源与覆盖未变且原件可核时限域carry；失败C1的bump/lock、全量、release构建、安装不能继承。先登记当前恢复及新预算，Claude PASS后才claim；default与keyring release必须零项目warning，之后每卡继续零warning。版本只能在FIX05实际版本上patch+1。
+- **FIX02：** Dependencies仍为FIX01、FIX04。只恢复 `tests/helpers/reasoning_artifact.rs` 的索引结清方案，不能stash-pop旧两份治理/旧bump；无stash原件时按卡片重建并新审新测。它的两个真实消费者、shared fixture全量触发、原timeout/断言均保留。A2/ownR2不是新源C/D；新版本是FIX04实际版本+1。
+- **FIX03：** Dependencies仍为FIX02。先按现有卡解决worker PID/身份/PGID/父进程的完整teardown，不能按名字kill或把父wait当worker退出。完整MCP、full、doc、network原3例及ownClaude/C/D不省略；新版本是FIX02实际版本+1。F3等独立风险若阻断门，先另卡，不把手工清理当产品修复。
+- **计划最终资格：** 五张实现卡分别完整C/D后，在FIX03最终发布merge/main树完成独立最终fmt/clippy/full/doc/network与实际Claude资格审查，再做原登记的终态文档提交及其真实D。用户在main开发时，原文「merge树=被测树」解释为实际main提交树=最终被测树；遇上游变化先整合重验，不用文档提交掩盖代码漂移。终态不得只停在本机安装成功。
+- **受控整合：** 最后将这些实际发布提交与原scoped-traces未发布历史精确整合，逐文件保留COV/OG/SCAP等上游成果、签名/DCO和无关WIP；原7541e9ba/ed566b0相关合并签名政策与当前写者交接仍须具名处置。此步骤不等于直接推送原main的整条ahead历史。
+
+### 原 scoped-traces 主线仍需的跨仓前置
+
+本资格链闭合只满足 `DEP-TR-QUAL-REPAIRS`（目前登记在原工作区未发布治理中，远端main原计划尚无此边；受控整合前不得假定远端已登记）。LTR10另外需要 `DEP-TR-H0`、`DEP-TR-H1`、`DEP-TR-WRITERS` 和独立的 `DEP-TR-LIVE-SERVICE`；LIVE含持续服务owner、fixture寿命和可用性，并不由一次H1 PASS替代。Mega2剩余链为 `MTR11 → MTR40 → MTR13 → MTR39 → MTR92 → MTR12/H1`；此前MTR103已真实发布v0.42.75，但不等于H1。H1要记录真实服务SHA/配置摘要/端口/认证身份和owner，提供HTTP/SSH scoped Git、两身份/target权限及持续fixture；不得用内部模块PASS或普通服务已启动代替。之后按原计划 `LTR10 → LTR11 → LTR12 → LTR01/H2`，前3卡为原REL-LTR-PUSH子卡，LTR01才是唯一发布点；本main文档交接不扩大子卡push/bump/tag权限。
+
+### Task DOC-LTR-02: 跨机器前置任务定义交接
+
+**Task type:** `docs`
+
+**Lifecycle / Acceptance:** `in-progress` / 空（本次用户明确要求，仅任务定义与迁机交接；不宣称FIX05准入）
+
+**Description:** 将当前失败、FIX05及后继卡细则和未决授权完整写入本文件，单独signed/DCO提交并推送main供另一机器接收；保留所有旧失败/STOP及已消费预算。
+
+**Out of scope:** 不实现产品、不改变版本/lock、不批准警告例外、不修改原scoped-traces或网站文件、不取消任何原卡的C/D。
+
+**Current evidence:** 用户2026-10-26明确单文件/main交接指令；当前来源、原件hash和真实失败见本入口。本节是提交前任务定义快照；先冻结最终正文并执行门，随后真实本地Claude ER05，实际终态/session/输入hash写入同一signed提交的message及仓外原件，保持被测/受审/提交正文逐字一致。以下pending不冒充未来验收，最终状态由后继既定同步补记。
+
+**Acceptance criteria:**
+
+- [ ] AC-1: 前置任务、依赖、未决授权和迁机证据缺口均明确登记。
+- [ ] AC-2: 原失败、STOP及预算历史保留，不写未来PASS。
+- [ ] AC-3: 提交仅本文件，main父提交是现场核验的远端，签名和DCO真实核验。
+- [ ] AC-4: 接收方可从远端main取得同一文件与提交。
+- [ ] AC-5: 该main SHA实际base全部8个job及CodeQL两个job的run/job/attempt终态逐项核验；失败STOP，pending不计完成，现场workflow变化重核映射。
+
+**Verification:**
+
+- [ ] VER-1: 原生diff/逐文件hash确认唯一文档变更，结构、任务字段、依赖无环及相对链接检查通过。
+- [ ] VER-2: 本地Claude审查当前全文与差异，明确 `VERDICT: PASS`；P0/P1关闭，P2具名处置。
+- [ ] VER-3: `source .env.test && source .env.live-test && cargo nextest run --test compat_agent_architecture_guard --no-fail-fast --retries 0`，完整现有目标非零；文档消费者扫描若发现其它受影响target，先补门及预算。
+
+**强制本地门：** `cargo +nightly fmt --all --check`、`cargo clippy --all-targets --all-features -- -D warnings`，加VER-3完整target；编译均计入本卡一次窗口。
+
+**Full-suite trigger:** `N/A`（no-release、仅计划文本；自己的nightly fmt/strict Clippy及实际文档消费者不可免，产品完整C由FIX03覆盖）。
+
+**Dependencies:** `DEP-QUAL-SOURCE`；本次用户明确单文件/main交接，不依赖未来FIX05完成。
+
+**Deliverables:** 本文件的任务定义与跨机交接。
+
+**Implementation write set:** 仅 `docs/development/plan/plan-20261025-qualification.md`。本次单文件要求优先于通常同批status行同步；后置状态由root既有协调写集或下一张实施卡补记，不带原status全文。
+
+**Release write set:** `N/A`
+
+**Files likely touched:** 仅上述一文件。
+
+**Docs and compatibility impact:** 无用户命令/配置/协议行为变化，命令双语与网站N/A。
+
+**Rollback mode:** `immutable-release`
+
+**Migration and rollback:** main推送后仅前滚更正文档，保留原失败，不回退远端或改tag。
+
+**Security and privacy:** 正文仅源码锚点/摘要/hash，不含env/token/私钥；仓库不新增证据目录。
+
+**Performance budget:** 本地一次3600秒，包含nightly fmt、strict Clippy、文档消费者target和实际结果核对；编译计入，失败STOP。缓存/工具链在claim前确认；本次是新文档门，不重置旧FIX04窗口。具体执行器及输入先审查。
+
+**Estimated scope:** `S`（1文档，无生产落点）
+
+**Version increment:** `N/A`
+
+**Release boundary:** `no-release`；按用户指令main独立文档交接，无bump/tag/Release；实际main base/CodeQL仍观察，未触发工作流记N/A。
+
+**C/D coverage from:** `FIX-LTR-03`（自身文档门/main D另记；此前最多locally-accepted，文件已提交不等于产品或计划完成）。
+
+**Granularity:** `type=docs; axis=跨机器前置任务定义交接; recovery=immutable-release前滚文档; complete=yes; self-contained=yes; AC=5/20; VER=3/20; landing=0; prod-files=0; scope=S; deps=DEP-QUAL-SOURCE; writeset=本文件独占; release=no-release; split-from=用户20261026迁机交接; exception=N/A`
+
+### 2026-10-26 修订登记
+
+本轮正式登记FIX05（仍blocked）与DOC02，新增DEP-QUAL-F2-ATTRIB/CLOSE及pending决定，明确FIX05→FIX04→FIX02→FIX03条件顺序、原计划H1等独立前置、main分工与单文件提交范围。原四实现卡统计1/4保留在历史段，当前是1/5；文档卡不计入实现卡分母。旧正文的feature PR、旧来源和已消费预算为历史执行记录；本入口覆盖当前接续要求。文档自身Claude/本地门/提交/main D必须待实际取得后记账，不能预填。
+
+
+## 既有任务与历史执行记录
+
+以下保留已有卡片及全部失败历史；旧来源、feature PR、已消费窗口及旧统计按其日期理解，当前接续要求见文首2026-10-26入口。FIX04 Dependencies/Granularity已补FIX05/F2边，原字段在末尾原样保留。
+
+> **FIX04 C1实际退出终态（2026-10-25 18:59:44 UTC）：** FIX04 C1的精确退出已实际执行：本地Claude退出R1 session ff79d09e-3485-4fdb-9316-258cd5d0b614四项PASS、50输入重核；root采纳后，原生restore及外层工具18851于2026-10-25 18:57:47 UTC实际exit0。四个版本/lock逐字等于published b73/.87，四个0664模式保持，原生stash list确认988ded20及完整列表不变；七路径失败树已在持久私有位置按SHA256/MANIFEST及模式补充保存。两cfg及其余全部tracked blob/mode、原Mega9/publisher9/原Libra4路径WIP保持，index空，仅余本计划/本计划status行/ingress三个脏路径。这是退出执行事实，当前等待退出终态增量单审；不授任何新A/C、commit/push/tag/Release。FIX04原C1机械11阶段0但native审查四FAIL、root STOP保持，Lifecycle仍blocked/locally-accepted，仅旧A1/源审限域有效；storage错误回退P1、reset实际stderr不足暂定P1与其它具名风险尚未解决，资格1/4、原scoped-traces0/26不变。失败C1已无active bump；后续独立Mega102须在本次终态增量单审及自己的具体C2合同通过后才claim。
+> 下方候选的“待审/未执行”属于原时点历史，不覆盖本段实际结果；本次增量审查尚未发生。
+
+> **FIX04 C1真实FAIL/STOP与精确退出候选（2026-10-25 18:47:47 UTC，未执行）：** FIX04原C1于2026-10-25 18:10:38 UTC结束，11阶段exit0、私有安装.88及资源后检exit0，5348.666525/10800秒；外层工具96753实际exit0。完整10761身份/21原ignored保留，4个flake/5个失败尝试后native重试成功；实际本地Claude session c7f9fbae-734f-416c-9d9d-3650ede3f824的四项判定全部FAIL，root于18:17:28 UTC记录STOP，C不接受。F1 P1为storage配置读取错误后无条件LocalStorage回退并污染machine stderr；F2暂定P1为reset missing-path失败未保留实际stderr，根因未知；F3 stdin fixture race与F4未执行accept脚本列P2。所有旧FAIL/STOP、A1两flake、37运行时覆盖缺口及21 ignored保持，历史SQLite锁owner/SQL与C2数据库根因未证。本次仅候选RB-FIX04-EXIT-C1：先保存七路径失败树及SHA清单，再用原生Libra精确恢复本卡四个未发布版本/lock到原before-bump（逐字等于b73/.87），保持两cfg和其它全部源码、原stash988ded20、两仓原WIP。经本机Claude EXIT/ER12/H0/VERDICT PASS和root采纳才执行；不reset/force/stash-pop/commit/push，不新开A/C，不授.88再次发布。退出成功仅释放本次失败C1发布占用，FIX04仍blocked/locally-accepted，资格1/4、原scoped-traces0/26不变。后续F1/F2/F3须先审定合法独立修复与依赖；不得把无G13的本仓改成聚合，也不借G08归并独立缺陷。Mega102自己的ER05已PASS，独立C2仍需退出终态与自身具体执行合同PASS。
+> 下方日期段均保留原时点事实；本段只提出退出，不把未执行动作写成完成。
+
+> **FIX04自身审查实际终态（2026-10-25T14:24:41.918607+00:00 root采纳）：** 本地Claude `e76e3d02-d544-4259-9f2b-42a937cc49e9` 于14:22:16.368832Z给出ER05/H0/VERDICT三PASS，P0/P1=0；root实算73输入并承接五项P2。源码仍仅两cfg，A1原2个native flake、37个runtime覆盖缺口和1个被断言负例原样保留，未证明baseline/历史根因。最终C执行审查、bump与全部发布C/D仍待，资格1/4、scoped-traces0/26不变。下方日期横幅和A1时点pending判断保留为历史，不覆盖本段实际终态。
+
+> **FIX04实际A1/B与资源终态（2026-10-25 14:16:54 UTC）：** fmt/strictClippy、capture436、architecture65、default/keyring release、full10761/21原ignored已核；2个原生flake和当前runtime覆盖缺口保留，自己的ER05及最终C/D待。资格1/4，未bump/提交/推送；下文旧时点“未claim/待执行”均保留为历史。
+
+> **FIX04实际恢复与实现入口（2026-10-25T12:28:29.801459+00:00）：** 本地Claude恢复R2 session 15ccf47d-7c29-42d1-be62-3515b59119ed ER03/RECOVERY/H0/VERDICT全部PASS，manifest 9fcb72036655861f6cf82c2300ab292ba507d8e878973b6fcca9b845e67ecc96、output e32e43f55b23e038ffc712ba84b00442151f5c58a3988015452c22fc72780121；P0/P1=0，P2 owner=root：审后实际收据入本段、D1终态/资源/自身审查采纳逐hash绑定、旧横幅保留为历史、keyring无release缓存须具体执行器审预算、18个远端job为root实际gh只读观察。按实际native命令完成自有.88四面精确退出为.87；FIX02三个WIP保存在stash 988ded20adb6be7ebbc43ad195fd55768ed69a26，逐blob核对且保留未pop/drop。新branch fix/capture-ingress-profile-20261025来自b73，仅ingress两cfg及两治理；helper恢复published b73字节。21份物理H0文件按受审候选同步。两次只读原生参数前检失败和stash后只读ref检查失败保留，未触发A/C；不重复stash/退出。当前源码已实现，A/B尚待具体执行，自己的ER05、C/D、提交/推送/Release均未完成；版本0.30.87。
+
+> **恢复R2候选（2026-10-25T12:23:22.622751+00:00）：** 保留R1 H0 FAIL；补完整D1终态/自身审查采纳条件、精确源hash、前驱job级收据与四卡warning门。R2待实际Claude；不授新A/C。
+
+> **FIX02 C1 STOP后新恢复候选（2026-10-25T12:03:44.446299+00:00，未采纳）：** Source审ce6fb162已证release profile根因，RECOVERY FAIL的两P1由本候选“FIX04唯一生产I特许+实际A release警告门”修订，完整ER03/H0待。当前顺序FIX01(done)→FIX04(pending)→FIX02(blocked/locally-accepted)→FIX03；四实现卡1/4，DOC-LTR01仍仅locally-accepted等FIX03覆盖，原scope-traces0/26/H1未解锁。以下旧时点PASS/FAIL/STOP与统计全保留，不倒改。
+
+
+### FIX01与DOC已发生的发布证据（R2补记）
+
+FIX01原D terminal SHA256 `4e2009fab779281e2cb2efbb09aa94ab28d0b619288c34341bca0522757c6cf9`，观察2026-10-25T05:20:51.187280Z；merge f33be958/tree90ca1d20、签名/DCO、v0.30.87和渠道二进制manifest校验均已在该原件实核。本轮重新只读取得以下job原件，仓外FIX01-job-receipts-R2.json SHA256 `c66879aa74f29da560d3fe438a4b62adb473fb3156487955e1417da94a0f8fe8`。
+
+| workflow/run | job/id | 实际结论 | 完成UTC |
+|---|---|---|---|
+| main-base/40156941519 | compat-offline-core/121060210750 | success | 2026-10-25T05:05:07Z |
+| main-base/40156941519 | compat-rustfmt/121060210778 | success | 2026-10-25T03:07:03Z |
+| main-base/40156941519 | compat-scoped-input-windows/121060210810 | success | 2026-10-25T03:17:27Z |
+| main-base/40156941519 | compat-owner-liveness-macos/121060210816 | success | 2026-10-25T03:43:09Z |
+| main-base/40156941519 | compat-redundancy/121060210836 | success | 2026-10-25T03:06:11Z |
+| main-base/40156941519 | opencode-export-sandbox-linux/121060210851 | success | 2026-10-25T03:08:43Z |
+| main-base/40156941519 | compat-clippy/121060210918 | success | 2026-10-25T03:10:44Z |
+| main-base/40156941519 | compat-network-remotes/121060210942 | success | 2026-10-25T03:30:46Z |
+| main-CodeQL/40156941508 | security-codeql-actions/121060210278 | success | 2026-10-25T03:06:41Z |
+| main-CodeQL/40156941508 | security-codeql-rust/121060210465 | success | 2026-10-25T03:38:17Z |
+| release/40157032761 | build-and-upload (libra, x86_64-pc-windows-msvc, windows, amd64, windows-latest)/121060495046 | success | 2026-10-25T03:30:45Z |
+| release/40157032761 | build-and-upload (libra, aarch64-apple-darwin, darwin, arm64, macos-latest)/121060495166 | success | 2026-10-25T03:28:24Z |
+| release/40157032761 | build-and-upload (libra, aarch64-unknown-linux-gnu, linux, arm64, ubuntu-24.04-arm)/121060495174 | success | 2026-10-25T03:19:00Z |
+| release/40157032761 | build-and-upload (libra, x86_64-unknown-linux-gnu, linux, amd64, ubuntu-latest)/121060495177 | success | 2026-10-25T03:22:18Z |
+| release/40157032761 | update-homebrew-tap/121064822971 | success | 2026-10-25T03:30:55Z |
+| release/40157032761 | upload-install-scripts/121064823276 | success | 2026-10-25T03:31:01Z |
+| release/40157032761 | request-stable-manifest/121064823359 | success | 2026-10-25T03:31:02Z |
+| release/40157032761 | verify-homebrew-formula/121064852609 | success | 2026-10-25T03:31:22Z |
+
+DOC PR636原merge收据05:42:10Z为b73e98a/tree73eba0d7；main-terminal-audit于06:48:23Z核base八job与CodeQL、network原3例及10761/21原ignored/0retry，项目warning0。其自身A/B/Claude及signed/DCO已发生，仍locally-accepted等FIX03覆盖；旧未提交/待main横幅只属历史，不回改。
+
+### 新FIX04预算依据与R1处置
+
+FIX01真实C release-build于2026-10-24T23:09:42.190321Z至23:31:27.838239Z，耗时1305.648秒；FIX02 C1从10:09:46.616474Z claim到11:24:46.666098Z进入release已4500.050秒，release只运行约551秒即因实际项目warning被停止，不能把该部分当完整build耗时。新FIX04沿用已有target、jobs=1：估算前序门4500秒、default release保守1800秒、keyring增量保守1800秒、后检180秒，约8280秒低于候选10800秒；这些是claim前可否准入的估算，不是实测保证。具体执行器审查必须核同toolchain/target/profile缓存及两release重编译范围；依据不足先ER03，不在claim外预编译、不延长已消费窗口。
+
+R1真实ER03/RECOVERY PASS、H0/VERDICT FAIL（sessionbb82411c-1e59-4e52-a7f1-930ab10005b8，output c9b9e57128d488b10393ff21be13ccbd1da5107231e486965780f0533c1413b1）保留。P1-H0由上面完整终态+采纳收据条件修订；D1现已实际GO/资源closed，ownClaude06c202a4 PASS，root于12:22:25Z采纳并独立重核stdout/编译诊断。G13仍pending。P2 owner=root：以candidate.json及before-R2保存像为权威、生成差异本脚本留存，不重跑旧生成器；ingress锁定精确SHA；FIX01 job收据与DOC当前状态已补；四卡措辞及全局warning门已补；预算按上述claim前实审；原Libra状态旧资格行由下一次原scope治理承载同步，其带日期旧快照不倒改。R2尚待实审，未恢复版本/stash/branch/实现/claim。
+
+## 本轮受审恢复动作与来源边界（未授执行）
+
+本候选以实际published b73的两个blob为底重建，不复制stash中旧WIP全文。仅选择可核的FIX01实际C/D、FIX02 A2/own/C1 STOP事实入文；FIX04是新的独立代码轴。FIX01完整收口原件root-card-closeout于05:20:51Z记done/complete，源审/C/签名/PR635/merge f33be958/v0.30.87与全部D实核；旧release warning P2作为历史保留。DOC PR636/main已实际成功，但本no-release卡完整C/D仍继承FIX03，不提前done。
+
+计划PASS后才可执行以下精确恢复。入场先读新远端，main若不是b73或v0.30.88的tag/Release已被占用则STOP/ER09重审，不覆写。实核qualification为原生独立clone .libra实目录/no.git、HEAD/origin b73、branch fix/qualification-index-drain、index空、恰七dirty/无新untracked、源/工具身份与C1保存像一致；无他人写者。已有七路径failed-C-tree和C1 final-inputs/tree7388378均保存。
+
+1. 逐一核C1的四个before-bump文件hash等于b73的Cargo.toml/Cargo.lock/install.sh/install.ps1 blob、当前四文件等于失败C1最终hash/mode；保存原件后只write这些文件的原始字节回各自前像并保持既有mode。Cargo.lock是完整已核原件恢复，不手改其版本行；不reset、改远端或他人source。核四面.87 parity与helper5025/两WIP文档字节不变。
+2. 用原生 `libra stash push -m "FIX-LTR-02 preserved before profile-warning repair" -- tests/helpers/reasoning_artifact.rs docs/development/plan/plan-20261025-qualification.md docs/development/plan/plan-status.md` 只保这三个own WIP；先核暂存空，后核stash实际object/ref/tree恰含三路径delta且helper5025可回取、七保存像完整、工作区clean。保留stash，不pop/drop。目录、新原件与对象不视为窗口重置。
+3. `libra switch -c fix/capture-ingress-profile-20261025 b73e98a77ecc7c3db1ea905ab55478785d76c041`；只应用本受审候选两个治理文件与ingress两cfg；ingress最终字节必须等于source审candidate-ingress.rs SHA256 `2b7aa33698c2072d160cc6bea7801ffb8fb180a13bb0ebe78901ff888b7bb778`。完整其它tracked blob/mode必须等于b73，尤其reasoning_artifact.rs等于published blob，不能含5025 WIP；无ed566b0或原未发布Traces治理祖先/源。无force/reset。新branch与唯一root publisher用既有独立clone/target，不创建共享Libra worktree。
+4. A/C分别只能在本机现行Mega D1实际终态/资源后检后、具体执行器单审PASS/实核toolchain/env/暖cache后唯一claim。本恢复不授FIX02 C2，不把已耗5051秒视为可用余额。FIX04实际C/D后，先精确前滚整合到新上游，再只恢复helper保存像，两个重叠治理以新published字节为底三方重建；禁止pop旧文档/旧bump。之后FIX02新的ER03决定原A2/own的有限carry及新版本/新C，不预填PASS。
+
+两原日期计划/SSOT/索引只做本地H0同步，仍由既定MTR104候选合法承载点/原LTR01覆盖，不能随FIX04推送原未发布Traces治理。当前Mega D1已于11:39:55Z真实claim，冻结的原三Mega与原Libra三治理不改；本轮九逻辑治理H0候选只能在D1协调器实际退出、资源closed，且D1自身review（原工具句柄24409）已有实际终态并完成root采纳/收据之后，按当时before hash逐项匹配采纳；任何不匹配先重建overlay并重审。A/C Cargo与发布仍root全局串行，stage/commit精确，不用commit-a/无admin bypass。新的恢复方案不放宽任何版本、测试、Review或远端D门。
+
 > **2026-10-25 04:25:21 UTC 当前：** DOC-LTR-01源码已采纳、A/B实际通过（48命令、22组help相同、874.796秒），当前`in-progress/locally-accepted`；自己的本地Claude ER05、提交与PR/main D待，完整覆盖仍由FIX03承担。FIX01已合并f33be958并发布v0.30.87，release/CodeQL实际成功，main base仍待；三实现卡0/3。以下旧快照保留。
 
 > **2026-10-25T03:14:21.976945+00:00 PR635实际合并/发布触发与文档修复候选：** FIX-LTR-01本地C所需门/完整默认10761、release build/install已核；签名/DCO head2852497、PR635全部13 checks成功后gh squash merge `f33be958dcc3266df3a6ab796ed90d1766f3cd93`，树90ca1d20与最终C相同、GitHub签名/DCO已核；人工Release/tag v0.30.87已触发release run40157032761，main base40156941519及CodeQL40156941508仍待，未done。原attempt1 eli-MI fontconfig失败与本地retry/资源缺口保留；用户移除该runner，attempt2在Mechaevo成功，非证明eli-MI已修。用户要求Libra下一提交只修104条项目Rustdoc warning，明确排除第三方proc-macro-error2。DOC-LTR-01候选见文末；三张实现修复仍0/3，本新增文档卡独立记账、由FIX03覆盖。以下旧时点记录均保留。
@@ -14,7 +295,7 @@
 
 # Libra 2026-10-25 来源资格前滚修复
 
-> ER-03 候选，尚未采纳、实施或开启测试窗口。依据 [plan-template](plan-template.md) 与仓库 AGENTS.md；按用户当前指令只使用真实本地 Claude CLI 审查，不运行隔离 Codex。本文只承接下列三个缺陷，不替换 `plan-20261015.md` scoped-traces 计划（原工作区现行未发布治理另行承载）。
+> ER-03 候选，尚未采纳、实施或开启测试窗口。依据 [plan-template](plan-template.md) 与仓库 AGENTS.md；按用户当前指令只使用真实本地 Claude CLI 审查，不运行隔离 Codex。本文当前承接下列四个修复行为轴（新增FIX04为本轮待审候选），不替换 `plan-20261015.md` scoped-traces 计划（原工作区现行未发布治理另行承载）。
 
 ## 目标与来源
 
@@ -28,8 +309,8 @@
 
 - root 是唯一写者和串行发布者。使用真正独立的原生 Libra clone（不是共享 HEAD/index 的 worktree），从现场核实的 origin/main 建立短期 feature branch。先检查类型、HEAD、远端 ancestry、工作区/索引、并发写者、身份和 vault 签名；若上游变化，先审差异并重核本卡，不覆盖新增提交。
 - 每卡独立 patch、A/B、实际 Claude ER-05、C、PR、merge、tag/人工 Release 和真实 D；不建立 G-08 家族或 G-13 聚合，不把测试修复塞进 LTR-01。未来卡的实现不得混入前一卡提交。
-- 修复 checkout 的公开写集仅本计划、基于实际已发布上游版本的 `docs/development/plan/plan-status.md` 中本计划登记行、当前卡测试文件、该卡实际版本面/工具链 lock。与原工作区未发布 scoped-traces 治理提交做 ancestry 和逐文件 diff 守卫，禁止携带 `ed566b0`、其本地治理父链或原三份治理 WIP；plan-status 只在上游版本中新增/更新本计划行，禁止复制原工作区整份文件。本文是新的独立修复计划，不复制未发布的 scoped-traces 文本到发布分支。
-- 原工作区两仓既有八份治理文件只登记事实/外部依赖，仍由原 MTR-01/LTR-01 与 Mega 后续既定 C/D 承载；其中原 scoped-traces 治理增量不属于三个修复分支的发布写集；plan-status 的新修复计划行是下述独立同步写集。新修复发布后，原工作区只通过原生前滚整合保留双方历史；若本文本地未跟踪副本与远端已发布版本碰撞，先保留快照、核同源与内容，再只处理 root 自建副本，不清理无关文件、不 reset/force。
+- 修复 checkout 的公开写集仅本计划、基于实际已发布上游版本的 `docs/development/plan/plan-status.md` 中本计划登记行、当前卡已登记测试文件、该卡实际版本面/工具链 lock；FIX-LTR-05的生产/测试/文档候选写集只按文首VER-6后冻结的正式I准入；FIX-LTR-04额外允许 `src/internal/ai/capture/ingress.rs` 两个方法定义前各加一行 `#[cfg(any(test, debug_assertions))]`，不改其方法体或生产入口。与原工作区未发布 scoped-traces 治理提交做 ancestry 和逐文件 diff 守卫，禁止携带 `ed566b0`、其本地治理父链或原三份治理 WIP；plan-status 只在上游版本中新增/更新本计划行，禁止复制原工作区整份文件。本文是新的独立修复计划，不复制未发布的 scoped-traces 文本到发布分支。
+- 原工作区两仓既有八份治理文件只登记事实/外部依赖，仍由原 MTR-01/LTR-01 与 Mega 后续既定 C/D 承载；其中原 scoped-traces 治理增量不属于五张实现卡的发布写集；plan-status 的新修复计划行是下述独立同步写集。新修复发布后，原工作区只通过原生前滚整合保留双方历史；若本文本地未跟踪副本与远端已发布版本碰撞，先保留快照、核同源与内容，再只处理 root 自建副本，不清理无关文件、不 reset/force。
 - `ed566b0` 的签名/DCO 政策仍须在原工作区 LTR-10/LTR-01/任何 push 前明确处置。新修复不以其为祖先，不借独立发布解决或掩盖旧合并政策。
 
 ### 使用规则与共享状态保护
@@ -40,48 +321,51 @@
 
 用户已明确授权为完成两个计划进行必要操作；本候选把必要的前滚修复具体化，必须先获得实际本地 Claude ER-03/H0 PASS，才按各卡新来源开始。原7200秒 claim/STOP封存，不使用剩余约2217秒，不重开旧FIX3/LTR00的3/3诊断及8/8窗口，不以换目录重置旧预算。失败处置 review 自身不授执行权。
 
-候选独立 A 窗口：FIX-LTR-01一次7200秒，FIX-LTR-02/03各一次10800秒（共享夹具真实云消费者或最终doc/network，均包含完整默认套件）；每卡最终 bump 后本地 C 各一次10800秒；FIX-LTR-03 的 C 包含完整全量、doc及原3例network。三卡实际D全绿后另有一次计划最终资格窗口10800秒，执行最终发布树fmt/clippy/full/doc/network，不以C代替模板计划完成门。上限是新独立来源的命令编排预算，不修改任何测试内部 deadline、并发组、断言或原 nextest retries。依据本机已测 build+listing+full4983秒及 strict Clippy约876秒，额外预留最终 release build/网络 feature 编译；不把冷构建慢当代码原因。本地窗口从第一条Cargo命令到本地门/构建/安装结束，包含编译和listing；PR CI、merge及Release D远端等待不计入该本地执行预算，单独登记run/job/ref，观察超时不重启作业、不记PASS。任一意外失败/超时/漂移立即保留终态并STOP，不自动再开窗口；后续只读归属与另行ER-03，不因剩余时间继续命令。
+候选独立 A 窗口：FIX-LTR-01一次7200秒，FIX-LTR-02/03/04/05各一次10800秒（共享夹具真实云消费者或最终doc/network，均包含完整默认套件）；每卡最终 bump 后本地 C 各一次10800秒；FIX-LTR-03 的 C 包含完整全量、doc及原3例network。五张实现卡实际D全绿后另有一次计划最终资格窗口10800秒，执行最终发布树fmt/clippy/full/doc/network，不以C代替模板计划完成门。上限是新独立来源的命令编排预算，不修改任何测试内部 deadline、并发组、断言或原 nextest retries。依据本机已测 build+listing+full4983秒及 strict Clippy约876秒，额外预留最终 release build/网络 feature 编译；不把冷构建慢当代码原因。本地窗口从第一条Cargo命令到本地门/构建/安装结束，包含编译和listing；PR CI、merge及Release D远端等待不计入该本地执行预算，单独登记run/job/ref，观察超时不重启作业、不记PASS。任一意外失败/超时/漂移立即保留终态并STOP，不自动再开窗口；后续只读归属与另行ER-03，不因剩余时间继续命令。
 
-所有 Cargo 门 source `.env.test` 和 `.env.live-test`，核非秘密 presence/控制项、原工具链与 Cargo 配置；缺文件或必要凭据停止相应门。延续隔离 HOME、已核 CARGO_BUILD_JOBS=1、umask0022，不复制用户凭据到仓库或日志。listing与JUnit按(target,case)精确核数、保留原ignored/重试及成功输出中的runtime skip；缺环境、缺 feature、early return不冒充所需行为通过。代码完成、自身review、提交、push、D逐项分别登记。
+所有 Cargo 门 source `.env.test` 和 `.env.live-test`，核非秘密 presence/控制项、原工具链与 Cargo 配置；缺文件或必要凭据停止相应门。产品/集成测试延续已审隔离环境、已核 CARGO_BUILD_JOBS=1、umask0022，不复制用户凭据到仓库或日志。本次DOC02仅运行源码结构守卫及fmt/Clippy，具体合同保持登录HOME原值、只设CARGO_BUILD_JOBS=1并加载双env；target主要读源码；唯一runtime守卫 `agent_kind_enum_sql_check_and_doc_roster_stay_in_sync` 自建TempDir repo/home，用CARGO_BIN_EXE_libra init后只读SQLite并显式close，实际隔离依靠测试自身HOME重定向及执行器在调用环境、双env加载后均拒绝XDG_CONFIG_HOME/LIBRA_CONFIG_GLOBAL_DB/LIBRA_HOME三个override；LIBRA_TEST_HOME在产品二进制不生效，不能充当隔离证据。通过该检查后不访问用户库/live provider。环境差异及该fixture资源终态须在准入复审确认。listing与JUnit按(target,case)精确核数、保留原ignored/重试及成功输出中的runtime skip；缺环境、缺 feature、early return不冒充所需行为通过。代码完成、自身review、提交、push、D逐项分别登记。
 
 构建缓存：独立 clone 使用自己的 `target/`，不与原工作区共享可写 target。不携带旧日志作为新证据；确认原 target 无 Cargo/rustc 写者后可复制缓存到新 target（禁止硬链接），记录工具链/配置/来源，Cargo仍在新来源重新核fingerprint。不能完成安全复制则使用冷 target，并在claim前重新审预算；不在claim外预编译来隐藏成本。当前7200/10800秒是暖缓存依据下的候选上限，不保证冷构建能完成，不得到时自动续窗。
 
 完整默认套件的唯一命令为 `source .env.test && source .env.live-test && cargo nextest run --all --no-fail-fast --retries 2`；nightly fmt为 `cargo +nightly fmt --all --check`，严格Clippy为 `cargo clippy --all-targets --all-features -- -D warnings`。所有门读取并绑定同一受控输入，不改变nextest并发/配置。
 
-每卡 A 包含其 Verification、nightly fmt及strict all-target/all-feature Clippy；触发全量的卡另跑原双env默认全量。自己的 ER-05 PASS 后，C严格按模板ER-04/08顺序：版本面parity→实际patch→工具链刷新lock→最终fmt/clippy和本卡完整全量/所需focused→`cargo build --release`→将本卡release二进制安装到仓外、每卡独立的 `install/bin/libra` 并以绝对路径核version/hash（复制+chmod0755，hash须等于本次target/release/libra）；不覆盖原工作区使用的libra或改变全局PATH→精确`libra add`及signed+DCO提交→feature branch/PR→该head的base/CodeQL全部适用job通过→squash merge并核merge SHA/tree/DCO/签名；merge tree必须等于已测bump后tree，任何上游变化或树不同即STOP并ER-03，不tag、不借旧PASS→人工Release及版本tag→release工作流与渠道artifact真实核实。遇分支保护、必需他人review或环境approval，保留实际pending状态；不使用admin bypass、不自行批准。未完成D不得done。编译诊断按实际记录；若既有future-incompat提示违反当次发布门，先独立归属，不静默豁免。
+每卡 A 包含其 Verification、nightly fmt及strict all-target/all-feature Clippy；触发全量的卡另跑原双env默认全量。自己的 ER-05 PASS 后，C严格按模板ER-04/08顺序：版本面parity→实际patch→工具链刷新lock→最终fmt/clippy和本卡完整全量/所需focused→`cargo build --release`（五张实现卡全局C⑤要求项目warning=0，唯一排除为用户具名proc-macro-error2 future提示；FIX04/FIX05另加keyring release门）→将本卡release二进制安装到仓外、每卡独立的 `install/bin/libra` 并以绝对路径核version/hash（复制+chmod0755，hash须等于本次target/release/libra）；不覆盖原工作区使用的libra或改变全局PATH→精确`libra add`及signed+DCO提交→feature branch/PR→该head的base/CodeQL全部适用job通过→squash merge并核merge SHA/tree/DCO/签名；merge tree必须等于已测bump后tree，任何上游变化或树不同即STOP并ER-03，不tag、不借旧PASS→人工Release及版本tag→release工作流与渠道artifact真实核实。遇分支保护、必需他人review或环境approval，保留实际pending状态；不使用admin bypass、不自行批准。未完成D不得done。编译诊断按实际记录；若既有future-incompat提示违反当次发布门，先独立归属，不静默豁免。
 
 ### 被测树、逐卡证据与终止链（执行前预登记，模板v2.14）
 
 1. **每卡C前冻结。** 先把已真实取得的A/B、自己的Claude ER-05、前一卡已发生的C/D写入本计划与plan-status本计划行；当前卡只写实际已知状态，C/D未知项明确pending，不预填成功、未来commit或run。完成patch与工具链lock更新后冻结全部输入；本次C就在这棵树上执行。C到提交/PR/merge之间不再修改任何跟踪文件，包括状态和证据文档，因此最终提交树必须逐字等于C被测树，merge tree也必须相等。任何漂移STOP/ER03；不以文档白名单免除这三个树相等的约束。
-2. **C/D后置证据归属。** FIX01的真实C/D、提交/tag/version/job/UTC收据由FIX02开工时在两份既定文档内补记；FIX02由FIX03同样补记。前一卡只有实际C/D全绿后才启动后继，不以文档中尚待补记的旧快照当证据。状态推进与证据更新在同一文档变更中完成，并在后继自己的C前冻结，后继C实际覆盖这些新增字节。若后继尚未开工，真实结果保持待补记，不提前执行后继、不发布单独的未登记补记提交；若后继STOP，随该次ER-03前滚修订在本计划正文同步补记前一卡已发布的C/D事实，仍用两文档既定写集与自身文档验收，不允许事实永久只留仓外。
+2. **C/D后置证据归属。** FIX01的真实C/D、提交/tag/version/job/UTC收据由本次FIX04恢复准入在两份既定文档内补记；FIX05后置真实C/D由FIX04重新开工时在本计划与plan-status本计划行这两个既定文档补记；FIX04后置真实C/D由FIX02重新开工时补记；FIX02由FIX03同样补记。前一卡只有实际C/D全绿后才启动后继，不以文档中尚待补记的旧快照当证据。状态推进与证据更新在同一文档变更中完成，并在后继自己的C前冻结，后继C实际覆盖这些新增字节。若后继尚未开工，真实结果保持待补记，不提前执行后继、不发布单独的未登记补记提交；若后继STOP，随该次ER-03前滚修订在本计划正文同步补记前一卡已发布的C/D事实，仍用两文档既定写集与自身文档验收，不允许事实永久只留仓外。
 3. **FIX03 done与计划完成分开。** FIX03自己的AC/VER、A/B、自身ER-05和独立C/D实际全部通过后才可done/complete；计划最终资格不是其AC的递归前置。随后在FIX03实际merge SHA的冻结树运行已登记的一次10800秒计划最终资格（fmt、strict Clippy、双env全量、doc、network原3例），再取得真实本地Claude来源资格PASS。该窗口不能包含之后才写出的终态文档，也不能把已发布产品树换成新的上游树。
-4. **唯一终态登记提交。** 计划最终资格通过后，在独立clone创建一笔纯文档登记提交，I精确为 `docs/development/plan/plan-20261025-qualification.md` 与 `docs/development/plan/plan-status.md` 的本计划行；R=N/A、version=N/A、无tag/Release、不改变任一产品/测试/配置/lock/版本面。该提交承接FIX03真实C/D、最终资格和三卡状态，以及它自己的真实Claude文档ER-05收据；核对实际证据，登记本终态文档自身D仍pending。它是本计划预登记终止链末端，不是第四个产品修复或新版本发布点，不替代三卡各自C/D。没有独立发布原工作区Traces治理的权限。
+4. **唯一终态登记提交。** 计划最终资格通过后，在独立clone创建一笔纯文档登记提交，I精确为 `docs/development/plan/plan-20261025-qualification.md` 与 `docs/development/plan/plan-status.md` 的本计划行；R=N/A、version=N/A、无tag/Release、不改变任一产品/测试/配置/lock/版本面。该提交承接FIX03真实C/D、最终资格和五张实现卡状态，以及它自己的真实Claude文档ER-05收据；核对实际证据，登记本终态文档自身D仍pending。它是本计划预登记终止链末端，不是第六个产品修复或新版本发布点，不替代五张实现卡各自C/D。没有独立发布原工作区Traces治理的权限。
 5. **终态登记验收。** 终态文档相对FIX03 merge树只允许上两路径；逐行证明plan-status只改本计划行，其它来源逐文件相同。该文档差异不能宣称被前面的全量覆盖：先在候选文档完成结构/链接/状态一致性验收，再获得真实Claude文档ER-05 PASS；仅追加该审查的实际session/输入hash/结论/P2处置/UTC收据，不能预填或修改其它内容。随后在含已登记ER-05收据的最终字节上重新做结构/链接/状态一致性、`cargo +nightly fmt --all --check`、`cargo clippy --all-targets --all-features -- -D warnings`，及 `source .env.test && source .env.live-test && cargo nextest run --test compat_agent_architecture_guard --no-fail-fast --retries 0`（实际非零完整target，包含读取plan-status/long的守卫）；另只读扫描全部文档消费者，若还影响其它target则执行其完整target，输入超出此两路径或超出已登记预算先ER-03。预登记本地一次3600秒，仅这些文档相关门，无新的产品全量窗口。追加审查收据以外的任何改动都必须重新审查并重跑相关本地门；不得因此自动追加3600秒窗口，超出预算先ER-03。冻结最终文档字节，精确signed+DCO提交并核签名；走feature PR，base八job/CodeQL两job全绿后squash，核提交树=merge树=最终本地门被测树（含已登记的ER-05收据）；审查原输入与唯一后置收据差异分别记录，不声称Claude读过自己后来产生的输出，再观察merge SHA的全部适用base/CodeQL。无tag则release.yml不触发，具名N/A而非success。此文档提交的产品C覆盖仅继承FIX03已发布产品树；新增文档字节由自己的本地门与真实PR/main D覆盖。
 6. **消除自引用，不静默完成。** 最终登记提交自身SHA、run ID、结论和观察UTC，只能推送后取得。依模板v2.14不再为它新建本计划提交：在下一次 `plan-status.md` 例行同步中补记，搭车既有维护提交；若到下一工作日尚无例行同步，以一笔明确的计划状态例行同步补记，属于plan-status维护，不属本计划终止链、不重启终止链。例行维护提交仍须精确signed+DCO、结构/链接/nightlyfmt/strictClippy与完整compat_agent_architecture_guard target（双env、retries0），真实Claude文档审查及PR/main base/CodeQL；不因属于维护而免门，后续若暴露其它读者则按实际影响补齐。这是库内证据落点，须实际执行；末端D未绿时不报告计划完成。原两计划接收本资格时同时登记该末端ref/D以及例行补记归属，不改原卡独立门。
 
 任何最终登记门/PR/main D失败都保留实际FAIL、STOP并前滚处置，不为截断终止链豁免失败。计划最终资格与末端文档review都必须是实际结果，不预写未来PASS。仓库内不新增证据文件/目录；摘要、SHA、计数、run/UTC与修订历史落在上述计划正文，唯一例外是第6项模板指定的plan-status例行补记。
 
-**终态B的只读执行器：** 使用仓外 `/tmp/libra-qualification-recovery-plan-20261025/terminal-document-check.py`（在该末端执行前生成、hash冻结并纳入真实Claude输入，不属于产品源码）。执行命令为 `python3 /tmp/libra-qualification-recovery-plan-20261025/terminal-document-check.py`，以已核FIX03 merge SHA、候选树及两路径allowlist为显式冻结输入；缺输入即失败。必须以原生Libra diff逐路径证明只有本计划与plan-status本计划行变化；全其它来源hash一致；卡片/索引状态与已发生原件逐项对应；本计划全部必需章节/三卡字段存在；相对链接解析到当前clone；已登记审查收据只作后置事实，不改审查结论或其它字节；保留所有旧FAIL/STOP。自动结构结果不替代人审语义和真实门结果。
+**终态B的只读执行器：** 使用仓外 `/tmp/libra-qualification-recovery-plan-20261025/terminal-document-check.py`（在该末端执行前生成、hash冻结并纳入真实Claude输入，不属于产品源码）。执行命令为 `python3 /tmp/libra-qualification-recovery-plan-20261025/terminal-document-check.py`，以已核FIX03 merge SHA、候选树及两路径allowlist为显式冻结输入；缺输入即失败。必须以原生Libra diff逐路径证明只有本计划与plan-status本计划行变化；全其它来源hash一致；卡片/索引状态与已发生原件逐项对应；本计划全部必需章节/五张实现卡字段存在；相对链接解析到当前clone；已登记审查收据只作后置事实，不改审查结论或其它字节；保留所有旧FAIL/STOP。自动结构结果不替代人审语义和真实门结果。
 
 ## 依赖登记表
 
 | ID | direction | 类型 | 对象 | Owner | 产物与可用性判据 | 证据 | 超时与失败策略 |
 |---|---|---|---|---|---|---|---|
-| DEP-QUAL-SOURCE | incoming | 上游revision | libra-tools/libra@0ca47cc147b2099ffb835ade91272c4cfe1efd21 | root | 独立clone的实际远端来源、允许差异及签名工具链已核；变化先重审 | 本文来源与精确比较记录 | 不追写原工作区，不用旧资格冒充新树 |
+| DEP-QUAL-SOURCE | incoming | 上游revision | libra-tools/libra@b73e98a77ecc7c3db1ea905ab55478785d76c041（初始0ca47cc保留为历史） | root | 独立clone的实际远端来源、允许差异及签名工具链已核；变化先重审 | 本文来源与精确比较记录 | 不追写原工作区，不用旧资格冒充新树 |
+| DEP-QUAL-F2-ATTRIB | incoming | 只读归属 | reset真实stderr缺口与当前源码 | Libra接收Agent | Claude审定same/separate/unknown决定；unknown不代表关闭；不写源码不跑Cargo | 当前待审 | FIX05前置，无新诊断窗口 |
+| DEP-QUAL-F2-CLOSE | incoming | P1关闭 | reset失败真实机制 | Libra接收Agent | 同轴则FIX05实际C/D+关闭审查，另轴则新FIX实际C/D；unknown不关闭 | 当前未解决 | FIX04前置；不作为FIX05前驱；新FIX不自动继承warning例外 |
+| DEC-QUAL-05-RELEASE-WARNING | incoming | 用户决定 | FIX05唯一版本的两方法dead_code例外 | 用户；Libra接收Agent记录 | 明确原话/UTC/范围并获本地Claude次序PASS；当前pending、非已批准EX | 2891a30b发布次序FAIL | 不获决定不进入FIX05实现/A/C/发布，不放宽模板或其它门 |
 | DEP-QUAL-SECURITY | incoming | 跨仓前置 | Mega2 plan-20261015 FIX-MTR-11 | root | 既定安全卡完整C/D及两个告警实际fixed；不改变其不自行延期条款 | FIX11已done/complete，932731d/v0.42.70；23/24实际fixed于2026-10-24 20:16:51/52 UTC，见文首真实D收据（此前open保留为历史） | 未满足不实施本计划；只做恢复治理与审查 |
 | DEP-QUAL-PUBLISH | incoming | 发布前置 | 独立clone与实际GitHub工作流 | root | 发布branch不包含原未发布治理祖先/文件；vault签名与DCO、版本面、PR/Release权限与artifact门实际可用 | 开工逐项原生核对，不能用gh浏览器登录互代 | 分叉/缺凭据/来源变化先停止归属，不force |
-| DEP-QUAL-HANDOFF | outgoing | 来源资格 | plan-20261015 LTR-10 / LTR-01 | root | 三卡独立C/D完成、FIX03 bump后C及发布后最终资格窗口全量/doc/network与本地Claude明确PASS（绑定实际merge树）、终态登记提交实际PR/main D通过并具名例行补记，再核受控整合树、原工作区受控整合/受影响门通过 | 后续真实提交/版本/远端ref/原件，当前无 | 来源资格未闭合不得解除LTR-10前置；不更改H1或替代LTR各卡门 |
+| DEP-QUAL-HANDOFF | outgoing | 来源资格 | plan-20261015 LTR-10 / LTR-01 | root | 五张实现卡独立C/D完成、FIX03 bump后C及发布后最终资格窗口全量/doc/network与本地Claude明确PASS（绑定实际merge树）、终态登记提交实际PR/main D通过并具名例行补记，再核受控整合树、原工作区受控整合/受影响门通过 | 后续真实提交/版本/远端ref/原件，当前无 | 来源资格未闭合不得解除LTR-10前置；不更改H1或替代LTR各卡门 |
 
 ## 实施顺序与发布窗口
 
-`DEP-QUAL-SECURITY + DEP-QUAL-SOURCE + DEP-QUAL-PUBLISH -> FIX-LTR-01 -> FIX-LTR-02 -> FIX-LTR-03 -> DEP-QUAL-HANDOFF`。顺序用于共享本计划/版本面的串行发布，不表示合并发布。先修确定性全量阻断，再修共享fixture，最后完成MCP测试清理与整份修复计划的最终资格。每卡真正 C/D 闭合后才发布下一卡。
+`DEP-QUAL-SECURITY + DEP-QUAL-SOURCE + DEP-QUAL-PUBLISH -> FIX-LTR-01 -> FIX-LTR-05 -> FIX-LTR-04 -> FIX-LTR-02 -> FIX-LTR-03 -> DEP-QUAL-HANDOFF`；另有 `DEP-QUAL-F2-ATTRIB + DEC-QUAL-05-RELEASE-WARNING -> FIX-LTR-05`，另有 `FIX05/具名新FIX -> DEP-QUAL-F2-CLOSE -> FIX04`，当前授权与诊断未闭合，候选顺序不等于准入。顺序用于共享本计划/版本面的串行发布，不表示合并发布。先修确定性全量阻断，再修共享fixture，最后完成MCP测试清理与整份修复计划的最终资格。每卡真正 C/D 闭合后才发布下一卡。
 
 ### 实际 D 映射与现场复核
 
 当前 `base.yml` 为PR及main/release/** push，`codeql.yml`为main目标PR及main/release/** push，均无paths过滤；实际job/if必须在每卡开工重新读取完整workflow，绑定最终head与merge SHA，不能只看workflow标题。`release.yml`由v* tag触发，当前build-and-upload有linux amd64/arm64、darwin arm64、windows amd64四个平台并通过OIDC release API上传；完整发布job/渠道探针一并核真实成功。失败前滚，不回写版本tag，不伪造未触发workflow通过。
 
 
-### 三卡共同适用的逐项D清单
+### 五张实现卡共同适用的逐项D清单
 
 每卡逐项登记run/job/attempt/ref/实际终态；不得用一条workflow success代替漏项。无顶层job if的项均适用；步骤条件和后续workflow变化在开工重新核。PR被测merge-ref、PR head和main merge SHA分开记录。
 
@@ -108,7 +392,7 @@
 
 **Task type:** `implementation`
 
-**Lifecycle / Acceptance:** `in-progress` / `locally-accepted`（2026-10-24 21:42:59 UTC：限定本卡A通过；自己的代码ER05及C/D待，非done；下方记原runtime缺口与人工资源清理）
+**Lifecycle / Acceptance:** `done` / `complete`（实际f33be958/v0.30.87与完整D见本轮已核后置事实；旧A/C/CI待快照保留）
 
 **Description:** 只更新现有完整结构字符串，使它同时保留schema_doctor、Upgrade和当前Ui排除，恢复确定性兼容测试；不改CLI行为。
 
@@ -158,13 +442,96 @@
 
 **C/D coverage from:** `self`
 
-**Granularity:** `type=implementation; axis=global-schema doctor的auto-upgrade结构oracle对齐; recovery=immutable-release前滚本卡单轴测试修复; complete=yes; self-contained=yes; AC=3/8; VER=3/8; landing=1; prod-files=0; scope=S; deps=DEP-QUAL-SOURCE, DEP-QUAL-SECURITY, DEP-QUAL-PUBLISH; writeset=三卡本计划与R串行; release=independent; split-from=新上游资格20261025实际FAIL/STOP; exception=N/A`
+**Granularity:** `type=implementation; axis=global-schema doctor的auto-upgrade结构oracle对齐; recovery=immutable-release前滚本卡单轴测试修复; complete=yes; self-contained=yes; AC=3/8; VER=3/8; landing=1; prod-files=0; scope=S; deps=DEP-QUAL-SOURCE, DEP-QUAL-SECURITY, DEP-QUAL-PUBLISH; writeset=五张实现卡本计划与R串行; release=independent; split-from=新上游资格20261025实际FAIL/STOP; exception=N/A`
+
+### Task FIX-LTR-04: 对齐同步 ingress 测试构造器的编译配置
+
+**Task type:** `implementation`
+
+**Lifecycle / Acceptance:** `blocked` / `locally-accepted`（旧A1/源审限域保留；C1审查FAIL/STOP，四版本面精确退出已执行/待终态增量审查，F1/F2及新恢复仍待，未发布）
+
+**历史退出前Lifecycle字段：** **Lifecycle / Acceptance:** `blocked` / `locally-accepted`（仅原A1/源审限域保留；C1 native审查FAIL/root STOP，具体退出待审/待执行，未发布）
+
+**历史Lifecycle / Acceptance（C1前）：** **Lifecycle / Acceptance:** `in-progress` / `locally-accepted`（A1/源B、root资源后检及自身本地Claude R1三PASS已核；两原生flake按具名P2限域承接，最终C/D未完成）
+
+**Description:** `CaptureIngressCommand::from_payload` 与 `from_payload_with_hint_policy` 只供现有 debug/test lowerer 和测试使用，两个定义却留在默认 release。仅在两定义前添加与消费者相同的 `#[cfg(any(test, debug_assertions))]`，消除真实发布构建的项目 dead_code 诊断。
+
+**Out of scope:** 不改两个方法体、可见性、生产 `from_stdin`/parse/finish、CLI、策略、测试断言或依赖；不修 FIX02 fixture/FIX03 MCP，不处理用户明确排除的第三方 proc-macro-error2 未来警告；不扩大为 release-profile integration 测试支持。
+
+**Current evidence:** FIX02 C1 的 release-build 实际输出一项项目 dead_code、涉及 ingress.rs:453/472 两方法。ROOT在警告已违背严格门时停止已核协调进程，原terminal于2026-10-25T11:33:57.665096Z记RuntimeError/STOP、5051.049/10800秒；native build 被中断，数值退出未记录，不记成功或编造0/101。此前9阶段exit0，完整10761/21原ignored/0重试/0flake，模块15、真实云1、fmt/strictClippy保留；安装/提交/推送/Release未执行。原件在仓外fix-ltr02-C1-20261025与failure目录。source审ce6fb162 SOURCE_AUDIT PASS证明唯一非test消费者在cfg(debug/test)而方法未cfg；RECOVERY_GUIDANCE FAIL的P1必须由本次全局I特许及A release gate关闭。独立源为published b73/.87，不含FIX02 helper5025候选或原scoped-traces未发布祖先。
+
+**Acceptance criteria:**
+
+- [x] 默认 release 构建不再产生项目 warning；排除项仅为用户具名第三方 future-incompatibility 提示。
+- [x] release 的 keyring 配置不产生项目 warning，保持实际发布 feature 的可编译性。
+- [x] 原 debug/test 调用者在其既有配置中仍可使用同步构造器；具体测试证据见Verification。
+- [x] 源码行为差异严格只有两行 cfg；方法体、from_stdin 生产入口及所有断言不变。
+
+**Verification:**
+
+- [x] `source .env.test && source .env.live-test && cargo build --release`；实际exit0，逐条诊断核项目warning0。
+- [x] `source .env.test && source .env.live-test && cargo build --release --features keyring`；实际exit0，逐条诊断核项目warning0。
+- [x] `source .env.test && source .env.live-test && cargo nextest run --lib -E 'test(internal::ai::capture::)' --no-fail-fast --retries 0`；完整capture模块listing与实际身份一致，0 tests/early return不得充当所需行为。
+- [x] `source .env.test && source .env.live-test && cargo nextest run --test compat_agent_architecture_guard --no-fail-fast --retries 0`；完整target非零、逐身份核对。
+- [x] 相对b73的源diff恰为ingress.rs两行cfg；既有lowerer消费者cfg与候选条件相等/为其子集，helper reasoning_artifact.rs等于b73 blob；精确I/R守卫。
+
+**Full-suite trigger:** `T-4`：同步构造器承接共享lowerer，超过6个integration target复用；A和最终bump后的C均保留双env完整默认10761/原ignored身份核验。唯一命令仍为 `source .env.test && source .env.live-test && cargo nextest run --all --no-fail-fast --retries 2`，不改timeout/retry/并发。VER为附加门，不替代全量。
+
+**Dependencies:** `FIX-LTR-01`、`FIX-LTR-05`、`DEP-QUAL-F2-CLOSE`、`DEP-QUAL-SOURCE`、`DEP-QUAL-PUBLISH`；FIX05实际C/D与F2已审定关闭后才新准入；当前字段按2026-10-26跨机入口，旧字段见历史记录。
+
+**Deliverables:** 本卡两行代码及本计划/plan-status本计划行的实际来源、审查和验收记录；原C1 STOP、旧P2接受和unknown数值exit保留。
+
+**Implementation write set:** 仅本卡额外允许生产文件 `src/internal/ai/capture/ingress.rs` 的两个cfg属性；`docs/development/plan/plan-20261025-qualification.md`；`docs/development/plan/plan-status.md`仅本计划行（以published b73为底）。这是一项卡级精确特许，不扩大FIX01/02/03原测试写集。
+
+**Release write set:** 权威版本面 `Cargo.toml(version)`、`install.sh`、`install.ps1`，及工具链刷新 `Cargo.lock`；禁止手改lock或加入其它依赖变化。
+
+**Files likely touched:** 与I/R一致，最终精确7路径；FIX02 helper候选/原scoped-traces三治理不得入本卡。
+
+**Docs and compatibility impact:** 两方法均pub(crate)，已有公开debug/test lowerer可用配置不变，无用户CLI/参数/输出/schema/协议改变；用户指南双语、COMPATIBILITY、error-codes、网站N/A。现有内部代码span注释不改，不新建仓库证据目录。
+
+**Rollback mode:** `immutable-release`
+
+**Migration and rollback:** 无数据迁移；未发布只撤精确自有cfg与本卡治理，保护保存像/stash。已发布只新签名patch前滚，不reset/force/rewrite/tag覆盖。原FIX02失败.88四面退出、三个WIP精确stash与从b73建本卡branch须先通过恢复ER03，不由本卡偷偷执行。FIX04实际D全绿后才三方重建后继治理并恢复helper5025，不能直接pop旧文档/版本面。
+
+**Security and privacy:** 原始provider frame边界不变，生产入口仍为from_stdin；不加allow、不打印body/token、不复制env到提交。只清理精确own资源，旧FIX03 worker尚未修，按既有审定形状/有界pidfd收尾与未知STOP规则。
+
+**Performance budget:** A1候选一次10800秒、命令10620秒，含fresh编译/listing、fmt/strictClippy、VER focused、完整默认、default/keyring两release profile及资源后检；C1候选一次10800秒同样含实际bump/工具链lock与最终完整门/default+keyring两release构建/私有安装。编译暖缓存来源在claim前实核，禁止claim外预编译；若实际预算无法成立先ER03，不自动续窗。两窗口必须各自具体执行器真实ClaudePASS后唯一claim，零自动重跑；不借FIX02 C1余量，不复位任何旧FIX3/LTR00窗口。
+
+**A1/B实际结果（2026-10-25 14:16:54 UTC，自身ER05待）：** 唯一A1原件`/tmp/fix-ltr04-A1-20261025`，具体执行审查session c8ad29bf-1b9a-46ed-8f8c-d4a5c3827560四PASS后才claim。十阶段native exit0：nightlyfmt、all-target/all-feature strict Clippy、完整capture 436、architecture 65、default/keyring两release构建、完整默认10761/21原ignored及其实际listing；终态执行耗时5795.491/10800秒，资源后检及root核验在同一原窗口内。终态SHA256 `2e5cfb669bba2dfe1ebe0a04c61d63d30a9f6af9c8cd6f6248a288689e6439e0`、full JUnit `0480f5861306f2682d9014561b0072d908180e73dfe7dabbb825701ccc222db7`、root-A `74b187277a94a396df429417d0e35edec2510d4fb9135b50c154a919112c790e`。source B原件`/tmp/fix-ltr04-source-B-20261025`：相对published b73，ingress source `2b7aa33698c2072d160cc6bea7801ffb8fb180a13bb0ebe78901ff888b7bb778`仅增加两cfg，方法体/断言/from_stdin不变、所有调用者条件为同条件或子集、FIX02 helper等于published基线。源B初次误猜out-of-line模块owner的检查失败已保留，纠正为实际live_pipeline.rs后核验通过，没有产品重跑。
+
+**历史A1限定与具名风险（2026-10-25 14:16:54 UTC，owner=root；当时须自身Claude裁定，后续真实裁定见下段）：** 原定`--retries 2`产生2个首试FAIL、次试PASS：`libra::command::agent::checkpoint::tests::fix_rg_scoped_01_fresh_error_mapping`；`libra::command_test::command::stash_test::test_stash_no_change_untracked_only_and_quiet_guards`；保留原始输出和JUnit，不记零失败尝试。fresh-error-mapping只观察到CatalogUnavailable，该错误合并多个连接/查询/关闭/期限原因；stash quiet只观察到SQLite code5及storage-config fallback的runtime Warning，具体锁持有者及原因未证。两组相关源码均与published b73和A1冻结输入字节相同，这不等于历史复现或无回归证明，不以机器负载解释根因。分别登记RISK-QUAL-FRESH-MAPPING、RISK-QUAL-STASH-QUIET，root在后续资格维护按ER03评估；自身审查若判P0/P1必须先解决，不预设可接受。runtime输出按本次日志身份/文字与当前未变源码逐项归属：{"optional Mega LFS endpoint absent": 1, "case-insensitive filesystem prerequisite": 2, "test-live-cloud feature disabled in default suite": 9, "Bun interpreter runtime coverage unavailable": 1, "asserted missing-interpreter negative scenario, not skipped test": 1, "explicit GitHub live fixture prerequisites absent": 10, "explicit Mega2 live server/write-root prerequisites absent": 12, "current build rejects staging non-UTF8 filename; status read path unproved": 1, "PowerShell interpreter runtime coverage unavailable": 1}；不能把默认suite PASS等同未启用live/platform分支覆盖。capture与architecture无runtime opt-out或flake。资源关闭只处理本次精确观测的known worker，实际owned/new-orphan/target均0；FIX03清理源码尚未修，不倒推旧历史进程归属。仅用户具名proc-macro-error2 2.0.1 future warning排除，项目编译warning0；上述runtime Warning作为失败原件保留，不称已修。
+
+**自身ER05实际结果与限域采纳：** 本地Claude session `e76e3d02-d544-4259-9f2b-42a937cc49e9`于2026-10-25T14:22:16.368832Z真实exit0、ER05/H0/VERDICT三PASS；manifest `cafd99c544a1d718d68b50ed170a7eac0899ad2eef217506efa84a9337757902`、output `ebd11737a87762761b0da72f71684b963fbfc86242348e73c2b001468a1b73b5`。root于14:24:41.918607Z实算全部73输入后采纳，P0/P1=0；原件`/tmp/fix-ltr04-own-review-R1-20261025/`及`/tmp/fix-ltr04-A1-root-audit-20261025/root-own-review-adoption.json`。这是审查后的实际收据；不能声称Claude事先读过本段，本两治理差异须由最终C的具体执行审查绑定并由最终被测树覆盖。两cfg源码和原A1输出不变，不借本记录重跑A或取得C资格。
+
+**五项P2处置（owner=root）：** （1）`RISK-QUAL-STASH-QUIET`：本卡C原样保留retries2并保存实际FLAKY/FAIL，最终失败STOP；资格计划完成前另按受审ER03为SQLite BUSY导致storage-config退回本地登记FIX/DEFER并取得真实baseline证据，当前锁持有者/原因未证。（2）`RISK-QUAL-FRESH-MAPPING`：同样保留native尝试和STOP规则，资格完成前为CatalogUnavailable合并原因及InternalInvariant映射登记FIX/DEFER和真实baseline，不沿用FIX02旧subagent flake结论。（3）最终C必须实际default/keyring双release、项目warning0；永久release-profile warning防回归守卫作为root后续维护，未在本卡实现。（4）本地lock/源码冻结，实际版本D四平台必须覆盖--locked/target/strip及全部渠道artifact，不能以本地两个build替代。（5）最终C包含这两份治理最新字节，C后不改tracked文件，后置事实由FIX02既有治理承载。仅用户具名proc-macro-error2 v2.0.1 future提示排除。审查所称cfg不改变debug/test语义不等于baseline复现，也不证明历史DB根因；自身审查未读的focused JUnit/listing/执行器/进程原件已由root核验，具体C审查须补充原件输入，不冒称自身审查已读。
+
+**发布状态：** 原C1不接受且STOP；实际四版本面已退出到b73/.87，保留两cfg及7路径失败像，无active bump。退出终态增量审查待；本卡仍blocked，未授新A/C，未commit/push/PR/tag/Release。
+
+**历史退出前发布字段：** **发布状态：** C1已执行全部11阶段及私有安装，但native新失败审查FAIL，root最终不接受C并STOP；候选.88未commit/push/PR/tag/Release，不能发布。精确退出四版本面的方案待本地Claude及root采纳；退出后仍blocked，未授任何新A/C。
+
+**历史发布状态（C1前）：** **发布状态：** A1与源B限域验收、自身ER05/H0已取得；独立C1具体执行器审查、最终bump后完整门、私有安装、精确signed/DCO、PR/merge/tag/人工Release和全部适用D均未完成。0.30.87未bump，FIX02旧C1 STOP及stash988ded20保留；正式资格1/4、原scoped-traces0/26/H1不变。原scoped-traces三治理不进入本分支，本卡C/D后由FIX02两治理承接，不在C后修改已测提交树。
+
+**Estimated scope:** `S`
+
+**Version increment:** `patch`（当前base0.30.87，.30.88仅未占用时的候选；actual claim前核remote/tag/Release，变化则ER09/ER03）
+
+**Release boundary:** `independent`；本卡自己的A/B、实际ClaudeER05、版本bump、完整C、精确signed/DCO、feature PR全部base/CodeQL、gh squash且merge tree=被测tree、人工版本Release/tag、全部渠道D。无G08/G13合并。
+
+**C/D coverage from:** `self`；本卡后置真实C/D由FIX02重新开工时在已登记两治理中承接并由其自身最终C覆盖，不改终止链末端FIX03的全量资格/终态登记义务。
+
+**Granularity:** `type=implementation; axis=同步ingress测试构造器的profile可用性; recovery=immutable-release; complete=yes; self-contained=yes; AC=4/8; VER=5/8; landing=1; prod-files=1; scope=S; deps=FIX-LTR-01,FIX-LTR-05,DEP-QUAL-F2-CLOSE,DEP-QUAL-SOURCE,DEP-QUAL-PUBLISH; writeset=两cfg及既定两治理+版本面; release=independent; split-from=FIX02-C1实际release警告STOP; exception=N/A`
+
+**RB-FIX04-EXIT-C1（候选）：** FIX04原C1于2026-10-25 18:10:38 UTC结束，11阶段exit0、私有安装.88及资源后检exit0，5348.666525/10800秒；外层工具96753实际exit0。完整10761身份/21原ignored保留，4个flake/5个失败尝试后native重试成功；实际本地Claude session c7f9fbae-734f-416c-9d9d-3650ede3f824的四项判定全部FAIL，root于18:17:28 UTC记录STOP，C不接受。F1 P1为storage配置读取错误后无条件LocalStorage回退并污染machine stderr；F2暂定P1为reset missing-path失败未保留实际stderr，根因未知；F3 stdin fixture race与F4未执行accept脚本列P2。所有旧FAIL/STOP、A1两flake、37运行时覆盖缺口及21 ignored保持，历史SQLite锁owner/SQL与C2数据库根因未证。本次仅候选RB-FIX04-EXIT-C1：先保存七路径失败树及SHA清单，再用原生Libra精确恢复本卡四个未发布版本/lock到原before-bump（逐字等于b73/.87），保持两cfg和其它全部源码、原stash988ded20、两仓原WIP。经本机Claude EXIT/ER12/H0/VERDICT PASS和root采纳才执行；不reset/force/stash-pop/commit/push，不新开A/C，不授.88再次发布。退出成功仅释放本次失败C1发布占用，FIX04仍blocked/locally-accepted，资格1/4、原scoped-traces0/26不变。后续F1/F2/F3须先审定合法独立修复与依赖；不得把无G13的本仓改成聚合，也不借G08归并独立缺陷。Mega102自己的ER05已PASS，独立C2仍需退出终态与自身具体执行合同PASS。
+
+**退出执行守卫：** 唯一root；旧C outer/driver均终态、owned/new-orphan/target=0且无新Cargo/Claude；HEAD/origin/main/远端main均b73，当前分支fix/capture-ingress-profile-20261025，index为空且精确7脏路径。当前全tracked blob/mode、七路径前像、两版本前像/安装器及published对象逐字绑定；已发布main若变先STOP/ER03。无v0.30.88 tag/Release的实际HTTP404必须再核，禁止把权限错误当不存在。先创建一次退出claim，再仅执行libra restore --source b73e98a77ecc7c3db1ea905ab55478785d76c041 --worktree Cargo.toml Cargo.lock install.sh install.ps1；Cargo.lock是恢复原工具链生成前像，不手工修改依赖。随后写入受审两治理候选，核其余全部tracked文件、原两仓9+4路径及stash不变，index空、版本.87；任一步失败保留实际部分状态和STOP，无自动重入。原private .88二进制仅隔离证据，不加入PATH/不作为发布或后续测试工具。实际退出收据在同一两治理候选上追加真实UTC，并另经增量本地Claude核对后用于下个发布准入；不得宣称本次审查已读未来收据。
+
+**实际退出证据（2026-10-25 18:59:44 UTC）：** FIX04 C1的精确退出已实际执行：本地Claude退出R1 session ff79d09e-3485-4fdb-9316-258cd5d0b614四项PASS、50输入重核；root采纳后，原生restore及外层工具18851于2026-10-25 18:57:47 UTC实际exit0。四个版本/lock逐字等于published b73/.87，四个0664模式保持，原生stash list确认988ded20及完整列表不变；七路径失败树已在持久私有位置按SHA256/MANIFEST及模式补充保存。两cfg及其余全部tracked blob/mode、原Mega9/publisher9/原Libra4路径WIP保持，index空，仅余本计划/本计划status行/ingress三个脏路径。这是退出执行事实，当前等待退出终态增量单审；不授任何新A/C、commit/push/tag/Release。FIX04原C1机械11阶段0但native审查四FAIL、root STOP保持，Lifecycle仍blocked/locally-accepted，仅旧A1/源审限域有效；storage错误回退P1、reset实际stderr不足暂定P1与其它具名风险尚未解决，资格1/4、原scoped-traces0/26不变。失败C1已无active bump；后续独立Mega102须在本次终态增量单审及自己的具体C2合同通过后才claim。 root实际核50输入/原生全stash列表/四mode/9+9+4保护；不声称曾存在Git refs/stash：首次只读probe实际exit129已保留，改用本仓原生JSON stash list。REST单tag/Release404之外，已登录gh完整分页release list也无v0.30.88（含draft）。恢复命令可写Libra内部租约等metadata；“六路径”只指tracked写集，不把metadata写成零变更。
 
 ### Task FIX-LTR-02: 让合成reasoning fixture在索引结清后进入erase
 
 **Task type:** `implementation`
 
-**Lifecycle / Acceptance:** `pending` / 空（ER-03候选；无源码/测试/提交/发布）
+**Lifecycle / Acceptance:** `blocked` / `locally-accepted`（保存helper5025候选A2/ownR2；C1项目release警告STOP，不视完成；待FIX04实际C/D后重新ER03 source/version/new C）
 
 **Description:** 在 `seed_checkpoint` 中既有writer marker退休成功后、`conn.close()`之前建立有界、可失败的索引结清前置（在调用方直接INSERT索引及CLI erase之前），保留原删除保护和所有reasoning隐私/生命周期断言；不是修改生产erase为等待或重试。
 
@@ -187,7 +554,7 @@
 
 **Full-suite trigger:** T-4/T-5：修改tests/helpers共享测试基建，A及最终C完整默认套件；真实云selector另跑，不被默认feature的PASS替代。
 
-**Dependencies:** FIX-LTR-01；仅消费具名发布后来源与当前卡实际准入，前驱未complete不开始本卡发布。
+**Dependencies:** FIX-LTR-01、FIX-LTR-04；仅消费具名发布后来源与当前卡实际准入，前驱未complete不开始本卡发布。
 
 **Deliverables:** N/A；测试修复及本计划同卡记录完整交付。
 
@@ -205,7 +572,9 @@
 
 **Security and privacy:** 只使用合成fixture与具名测试资源；不读取真实provider正文，不在证据中保存env值/token。进程清理必须证明归属，云资源按fixture唯一namespace，不清扫既有资源。
 
-**Performance budget:** A一次10800秒（含全量与真实云消费者）；C一次10800秒；已有10秒fixture界限不放大，云失败不自动重试。一次claim，非预期失败STOP；具体执行器与输入manifest在执行前实审。
+**Performance budget:** 原A1 FAIL/STOP、恢复A2实际2483.782秒与C1实际5051.049秒STOP全部保留；原C1剩余不再可用，本候选不授A3/C2。只有FIX04实际C/D与原生受控整合后，新的ER03按来源/版本/行为轴审定有限carry与新具名C预算；原10秒fixture、nextest原retries2/timeout不改。
+
+**已保存候选验收 / root（本轮事实登记）：** helper SHA5025cbd4004e47fd508f4b28efe1bd6788444ff923d638b0b9fc008aec48f5b7仍在七文件保存像；A1于2427.745秒FAIL/STOP保留。A2由实际执行R2审查2130b342准入，于08:53:46.754733Z唯一claim、09:35:10.536517Z终态，2483.782/10800秒；fmt/strictClippy、模块15、真实云1、完整10761/21原ignored实际通过。A2有1个原生retry-success：bounded_discovery_outer_cancellation_kills_pipe_holding_descendant，原因未证；38标记中37既有覆盖缺口、1缺interpreter负控，不冒称全live。自己的本地Claude R2 b5c96cc9于09:48:52Z ER05/H0/VERDICT PASS，raw output e8485ca7f464c9fd4e9dfbacc45c17b824fd68fb54dfc2e3c0c144f331c2c255。它们只保留原b73候选来源，FIX04之后不能自动当新树PASS。C1于10:09:46.616474Z唯一claim，11:33:57.665096Z STOP，5051.049/10800秒；完整10761无失败/重试/flake、21原ignored，模块15/真实云1和fmt/clippy通过；release出现一项dead_code涉及两个同步构造器。root据严格项目warning门停止正在构建的原协调器，terminal只记RuntimeError/coordinator interrupted15；native build数值exit未记录、不伪填0/101/不称已完成，安装未执行。terminal SHAe389574db8bccda8e8467763f4017612ba0c3896996ab4c5b03026e579973311。root在原窗口5350.267秒内核七失败树文件、精确pidfd清理4031071并确认gone/reaped，owned/new-orphan/target0，实际云16D1表零/R2空。未提交/推送/Release；旧余量不复用，C2未授权。
 
 **Estimated scope:** `S`
 
@@ -215,7 +584,7 @@
 
 **C/D coverage from:** `self`
 
-**Granularity:** `type=implementation; axis=合成checkpoint fixture的索引结清前置; recovery=immutable-release前滚本卡单轴测试修复; complete=yes; self-contained=yes; AC=4/8; VER=3/8; landing=1; prod-files=0; scope=S; deps=FIX-LTR-01; writeset=三卡本计划与R串行; release=independent; split-from=新上游资格20261025实际FAIL/STOP; exception=N/A`
+**Granularity:** `type=implementation; axis=合成checkpoint fixture的索引结清前置; recovery=immutable-release前滚本卡单轴测试修复; complete=yes; self-contained=yes; AC=4/8; VER=3/8; landing=1; prod-files=0; scope=S; deps=FIX-LTR-01,FIX-LTR-04; writeset=五张实现卡本计划与R串行; release=independent; split-from=新上游资格20261025实际FAIL/STOP; exception=N/A`
 
 ### Task FIX-LTR-03: 回收MCP无helper断言用例拥有的暂停worker
 
@@ -234,7 +603,7 @@
 - [ ] 保留descendant_pids(worker).is_empty原断言；取得worker PID后先建立具有身份核验的cleanup guard，再执行可能panic的断言。
 - [ ] 成功/panic以及PID取得前后的失败路径均处理当前测试拥有的父进程与可证明归属的worker；不信任复用PID、不杀其它用例或系统进程。
 - [ ] 保留pause文件发现上限10秒，cleanup退出观察上限1秒；先向核身份的owned worker/其独立组发退出信号，再kill+wait MCP父进程，避免先杀父丢失归属；不把父进程wait成功当worker清理证明；Linux核 `/proc/<pid>/stat` 的starttime/state，区分已退出僵尸与活进程并另记是否已回收，不以kill(pid,0)独证；其它平台用实际进程身份/退出能力，不能照搬procfs或跳过原测试；现有descendant_pids在非Linux上恒为空，不能当归属证据，若当前I/现有平台API不足以建立安全身份，必须在claim前ER-03。PID文件取得前先枚举MCP父进程的真实子关系并核身份（Linux覆盖所有 `/proc/<mcp>/task/*/children`），再执行清理；不能先杀父进程再猜孤儿归属。不提高测试超时。
-- [ ] 完整agent_mcp_exec_test通过，原deadline、内存、slot、禁止helper断言全部保持；本卡bump后C全量/doc/network通过，实际本卡Claude ER-05通过；三卡D之后的计划最终资格属于计划完成门，不倒挂本卡done条件。
+- [ ] 完整agent_mcp_exec_test通过，原deadline、内存、slot、禁止helper断言全部保持；本卡bump后C全量/doc/network通过，实际本卡Claude ER-05通过；五张实现卡D之后的计划最终资格属于计划完成门，不倒挂本卡done条件。
 
 **Verification:**
 
@@ -273,18 +642,35 @@
 
 **C/D coverage from:** `self`
 
-**Granularity:** `type=implementation; axis=MCP read-worker测试夹具完整teardown; recovery=immutable-release前滚本卡单轴测试修复; complete=yes; self-contained=yes; AC=4/8; VER=4/8; landing=1; prod-files=0; scope=S; deps=FIX-LTR-02; writeset=三卡本计划与R串行; release=independent; split-from=新上游资格20261025实际FAIL/STOP; exception=N/A`
+**Granularity:** `type=implementation; axis=MCP read-worker测试夹具完整teardown; recovery=immutable-release前滚本卡单轴测试修复; complete=yes; self-contained=yes; AC=4/8; VER=4/8; landing=1; prod-files=0; scope=S; deps=FIX-LTR-02; writeset=五张实现卡本计划与R串行; release=independent; split-from=新上游资格20261025实际FAIL/STOP; exception=N/A`
+
+## 测试入口、追溯与里程碑（本轮恢复）
+
+| 任务/里程碑 | 当前来源与入口 | 覆盖与失败边界 |
+|---|---|---|
+| FIX05 | F1源缺陷、R1指出缓存/写入顺序/配置busy设计缺口；先VER-6与ATTRIB、用户决定和本地ER03 | 粒度/方案未准入；独立default/keyring release及完整A/C/D，不豁免未知F2关闭 |
+| FIX04 | FIX02 C1 release警告→源审ce6fb162→ingress两cfg；capture完整lib模块、compat_agent_architecture_guard、default/keyring release及完整默认 | A/C各具名新窗口、原timeout/retries不改；warning仍有即STOP |
+| FIX02恢复 | 已保存A2/ownR2和C1 STOP→FIX04实际C/D→新ER03 source/version/C | 不借C1余量，不盲carry b73资格；helper/两消费者保持原断言 |
+| 修复里程碑 | FIX01(done)→FIX05→FIX04→FIX02→FIX03分别独立完整C/D | 发布串行，不能合并、不能以手工worker清理当FIX03修复 |
+| 最终资格/HANDOFF | FIX03真实merge树10800秒fmt/clippy/full/doc/network，再终态文档及PR/main D与例行补记 | 未全部满足不解除原LTR10 incoming；H1/旧merge签名政策不豁免 |
 
 ## 完成判据与交接
 
-三卡分别实际A/B、Claude ER-05 PASS、精确signed/DCO提交、独立patch/PR/merge/tag/人工Release、实际CI与发布artifact D完成；全部P0/P1关闭，P2具名处置。FIX-LTR-03 的C④在bump后树执行完整默认套件、`cargo test --doc`及原3例network；merge树与被测树不等即STOP。三卡各自实际D完成后，在与FIX03发布merge树相同的冻结来源执行上述一次10800秒计划最终资格窗口（fmt、strict Clippy、双env完整默认套件、doc、原3例network），核全部身份/退出/ignored/flake/runtime skip与owned资源；根因未知的缺口不得改成已证。最终实际本地Claude来源资格PASS后，才把三个具体发布SHA/版本及适用覆盖交给原scoped-traces计划；其H1、原merge签名政策、LTR自身A/B/C/D仍独立。
+五张实现卡分别实际A/B、Claude ER-05 PASS、精确signed/DCO提交、独立patch/PR/merge/tag/人工Release、实际CI与发布artifact D完成；全部P0/P1关闭，P2具名处置。FIX-LTR-03 的C④在bump后树执行完整默认套件、`cargo test --doc`及原3例network；merge树与被测树不等即STOP。五张实现卡各自实际D完成后，在与FIX03发布merge树相同的冻结来源执行上述一次10800秒计划最终资格窗口（fmt、strict Clippy、双env完整默认套件、doc、原3例network），核全部身份/退出/ignored/flake/runtime skip与owned资源；根因未知的缺口不得改成已证。最终实际本地Claude来源资格PASS后，才把五个具体发布SHA/版本及适用覆盖交给原scoped-traces计划；其H1、原merge签名政策、LTR自身A/B/C/D仍独立。
 
-原两份计划正式计数仍Mega14/112、Libra0/26，联合14/138（活动14/136）；本外部修复计划单列0/3，不把必要修复藏进原26卡或擅改旧历史计数。联合依赖审计须把这3个外部节点展开，检查无环和入场前沿。只要任一卡或交接缺少实际证据，本计划未完成。
+当前（2026-10-26）两原计划正式23/118、0/26、23/144；本外部五实现卡1/5，DOC01/02另记，不增加原26卡。联合依赖按文首ATTRIB→FIX05、FIX05/新FIX→CLOSE→FIX04→FIX02→FIX03与H0/H1/LIVE/LTR10核无环；任一卡/末端证据不足均未完成。旧17/118、1/4统计保留于下方2026-10-25快照。
+
+> 历史初稿统计：原Mega14/112、Libra0/26、联合14/138；外部0/3，保留其原时点。
 
 ## 修订记录
 
 | 日期 | 触发 | 变更 | 实际状态 |
 |---|---|---|---|
+| 2026-10-25 18:59:44 UTC | 退出R1实际四PASS与精确native退出exit0 | 四版本回到.87、0664/stash/源树及9+9+4保护已核，真实C失败/STOP保留；实际终态待增量单审 | blocked/locally-accepted；无active bump或新窗口，资格1/4 |
+| 2026-10-25 18:47:47 UTC | FIX04 C1全命令0但真实native审查FAIL/root STOP | 新增仅四个未发布版本面的精确退出候选，保存7路径失败树；两P1与独立恢复待，不授新A/C或聚合 | blocked/locally-accepted；退出待Claude，资格1/4 |
+| 2026-10-25T14:24:41.918607+00:00 | FIX04自身实际Claude R1终态及root采纳 | ER05/H0/VERDICT三PASS、73输入、五P2具名处置；新增事实只限既有两治理，原FAIL/STOP及A1 flakes不变 | locally-accepted；最终C/D未取得，资格1/4 |
+| 2026-10-25 14:16:54 UTC | FIX04唯一A1/B实际终态及root资源后检 | 两cfg源B、十阶段及10761身份核验；保留2个原生flake与runtime缺口、旧STOP | locally-accepted，自身ER05/C/D待；资格1/4 |
+| 2026-10-25T12:03:44.446299+00:00 | FIX02 C1实际release项目警告STOP；source审SOURCE PASS/RECOVERY FAIL两P1 | 新增独立FIX04、精确生产I特许、A/C release profile门、原C1 STOP/保存像及新顺序/终止链 | ER03/H0候选，未授权新A/C或正式源码 |
 | 2026-10-24 19:47:13 UTC | 新上游资格full实际FAIL、既有flake复现与手工清理的worker | 三个独立测试修复、隔离发布与原计划incoming交接 | 本地Claude ER-03/H0待审；没有执行或发布 |
 
 ## 任务卡粒度审计表
@@ -292,10 +678,15 @@
 | 卡 | 行为轴 | I（测试+同步文档） | AC/VER | landing/prod | 依赖 | release/C-D |
 |---|---|---|---|---|---|---|
 | FIX-LTR-01 | doctor完整结构oracle | global_config_schema_future_test.rs、本计划、plan-status本计划行 | 3/8、3/8 | 1/0 S | DEP-QUAL-SOURCE/SECURITY/PUBLISH | independent/self |
-| FIX-LTR-02 | reasoning fixture索引结清 | reasoning_artifact.rs、本计划、plan-status本计划行 | 4/8、3/8 | 1/0 S | FIX-LTR-01 | independent/self |
+| FIX-LTR-05 | 配置失败与对象存储fail-closed（未准入候选） | client_storage/util/fetch候选及卡内逐文件同步集 | 8/8、6/8 | 3文件候选；落点/规模pending VER-6 | FIX01 + SOURCE/PUBLISH + F2-ATTRIB + pending决定 | independent/self；不得先实施 |
+| FIX-LTR-04 | 同步ingress测试构造器profile可用性 | ingress.rs仅两cfg、本计划、plan-status本计划行 | 4/8、5/8 | 1/1 S | FIX-LTR-05 + F2-CLOSE + SOURCE/PUBLISH | independent/self |
+| FIX-LTR-02 | reasoning fixture索引结清 | reasoning_artifact.rs、本计划、plan-status本计划行 | 4/8、3/8 | 1/0 S | FIX-LTR-01/FIX-LTR-04 | independent/self |
 | FIX-LTR-03 | MCP owned worker teardown | agent_mcp_exec_test.rs、本计划、plan-status本计划行 | 4/8、4/8 | 1/0 S | FIX-LTR-02 | independent/self |
 
 ## 风险登记
+
+**现行profile警告 / root：** P2-QUAL-RELEASE-DEADCODE的旧接受仅解释v0.30.87历史，本轮用户严格项目warning指令取代该放行，由FIX04独立关闭；只排除proc-macro-error2第三方future提示。DOC-LTR01旧句“默认debug build如出现capture-ingress警告”保留为历史措辞，现已证明该警告只在默认release出现，DOC的debug build无该警告不是修复证据。新FIX04 A及C必须实际跑default/keyring release并对项目warning失败；不得用dev Clippy/测试PASS代替。
+
 
 | ID | 事实/边界 | root处置/重启条件 | 状态 |
 |---|---|---|---|
@@ -389,7 +780,7 @@ R3真实session `82ca0f53-d8f6-4148-af66-13721b381b95`，output SHA256 `8f15fea4
 
 **Task type:** `docs`
 
-**Lifecycle / Acceptance:** `in-progress` / `locally-accepted`（A/B实际通过；自己的Claude ER-05待，未提交/推送；完整C/D仍待FIX-LTR-03覆盖）
+**Lifecycle / Acceptance:** `in-progress` / `locally-accepted`（A/B及自己的Claude ER-05已实际通过；signed/DCO 5c449bba已推送并经PR636合并b73e98a，PR/main全部适用D实际通过；完整C/D仍待FIX-LTR-03覆盖，不提前done）
 
 **Description:** 用户要求“在 Libra 的下一个提交修复这些 warning”，随后明确排除第三方 `proc-macro-error2 2.0.1` future-incompatibility。只修PR635实际job 121059262116的104条项目Rustdoc诊断：72私有目标链接、28非法HTML占位符、4冗余显式链接。不改依赖、lock、可见性、运行逻辑、CLI输出或lint等级。
 
@@ -482,3 +873,50 @@ root继续承担准入与执行器P2：任何新源码/元数据/help变化先ST
 | 修订UTC | 来源 | 变化 | 状态 |
 |---|---|---|---|
 | 2026-10-25 04:25:21 UTC | DOC-LTR-01 A1实际终态 | 48命令/22help/B/资源通过，保留历史FAIL；仅两治理文件补事实 | locally-accepted，自身ER05及提交/PR/覆盖待 |
+
+### FIX04旧依赖字段原件（2026-10-26前）
+
+```text
+**Dependencies:** `FIX-LTR-01`、`DEP-QUAL-SOURCE`、`DEP-QUAL-PUBLISH`；FIX02的已保存C1警告是来源证据，不以其done为前置。`FIX-LTR-04 -> FIX-LTR-02`，无反向覆盖依赖。
+**Granularity:** `type=implementation; axis=同步ingress测试构造器的profile可用性; recovery=immutable-release; complete=yes; self-contained=yes; AC=4/8; VER=5/8; landing=1; prod-files=1; scope=S; deps=FIX-LTR-01,DEP-QUAL-SOURCE,DEP-QUAL-PUBLISH; writeset=两cfg及既定两治理+版本面; release=independent; split-from=FIX02-C1实际release警告STOP; exception=N/A`
+```
+
+
+### 2026-10-26 DOC02 R1真实FAIL与前滚修订
+
+本地Claude session `df82ac52-8f07-4963-9319-786726e02a92`，五项FAIL，manifest `4788f76846dea304dd9293b0149c9682a2fee41e0504496ca5b2c4857964de2a`、output `e424f6da315e011a52e390d2267163583c6004ee5bbd2e550e47f04151751600`；root保留原结论。P1-1五卡汇总/完成门已前滚；P1-2拆ATTRIB与CLOSE，诊断只在已准入FIX05内；P1-3/4登记真实源码限制及未准入粒度，不称一文件设计可行。P2 owner=root：补FIX05 keyring门、env/serial条件与配置panic范围、LIVE/未发布incoming边、新stash；DOC02改docs并登记fmt/Clippy/main D。历史行号差一行保留原文。以上是修订候选，复审未取得前不记PASS，不授FIX05实现或warning例外。
+
+以下原规范行按2026-10-25快照保留；现行要求见前滚后的对应段，禁止把旧四卡门当成当前完成条件。
+
+```text
+候选独立 A 窗口：FIX-LTR-01一次7200秒，FIX-LTR-02/03/04各一次10800秒（共享夹具真实云消费者或最终doc/network，均包含完整默认套件）；每卡最终 bump 后本地 C 各一次10800秒；FIX-LTR-03 的 C 包含完整全量、doc及原3例network。四卡实际D全绿后另有一次计划最终资格窗口10800秒，执行最终发布树fmt/clippy/full/doc/network，不以C代替模板计划完成门。上限是新独立来源的命令编排预算，不修改任何测试内部 deadline、并发组、断言或原 nextest retries。依据本机已测 build+listing+full4983秒及 strict Clippy约876秒，额外预留最终 release build/网络 feature 编译；不把冷构建慢当代码原因。本地窗口从第一条Cargo命令到本地门/构建/安装结束，包含编译和listing；PR CI、merge及Release D远端等待不计入该本地执行预算，单独登记run/job/ref，观察超时不重启作业、不记PASS。任一意外失败/超时/漂移立即保留终态并STOP，不自动再开窗口；后续只读归属与另行ER-03，不因剩余时间继续命令。
+每卡 A 包含其 Verification、nightly fmt及strict all-target/all-feature Clippy；触发全量的卡另跑原双env默认全量。自己的 ER-05 PASS 后，C严格按模板ER-04/08顺序：版本面parity→实际patch→工具链刷新lock→最终fmt/clippy和本卡完整全量/所需focused→`cargo build --release`（四卡全局C⑤要求项目warning=0，唯一排除为用户具名proc-macro-error2 future提示；FIX04另加keyring release门）→将本卡release二进制安装到仓外、每卡独立的 `install/bin/libra` 并以绝对路径核version/hash（复制+chmod0755，hash须等于本次target/release/libra）；不覆盖原工作区使用的libra或改变全局PATH→精确`libra add`及signed+DCO提交→feature branch/PR→该head的base/CodeQL全部适用job通过→squash merge并核merge SHA/tree/DCO/签名；merge tree必须等于已测bump后tree，任何上游变化或树不同即STOP并ER-03，不tag、不借旧PASS→人工Release及版本tag→release工作流与渠道artifact真实核实。遇分支保护、必需他人review或环境approval，保留实际pending状态；不使用admin bypass、不自行批准。未完成D不得done。编译诊断按实际记录；若既有future-incompat提示违反当次发布门，先独立归属，不静默豁免。
+4. **唯一终态登记提交。** 计划最终资格通过后，在独立clone创建一笔纯文档登记提交，I精确为 `docs/development/plan/plan-20261025-qualification.md` 与 `docs/development/plan/plan-status.md` 的本计划行；R=N/A、version=N/A、无tag/Release、不改变任一产品/测试/配置/lock/版本面。该提交承接FIX03真实C/D、最终资格和四卡状态，以及它自己的真实Claude文档ER-05收据；核对实际证据，登记本终态文档自身D仍pending。它是本计划预登记终止链末端，不是第五个产品修复或新版本发布点，不替代四卡各自C/D。没有独立发布原工作区Traces治理的权限。
+**终态B的只读执行器：** 使用仓外 `/tmp/libra-qualification-recovery-plan-20261025/terminal-document-check.py`（在该末端执行前生成、hash冻结并纳入真实Claude输入，不属于产品源码）。执行命令为 `python3 /tmp/libra-qualification-recovery-plan-20261025/terminal-document-check.py`，以已核FIX03 merge SHA、候选树及两路径allowlist为显式冻结输入；缺输入即失败。必须以原生Libra diff逐路径证明只有本计划与plan-status本计划行变化；全其它来源hash一致；卡片/索引状态与已发生原件逐项对应；本计划全部必需章节/四卡字段存在；相对链接解析到当前clone；已登记审查收据只作后置事实，不改审查结论或其它字节；保留所有旧FAIL/STOP。自动结构结果不替代人审语义和真实门结果。
+| DEP-QUAL-F2 | incoming | 当前失败归属 | reset_pathspec_from_file_missing_path_errors真实stderr与根因 | Libra接收Agent | 按2026-10-26入口完成受审诊断及P1处置；未知不能关闭，独立根因另卡 | 旧stderr缺失，当前未完成 | 不借native retry PASS或未复现关闭；诊断预算另审 |
+| DEP-QUAL-HANDOFF | outgoing | 来源资格 | plan-20261015 LTR-10 / LTR-01 | root | 四卡独立C/D完成、FIX03 bump后C及发布后最终资格窗口全量/doc/network与本地Claude明确PASS（绑定实际merge树）、终态登记提交实际PR/main D通过并具名例行补记，再核受控整合树、原工作区受控整合/受影响门通过 | 后续真实提交/版本/远端ref/原件，当前无 | 来源资格未闭合不得解除LTR-10前置；不更改H1或替代LTR各卡门 |
+`DEP-QUAL-SECURITY + DEP-QUAL-SOURCE + DEP-QUAL-PUBLISH -> FIX-LTR-01 -> FIX-LTR-05 -> FIX-LTR-04 -> FIX-LTR-02 -> FIX-LTR-03 -> DEP-QUAL-HANDOFF`；另有 `DEP-QUAL-F2 + DEC-QUAL-05-RELEASE-WARNING -> FIX-LTR-05`，当前授权与诊断未闭合，候选顺序不等于准入。顺序用于共享本计划/版本面的串行发布，不表示合并发布。先修确定性全量阻断，再修共享fixture，最后完成MCP测试清理与整份修复计划的最终资格。每卡真正 C/D 闭合后才发布下一卡。
+### 四卡共同适用的逐项D清单
+**Granularity:** `type=implementation; axis=global-schema doctor的auto-upgrade结构oracle对齐; recovery=immutable-release前滚本卡单轴测试修复; complete=yes; self-contained=yes; AC=3/8; VER=3/8; landing=1; prod-files=0; scope=S; deps=DEP-QUAL-SOURCE, DEP-QUAL-SECURITY, DEP-QUAL-PUBLISH; writeset=四卡本计划与R串行; release=independent; split-from=新上游资格20261025实际FAIL/STOP; exception=N/A`
+**Granularity:** `type=implementation; axis=合成checkpoint fixture的索引结清前置; recovery=immutable-release前滚本卡单轴测试修复; complete=yes; self-contained=yes; AC=4/8; VER=3/8; landing=1; prod-files=0; scope=S; deps=FIX-LTR-01,FIX-LTR-04; writeset=四卡本计划与R串行; release=independent; split-from=新上游资格20261025实际FAIL/STOP; exception=N/A`
+- [ ] 完整agent_mcp_exec_test通过，原deadline、内存、slot、禁止helper断言全部保持；本卡bump后C全量/doc/network通过，实际本卡Claude ER-05通过；四卡D之后的计划最终资格属于计划完成门，不倒挂本卡done条件。
+**Granularity:** `type=implementation; axis=MCP read-worker测试夹具完整teardown; recovery=immutable-release前滚本卡单轴测试修复; complete=yes; self-contained=yes; AC=4/8; VER=4/8; landing=1; prod-files=0; scope=S; deps=FIX-LTR-02; writeset=四卡本计划与R串行; release=independent; split-from=新上游资格20261025实际FAIL/STOP; exception=N/A`
+| 修复里程碑 | FIX01(done)→FIX04→FIX02→FIX03分别独立完整C/D | 发布串行，不能合并、不能以手工worker清理当FIX03修复 |
+四卡分别实际A/B、Claude ER-05 PASS、精确signed/DCO提交、独立patch/PR/merge/tag/人工Release、实际CI与发布artifact D完成；全部P0/P1关闭，P2具名处置。FIX-LTR-03 的C④在bump后树执行完整默认套件、`cargo test --doc`及原3例network；merge树与被测树不等即STOP。四卡各自实际D完成后，在与FIX03发布merge树相同的冻结来源执行上述一次10800秒计划最终资格窗口（fmt、strict Clippy、双env完整默认套件、doc、原3例network），核全部身份/退出/ignored/flake/runtime skip与owned资源；根因未知的缺口不得改成已证。最终实际本地Claude来源资格PASS后，才把四个具体发布SHA/版本及适用覆盖交给原scoped-traces计划；其H1、原merge签名政策、LTR自身A/B/C/D仍独立。
+当前两原计划正式17/118、0/26、17/144（活动17/142）；本外部候选四个实现节点独立单列1/4，不增加原26卡或改写初始统计。联合依赖审计展开FIX01→FIX04→FIX02→FIX03并与H0/H1/LTR10核无环；任一卡/末端交接证据不足均未完成。
+```
+
+
+### 2026-10-26 DOC02 R2真实终态与修订
+
+本地Claude `6efd0e29-4c53-4b59-beda-261df8c0bab2`：HANDOFF/SOURCE_AND_DEPENDENCY/EXECUTION_BOUNDARY/VERDICT四FAIL、GRANULARITY PASS（仅候选登记，不准入FIX05）；manifest `1a72abb34ce985319ee0f39ae444a3d0b5ca59df6571913e194d4dd8ead30315`，output `4fcc1356ac3c1b62860c70a9e9bef82f7b87afa7106c5071a421dd78b55583a4`。R1原问题已关闭，R2三个P1由本次修订候选处理：FIX04粒度边改F2-CLOSE，并规定FIX05后置C/D由FIX04的两治理补记；执行器在claim前及每个命令加载双env后均拒绝三个全局目录override；提交器核own-review包含最终正文与实际gate终态，signed message补manifest/terminal/gate-input hash。复审未取得前不写PASS。
+
+P2 owner=root：真实DAG仍须Claude逐字段人审，机器图仅辅助；环境异常移到claim前，不消费新窗口；deadline后的未知/遗留进程保持STOP并核PID/start身份，不靠进程名清理；当前root为Codex进程，Claude CLI是原生可执行文件，竞争检查适用本机，新机器重新核；两env同hash仅说明本机字节相同，不证明live凭据有效；签名失败只留下未推送本地提交，后续必须审定恢复；缓存容量/现存build产物在准入前只读登记，冷编译不自动延长。原“四修复轴”候选横幅及历史行号不改。
+
+补存R1未逐行抄入快照的三行原文（2026-10-25旧规范，当前已被前滚段替代）：
+
+```text
+- 修复 checkout 的公开写集仅本计划、基于实际已发布上游版本的 `docs/development/plan/plan-status.md` 中本计划登记行、当前卡已登记测试文件、该卡实际版本面/工具链 lock；仅FIX-LTR-04额外允许 `src/internal/ai/capture/ingress.rs` 两个方法定义前各加一行 `#[cfg(any(test, debug_assertions))]`，不改其方法体或生产入口。与原工作区未发布 scoped-traces 治理提交做 ancestry 和逐文件 diff 守卫，禁止携带 `ed566b0`、其本地治理父链或原三份治理 WIP；plan-status 只在上游版本中新增/更新本计划行，禁止复制原工作区整份文件。本文是新的独立修复计划，不复制未发布的 scoped-traces 文本到发布分支。
+- 原工作区两仓既有八份治理文件只登记事实/外部依赖，仍由原 MTR-01/LTR-01 与 Mega 后续既定 C/D 承载；其中原 scoped-traces 治理增量不属于四个修复分支的发布写集；plan-status 的新修复计划行是下述独立同步写集。新修复发布后，原工作区只通过原生前滚整合保留双方历史；若本文本地未跟踪副本与远端已发布版本碰撞，先保留快照、核同源与内容，再只处理 root 自建副本，不清理无关文件、不 reset/force。
+所有 Cargo 门 source `.env.test` 和 `.env.live-test`，核非秘密 presence/控制项、原工具链与 Cargo 配置；缺文件或必要凭据停止相应门。延续隔离 HOME、已核 CARGO_BUILD_JOBS=1、umask0022，不复制用户凭据到仓库或日志。listing与JUnit按(target,case)精确核数、保留原ignored/重试及成功输出中的runtime skip；缺环境、缺 feature、early return不冒充所需行为通过。代码完成、自身review、提交、push、D逐项分别登记。
+```

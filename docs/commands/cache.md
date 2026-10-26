@@ -26,7 +26,13 @@ DB), so the reported values match what the backend uses:
   wrong-case `R2`, an empty key, or a malformed endpoint reports non-tiered.
   That report does not mean `init` built a writable local backend. Those
   confirmed settings make object commands fail and name only the setting.
-  `LIBRA_STORAGE_TYPE=local` still warns and stays local. The cache tunables only take effect when tiered; a
+  `LIBRA_STORAGE_TYPE=local` still warns and stays local. An unreadable
+  `LIBRA_STORAGE_TYPE` still uses that historical local backend for the current
+  call. The process object cache does not keep that client, so every later
+  `objects_storage` call reads the setting again, including each object load
+  that goes through it. A future global schema, an exact `local` value, and a
+  readable unset type can still be cached. Confirmed unusable settings stay out
+  of that cache. The cache tunables only take effect when tiered; a
   local-only repository caches nothing. An actual connection additionally needs
   valid credentials, which this static report does not validate.
 - **threshold** — the small/large object threshold in bytes

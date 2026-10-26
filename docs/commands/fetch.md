@@ -75,7 +75,11 @@ be read, fetch stays on the historical local path. A type other than `s3` or
 uses the same confirmed-failure rule and does not build a writable local
 backend. `LIBRA_STORAGE_TYPE=local` still warns and stays local. Fetch, pull,
 and clone already reject that exact value. Unset type with an unreadable
-configuration database stays on the historical local path.
+configuration database stays on the historical local path. Fetch, pull, and
+clone take that result from `resolve_configured_storage` for the current call
+and do not consult the process object cache. Commands that open storage
+through `init` do not keep this unreadable type in that cache, so each later
+`objects_storage` call reads it again while it stays unreadable.
 
 ### Prune config defaults (`fetch.prune`, `remote.<name>.prune`)
 

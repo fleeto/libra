@@ -1192,6 +1192,10 @@ enum HeldStorage {
 pub struct ClientStorage {
     held: HeldStorage,
     base_path: PathBuf, // Keep base_path for legacy access if needed
+    /// `false` only when `LIBRA_STORAGE_TYPE` could not be read and the cause
+    /// is not a future global schema. That client stays writable for this call
+    /// and must not be inserted into the process object cache.
+    retains_objects_cache: bool,
 }
 
 #[cfg(test)]
@@ -1596,6 +1600,7 @@ impl ClientStorage {
         Self {
             held: HeldStorage::Ready(storage),
             base_path,
+            retains_objects_cache: true,
         }
     }
 
@@ -1603,7 +1608,12 @@ impl ClientStorage {
         Self {
             held: HeldStorage::Rejected(variable),
             base_path,
+            retains_objects_cache: true,
         }
+    }
+
+    pub(crate) fn retains_objects_cache(&self) -> bool {
+        self.retains_objects_cache
     }
 
     pub(crate) fn configuration_variable(&self) -> Option<&'static str> {
@@ -1642,7 +1652,8 @@ impl ClientStorage {
     ///
     /// Boundary conditions:
     /// - Does not panic on misconfiguration. Confirmed failures name only the
-    ///   setting. An unreadable type still uses the historical local result.
+    ///   setting. An unreadable type still uses the historical local result for
+    ///   this call, and that client is not kept in the process object cache.
     pub fn init(base_path: PathBuf) -> ClientStorage {
         match Self::open_init_storage(base_path.clone()) {
             Ok(storage) => storage,
@@ -1754,7 +1765,13 @@ impl ClientStorage {
                     "LIBRA_STORAGE_TYPE",
                     &error,
                 );
-                return Ok(Self::ready(storage, base_path));
+                let mut client = Self::ready(storage, base_path);
+                // A future global schema is a known policy and stays cacheable.
+                // Any other unread type must be resolved again on the next call.
+                if !matches!(error, StorageConfigResolutionError::GlobalSchemaFuture(_)) {
+                    client.retains_objects_cache = false;
+                }
+                return Ok(client);
             }
         };
         if storage_type != "s3" && storage_type != "r2" {
@@ -7295,10 +7312,12 @@ mod tests {
             repo.path().join("missing-global.db"),
         );
         let objects = repo.path().join("local-objects");
-        must_ok(
+        let storage = must_ok(
             ClientStorage::resolve_configured_storage(objects.clone()),
             "an unread type stays local",
         );
+        assert!(!storage.retains_objects_cache());
+        assert!(storage.configuration_variable().is_none());
         assert!(objects.exists());
     }
 
@@ -7955,5 +7974,135 @@ mod tests {
         restored
             .put(&blob.id, &blob.data, blob.get_type())
             .expect("recovered storage can put");
+    }
+
+    #[tokio::test]
+    #[serial(cwd, env)]
+    async fn storage_config_hold_cache_skips_unresolved_type() {
+        let _hash = set_hash_kind_for_test(HashKind::Sha1);
+        let _env = isolate_storage_env();
+        let repo = tempdir().expect("temp");
+        setup_with_new_libra_in(repo.path()).await;
+        break_repository_database(repo.path());
+        let _cwd = ChangeDirGuard::new(repo.path());
+        let _global = ScopedEnvVar::set(
+            "LIBRA_CONFIG_GLOBAL_DB",
+            repo.path().join("missing-global.db"),
+        );
+        super::STORAGE_TYPE_READS.with(|reads| reads.set(0));
+        let first = crate::utils::util::objects_storage();
+        assert_eq!(super::STORAGE_TYPE_READS.with(|reads| reads.get()), 1);
+        assert!(first.configuration_variable().is_none());
+        assert!(!first.retains_objects_cache());
+        assert!(!crate::utils::util::objects_storage_cache_contains(
+            &crate::utils::path::objects()
+        ));
+        let blob = Blob::from_content("unresolved-once");
+        first
+            .put(&blob.id, &blob.data, blob.get_type())
+            .expect("the unread type stays writable for this call");
+
+        super::STORAGE_TYPE_READS.with(|reads| reads.set(0));
+        let resolved = must_ok(
+            ClientStorage::resolve_configured_storage(repo.path().join("side-objects")),
+            "resolve keeps the unread type local",
+        );
+        assert_eq!(super::STORAGE_TYPE_READS.with(|reads| reads.get()), 1);
+        assert!(!resolved.retains_objects_cache());
+        assert!(!crate::utils::util::objects_storage_cache_contains(
+            &crate::utils::path::objects()
+        ));
+
+        let _type = ScopedEnvVar::set("LIBRA_STORAGE_TYPE", "gcs-canary");
+        let second = crate::utils::util::objects_storage();
+        assert_eq!(second.configuration_variable(), Some("LIBRA_STORAGE_TYPE"));
+        assert!(!crate::utils::util::objects_storage_cache_contains(
+            &crate::utils::path::objects()
+        ));
+        let rejected = Blob::from_content("unresolved-next");
+        let put_error = second
+            .put(&rejected.id, &rejected.data, rejected.get_type())
+            .expect_err("the next call reads the confirmed type");
+        assert_eq!(
+            put_error.to_string(),
+            "failed to read storage configuration for LIBRA_STORAGE_TYPE"
+        );
+        assert!(!put_error.to_string().contains("gcs-canary"));
+    }
+
+    #[tokio::test]
+    #[serial(cwd, env)]
+    async fn storage_config_hold_cache_keeps_readable_unset_type() {
+        let _hash = set_hash_kind_for_test(HashKind::Sha1);
+        let _env = isolate_storage_env();
+        let repo = tempdir().expect("temp");
+        setup_with_new_libra_in(repo.path()).await;
+        let _cwd = ChangeDirGuard::new(repo.path());
+        let _global = ScopedEnvVar::set(
+            "LIBRA_CONFIG_GLOBAL_DB",
+            repo.path().join("missing-global.db"),
+        );
+        let first = crate::utils::util::objects_storage();
+        assert!(first.retains_objects_cache());
+        assert!(first.configuration_variable().is_none());
+        assert!(crate::utils::util::objects_storage_cache_contains(
+            &crate::utils::path::objects()
+        ));
+        let blob = Blob::from_content("unset-cached");
+        first
+            .put(&blob.id, &blob.data, blob.get_type())
+            .expect("a readable unset type stays writable");
+        let _type = ScopedEnvVar::set("LIBRA_STORAGE_TYPE", "gcs-canary");
+        let second = crate::utils::util::objects_storage();
+        assert!(second.configuration_variable().is_none());
+        assert!(second.retains_objects_cache());
+        let next = Blob::from_content("unset-still-cached");
+        second
+            .put(&next.id, &next.data, next.get_type())
+            .expect("a cached readable unset type is not reread");
+    }
+
+    #[tokio::test]
+    #[serial(cwd, env)]
+    async fn storage_config_hold_cache_keeps_local_word() {
+        let _hash = set_hash_kind_for_test(HashKind::Sha1);
+        let _env = isolate_storage_env();
+        let repo = tempdir().expect("temp");
+        setup_with_new_libra_in(repo.path()).await;
+        let _cwd = ChangeDirGuard::new(repo.path());
+        let _global = ScopedEnvVar::set(
+            "LIBRA_CONFIG_GLOBAL_DB",
+            repo.path().join("missing-global.db"),
+        );
+        let _type = ScopedEnvVar::set("LIBRA_STORAGE_TYPE", "local");
+        let storage = crate::utils::util::objects_storage();
+        assert!(storage.retains_objects_cache());
+        assert!(storage.configuration_variable().is_none());
+        assert!(crate::utils::util::objects_storage_cache_contains(
+            &crate::utils::path::objects()
+        ));
+        let blob = Blob::from_content("local-word-cached");
+        storage
+            .put(&blob.id, &blob.data, blob.get_type())
+            .expect("exact local stays writable and cached");
+    }
+
+    #[tokio::test]
+    #[serial(cwd, env)]
+    async fn storage_config_hold_cache_keeps_global_schema_future() {
+        let _hash = set_hash_kind_for_test(HashKind::Sha1);
+        let _env = isolate_storage_env();
+        let repo = tempdir().expect("temp");
+        setup_with_new_libra_in(repo.path()).await;
+        let global = repo.path().join("future.db");
+        write_future_global_db(&global).await;
+        let _cwd = ChangeDirGuard::new(repo.path());
+        let _global = ScopedEnvVar::set("LIBRA_CONFIG_GLOBAL_DB", &global);
+        let storage = crate::utils::util::objects_storage();
+        assert!(storage.retains_objects_cache());
+        assert!(storage.configuration_variable().is_none());
+        assert!(crate::utils::util::objects_storage_cache_contains(
+            &crate::utils::path::objects()
+        ));
     }
 }

@@ -1146,6 +1146,166 @@ impl LocalStorage {
 
     // --- Pack related methods ---
 
+    /// Loose and pack prefix search. A missing objects or pack directory is
+    /// an empty contribution. Permission errors, unreadable entries, and a
+    /// pack index that cannot be read are returned.
+    fn search_checked_blocking(&self, prefix: &str) -> Result<Vec<ObjectHash>, io::Error> {
+        if let Some(kind) = self.hash_kind {
+            set_hash_kind(kind);
+        }
+        let mut objects = Vec::new();
+        self.collect_loose_prefix(&mut objects, prefix)?;
+        self.collect_pack_prefix(&mut objects, prefix)?;
+        objects.sort_unstable();
+        objects.dedup();
+        Ok(objects)
+    }
+
+    fn collect_loose_prefix(
+        &self,
+        objects: &mut Vec<ObjectHash>,
+        prefix: &str,
+    ) -> Result<(), io::Error> {
+        let entries = match fs::read_dir(&self.base_path) {
+            Ok(entries) => entries,
+            Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(()),
+            Err(error) => return Err(error),
+        };
+        for entry in entries {
+            let path = entry?.path();
+            let Some(dir_name) = path
+                .file_name()
+                .and_then(|name| name.to_str())
+                .filter(|name| name.len() == 2)
+            else {
+                continue;
+            };
+            let metadata = match fs::symlink_metadata(&path) {
+                Ok(metadata) => metadata,
+                Err(error) if error.kind() == io::ErrorKind::NotFound => continue,
+                Err(error) => return Err(error),
+            };
+            if !metadata.is_dir() {
+                continue;
+            }
+            if !prefix.starts_with(dir_name)
+                && !dir_name.starts_with(&prefix[..std::cmp::min(2, prefix.len())])
+            {
+                continue;
+            }
+            let nested = match fs::read_dir(&path) {
+                Ok(nested) => nested,
+                Err(error) if error.kind() == io::ErrorKind::NotFound => continue,
+                Err(error) => return Err(error),
+            };
+            let parent_name = dir_name.to_string();
+            for nested in nested {
+                let nested_path = nested?.path();
+                let metadata = match fs::symlink_metadata(&nested_path) {
+                    Ok(metadata) => metadata,
+                    Err(error) if error.kind() == io::ErrorKind::NotFound => continue,
+                    Err(error) => return Err(error),
+                };
+                if !metadata.is_file() {
+                    continue;
+                }
+                let Some(file_name) = nested_path.file_name().and_then(|name| name.to_str()) else {
+                    tracing::warn!(
+                        path = %nested_path.display(),
+                        "skipping loose-object entry with non-UTF-8 file name"
+                    );
+                    continue;
+                };
+                let full_hash = format!("{parent_name}{file_name}");
+                if full_hash.starts_with(prefix)
+                    && let Ok(hash) = crate::internal::object_format::parse_repo_oid(&full_hash)
+                {
+                    objects.push(hash);
+                }
+            }
+        }
+        Ok(())
+    }
+
+    fn collect_pack_prefix(
+        &self,
+        objects: &mut Vec<ObjectHash>,
+        prefix: &str,
+    ) -> Result<(), io::Error> {
+        for index in self.list_indexes_checked()? {
+            for hash in Self::list_idx_objects(&index)? {
+                if hash.to_string().starts_with(prefix) {
+                    objects.push(hash);
+                }
+            }
+        }
+        Ok(())
+    }
+
+    fn list_packs_checked(&self) -> Result<Vec<PathBuf>, io::Error> {
+        let pack_dir = self.base_path.join("pack");
+        let entries = match fs::read_dir(&pack_dir) {
+            Ok(entries) => entries,
+            Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(Vec::new()),
+            Err(error) => return Err(error),
+        };
+        let mut packs = Vec::new();
+        for entry in entries {
+            let path = entry?.path();
+            let metadata = match fs::symlink_metadata(&path) {
+                Ok(metadata) => metadata,
+                Err(error) if error.kind() == io::ErrorKind::NotFound => continue,
+                Err(error) => return Err(error),
+            };
+            if metadata.is_file() && path.extension().is_some_and(|ext| ext == "pack") {
+                packs.push(path);
+            }
+        }
+        Ok(packs)
+    }
+
+    fn list_indexes_checked(&self) -> Result<Vec<PathBuf>, io::Error> {
+        let mut indexes = Vec::new();
+        for pack in self.list_packs_checked()? {
+            let index = pack.with_extension("idx");
+            let (Some(pack_str), Some(index_str)) = (pack.to_str(), index.to_str()) else {
+                tracing::warn!(
+                    pack = %pack.display(),
+                    index = %index.display(),
+                    "skipping pack with non-UTF-8 path"
+                );
+                continue;
+            };
+            let want_v2 = crate::internal::object_format::pack_index_is_v2(
+                git_internal::hash::get_hash_kind(),
+            );
+            let needs_rebuild = if index.exists() {
+                if want_v2 {
+                    !matches!(Self::read_idx_version_path(&index), Ok(IdxVersion::V2))
+                } else {
+                    false
+                }
+            } else {
+                true
+            };
+            if needs_rebuild {
+                let built = if want_v2 {
+                    command::index_pack::build_index_v2(pack_str, index_str)
+                } else {
+                    command::index_pack::build_index_v1(pack_str, index_str)
+                };
+                built.map_err(|error| {
+                    io::Error::other(format!(
+                        "failed to read pack index '{}': {error}",
+                        index.display()
+                    ))
+                })?;
+            }
+            indexes.push(index);
+        }
+        Ok(indexes)
+    }
+
     fn list_all_packs(&self) -> Vec<PathBuf> {
         let pack_dir = self.base_path.join("pack");
         if !pack_dir.exists() {
@@ -2175,6 +2335,15 @@ impl Storage for LocalStorage {
         })
         .await
         .unwrap_or_default()
+    }
+
+    async fn search_checked(&self, prefix: &str) -> Result<Vec<ObjectHash>, GitError> {
+        let self_clone = self.clone();
+        let prefix = prefix.to_string();
+        tokio::task::spawn_blocking(move || self_clone.search_checked_blocking(&prefix))
+            .await
+            .map_err(|error| GitError::IOError(io::Error::other(error)))?
+            .map_err(GitError::IOError)
     }
 }
 

@@ -19,6 +19,7 @@ use std::{collections::HashSet, fs};
 
 use clap::Parser;
 use git_internal::{
+    errors::GitError,
     hash::ObjectHash,
     internal::{index::Index, object::commit::Commit},
 };
@@ -431,7 +432,7 @@ async fn apply_remaining(
         // object search) so the three-way fallback also works in cloned /
         // repacked repos where nothing is loose.
         let resolved_bases = if state.payload.three_way {
-            resolve_three_way_bases(&mail.patch).await
+            resolve_three_way_bases(&mail.patch).await?
         } else {
             std::collections::HashMap::new()
         };
@@ -760,23 +761,38 @@ fn test_failpoint_enabled(name: &str) -> bool {
 /// the full object store — packed objects included, abbreviated ids
 /// expanded via object search when unambiguous. Misses are simply
 /// absent from the map (the loose-scan fallback still runs).
-async fn resolve_three_way_bases(patch_text: &str) -> std::collections::HashMap<String, Vec<u8>> {
+async fn resolve_three_way_bases(
+    patch_text: &str,
+) -> CliResult<std::collections::HashMap<String, Vec<u8>>> {
     use crate::command::apply::patch_index_old_ids;
 
     let mut bases = std::collections::HashMap::new();
     let storage = util::objects_storage();
     for oid_prefix in patch_index_old_ids(patch_text, 1) {
-        let candidates = storage.search(&oid_prefix).await;
+        let candidates = storage.search_checked(&oid_prefix).await.map_err(|error| {
+            CliError::fatal(format!(
+                "failed to search object storage for '{oid_prefix}': {error}"
+            ))
+            .with_stable_code(StableErrorCode::IoReadFailed)
+        })?;
         let [oid] = candidates.as_slice() else {
-            continue; // missing or ambiguous — leave unresolved
+            continue; // no match or more than one match — leave unresolved
         };
-        if let Ok(bytes) = storage.get(oid)
-            && bytes.len() <= MAX_PATCH_BYTES
-        {
-            bases.insert(oid_prefix, bytes);
+        match storage.get(oid) {
+            Ok(bytes) if bytes.len() <= MAX_PATCH_BYTES => {
+                bases.insert(oid_prefix, bytes);
+            }
+            Ok(_) => {}
+            Err(GitError::ObjectNotFound(_)) => {}
+            Err(error) => {
+                return Err(CliError::fatal(format!(
+                    "failed to read object {oid} while resolving a patch base: {error}"
+                ))
+                .with_stable_code(StableErrorCode::IoReadFailed));
+            }
         }
     }
-    bases
+    Ok(bases)
 }
 
 /// PD-09 ⑤ `applypatch-msg`: the proposed commit message is written to
@@ -1336,4 +1352,83 @@ fn am_resolution_error(message: &str) -> CliError {
 
 fn mail_subject(message: &str) -> String {
     message.lines().next().unwrap_or("(no subject)").to_string()
+}
+
+#[cfg(all(test, unix))]
+mod tests {
+    use std::{fs, os::unix::fs::PermissionsExt};
+
+    use serial_test::serial;
+
+    use super::resolve_three_way_bases;
+    use crate::utils::{
+        error::StableErrorCode,
+        test::{ChangeDirGuard, setup_with_new_libra_in},
+    };
+
+    const PATCH: &str = "\
+diff --git a/file.txt b/file.txt
+index abcdef01..0123456789abcdef0123456789abcdef01234567 100644
+--- a/file.txt
++++ b/file.txt
+@@ -0,0 +1 @@
++x
+";
+
+    struct RestoreMode {
+        path: std::path::PathBuf,
+        mode: u32,
+    }
+
+    impl Drop for RestoreMode {
+        fn drop(&mut self) {
+            let Ok(metadata) = fs::metadata(&self.path) else {
+                return;
+            };
+            let mut permissions = metadata.permissions();
+            permissions.set_mode(self.mode);
+            let _ = fs::set_permissions(&self.path, permissions);
+        }
+    }
+
+    #[tokio::test]
+    #[serial(cwd, env)]
+    async fn am_unreadable_object_dir_is_not_a_missing_base() {
+        // SAFETY: `geteuid` only reads the process credential and has no pointer argument.
+        if unsafe { libc::geteuid() } == 0 {
+            eprintln!("skipped (directory mode bits do not constrain root)");
+            return;
+        }
+        let repo = tempfile::tempdir().expect("tmp");
+        setup_with_new_libra_in(repo.path()).await;
+        let _guard = ChangeDirGuard::new(repo.path());
+        let objects = repo.path().join(".libra/objects");
+        let readable = resolve_three_way_bases(PATCH)
+            .await
+            .expect("a readable store leaves an unmatched prefix unresolved");
+        assert!(readable.is_empty(), "{readable:?}");
+
+        fs::create_dir_all(objects.join("ab")).expect("shard");
+        fs::write(objects.join("ab/cdef01"), b"loose").expect("loose name");
+        let mut permissions = fs::metadata(&objects).expect("meta").permissions();
+        let previous = permissions.mode();
+        permissions.set_mode(0o444);
+        fs::set_permissions(&objects, permissions).expect("restrict objects dir");
+        let _restore = RestoreMode {
+            path: objects,
+            mode: previous,
+        };
+
+        let error = resolve_three_way_bases(PATCH)
+            .await
+            .expect_err("an unreadable object directory is a read failure");
+        let rendered = error.to_string();
+        assert_eq!(error.stable_code(), StableErrorCode::IoReadFailed);
+        assert!(
+            !rendered.contains("missing")
+                && !rendered.contains("absent")
+                && !rendered.contains("not found"),
+            "{rendered}"
+        );
+    }
 }

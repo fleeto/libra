@@ -291,6 +291,16 @@ pub trait Storage: Send + Sync {
     /// Note: Performance may vary significantly between backends (fast locally, potentially slow remotely).
     async fn search(&self, prefix: &str) -> Vec<ObjectHash>;
 
+    /// Prefix search that keeps directory and pack-index read failures.
+    ///
+    /// The default calls [`Self::search`] and therefore still hides errors
+    /// that implementation already turned into an empty list. Local storage
+    /// overrides this. A missing objects directory is an empty loose result,
+    /// not a read failure.
+    async fn search_checked(&self, prefix: &str) -> Result<Vec<ObjectHash>, GitError> {
+        Ok(self.search(prefix).await)
+    }
+
     /// Batch existence check — returns one `bool` per input hash, in the same
     /// order (`lore.md` §0.6). Used as a dedup pre-check (e.g. "which of these
     /// objects does the remote already have before I upload?").

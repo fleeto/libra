@@ -17,7 +17,8 @@
 | FIX-LTR-05P | family child，已在 main `8a115ba` | 存在性探测第一切片已推送；实现审查 dc579753 PASS；不消耗 v0.30.88 |
 | FIX-LTR-05Q | family child，已在 main `c0373cb` | show、maintenance、command restore、Blob::save 已推送；准入 3de3e11b，实现审查 cf7454d4 PASS；不消耗 v0.30.88 |
 | FIX-LTR-05R | family child，已在 main `80ef760` | snapshot、operation store、operation restore、repack 已推送；准入 54f3e8cf，实现审查 146781d3 PASS；不消耗 v0.30.88 |
-| FIX-LTR-05S | 自 FIX-LTR-05 拆出，in-progress/空 | client_storage 的索引补登记与修订后缀类型过滤；准入 71cf457d；实现审查 d6849287 VERDICT PASS；不消耗 v0.30.88 |
+| FIX-LTR-05S | family child，已在 main `6177646` | client_storage 的索引补登记与修订后缀类型过滤已推送；准入 71cf457d，实现审查 d6849287 PASS；不消耗 v0.30.88 |
+| FIX-LTR-05T | 自 FIX-LTR-05 拆出，in-progress/空 | am 的本地对象搜索在目录不可读时返回读错误；准入 986c352a；实现审查 02aa713c VERDICT PASS；不消耗 v0.30.88 |
 | FIX-LTR-05 | 新登记，blocked/空 | 修复配置解析失败被错误当作 LocalStorage 成功的单一行为轴；具体卡见下；发布例外已由用户原话批准为仅 v0.30.88，设计 ER03 要求先拆卡，本卡仍不得先实施 |
 | FIX-LTR-04 | blocked/locally-accepted | 只保留两行 cfg 候选与旧 A/源审的有限效力；F1/F2 关闭后重新准入、完整新 C/D，消除两方法 release warning |
 | FIX-LTR-02 | blocked/locally-accepted | 在 FIX04 发布后精确恢复索引结清 helper 候选；保留原断言并完成新来源完整 C/D |
@@ -107,7 +108,7 @@ FIX05 前需要只读的 `DEP-QUAL-F2-ATTRIB` 决定与当前本地Claude ER03�
 
 **Full-suite trigger:** T-1：跨命令共享存储核心；A、C均完整默认套件，沿本文双env/nextest原命令；不以focused PASS替代。
 
-**Dependencies:** `FIX-LTR-01`、`FIX-LTR-05P`、`FIX-LTR-05Q`、`FIX-LTR-05R`、`FIX-LTR-05S`、`DEP-QUAL-SOURCE`、`DEP-QUAL-PUBLISH`、`DEP-QUAL-F2-ATTRIB`、`DEC-QUAL-05-RELEASE-WARNING`。本卡拆出 `FIX-LTR-05P`、`FIX-LTR-05Q`、`FIX-LTR-05R` 与 `FIX-LTR-05S`。05S 只改 `client_storage` 的两处调用，没有覆盖 `am.rs`、`fetch.rs` 和布尔 `search`，所以本卡仍 blocked。F2-CLOSE不是本卡前驱；独立缺陷必须另外登记其FIX-ID和边；不以未来FIX04的C/D为前驱，避免环。
+**Dependencies:** `FIX-LTR-01`、`FIX-LTR-05P`、`FIX-LTR-05Q`、`FIX-LTR-05R`、`FIX-LTR-05S`、`FIX-LTR-05T`、`DEP-QUAL-SOURCE`、`DEP-QUAL-PUBLISH`、`DEP-QUAL-F2-ATTRIB`、`DEC-QUAL-05-RELEASE-WARNING`。本卡拆出 `FIX-LTR-05P`、`FIX-LTR-05Q`、`FIX-LTR-05R`、`FIX-LTR-05S` 与 `FIX-LTR-05T`。05T 只让本地 `search_checked` 对 `am` 失败关闭；`fetch.rs` 和 tiered/remote 的 `search` 仍吞错，所以本卡仍 blocked。F2-CLOSE不是本卡前驱；独立缺陷必须另外登记其FIX-ID和边；不以未来FIX04的C/D为前驱，避免环。
 
 **Deliverables:** 单轴生产修复、完整测试、下列同卡文档与证据摘要；不是仅输出诊断报告。
 
@@ -368,6 +369,59 @@ FIX05 前需要只读的 `DEP-QUAL-F2-ATTRIB` 决定与当前本地Claude ER03�
 
 **Granularity:** `type=migration; axis=索引补登记和修订后缀不再把存储读取失败当成对象不存在; recovery=immutable-release前滚; complete=yes; self-contained=yes; AC=2/8; VER=2/8; landing=2; prod-files=1; scope=S; deps=FIX-LTR-05R; writeset=序列化于FIX-LTR-05之前; release=family child; split-from=FIX-LTR-05; exception=N/A`
 
+### Task FIX-LTR-05T: am 的本地对象搜索不再把不可读目录当成缺失
+
+**Task type:** `migration`
+
+**Lifecycle / Acceptance:** `in-progress` / 空（session `986c352a-927e-4f3f-855e-f9879764e9e7` 已准入这四个生产文件；实现审查 `02aa713c-60c8-4b6a-b5c6-7e09cf2096af` VERDICT PASS。前一轮 `de5171c1` 的 Windows 测试模块 P1 已用 `cfg(all(test, unix))` 关闭）
+
+**Description:** `Storage::search_checked` 在本地对象目录或 pack 索引读失败时返回 `Err`。对象目录不存在仍是空的 loose 结果。`am` 的三方基线解析使用这条路径。没有唯一匹配时仍留下该 id。读失败是 `StableErrorCode::IoReadFailed`，不说成缺失。`Storage::search` 的 `Vec` 行为保持不变。
+
+**Out of scope:** 不改 `tiered.rs` 和 `remote.rs`。它们继续使用 trait 默认实现，因此 tiered 仓库的本地目录错误仍被吞掉。该项登记为 `DEFER-QUAL-05-TIERED-SEARCH`，重启条件是后续切片为 tiered 覆盖 `search_checked`。不改 `fetch.rs`，不改 `search_result` 的修订解析，不 bump、不打 tag。本卡完成也不准入 FIX-LTR-05。
+
+**Current evidence:** `LocalStorage::search` 在 `src/utils/storage/local.rs` 跳过不可读目录项。`resolve_three_way_bases` 在 `src/command/am.rs`。准入 session `986c352a-927e-4f3f-855e-f9879764e9e7`。
+
+**Acceptance criteria:**
+
+- [ ] AC-1: 本地对象目录不可读时，`search_checked` 返回 `Err`。目录不存在仍是空结果。
+- [ ] AC-2: `am` 把该错误显示为 `IoReadFailed`，正文不是 missing、absent 或 not found。没有唯一匹配时仍不解析该 id。
+
+**Verification:**
+
+- [ ] VER-1: `source .env.test && source .env.live-test && cargo nextest run --lib -E 'test(am_unreadable_object_dir_is_not_a_missing_base)' --no-fail-fast --retries 0`
+
+**Full-suite trigger:** `N/A`（本卡不改 `sql/**`、`src/cli.rs`、稳定错误码表或版本面）。
+
+**Dependencies:** `FIX-LTR-05S`。
+
+**Deliverables:** 上述四个生产文件的可失败前缀搜索，以及 `am` 的同文件测试。
+
+**Implementation write set:** `src/utils/storage/mod.rs`、`src/utils/storage/local.rs`、`src/utils/client_storage.rs`、`src/command/am.rs`、`tests/SRC_SERIAL_REGISTRY.tsv`、`tests/SRC_SERIAL_CENSUS.tsv`、本计划、`docs/development/plan/plan-status.md` 仅本计划行。
+
+**Release write set:** `N/A`
+
+**Files likely touched:** 与 I 相同。
+
+**Docs and compatibility impact:** `N/A`。本卡不新增命令、参数、配置或稳定错误码。没有唯一对象匹配时的原行为保持。没有对应的网站命令页需要改写。`ClientStorage::search_checked` 只做前缀搜索，不解析 `HEAD`、分支或 `~` / `^`。
+
+**Rollback mode:** `immutable-release`
+
+**Migration and rollback:** 无 schema 迁移。已推送提交只以前滚修正。
+
+**Security and privacy:** 错误文本不包含配置值、凭据或数据库路径。目录读失败不得被当成补丁基线不存在。
+
+**Performance budget:** 不增加重试。本卡本地验证一次 3600 秒，含编译。
+
+**Estimated scope:** `M`
+
+**Version increment:** `N/A`
+
+**Release boundary:** `family child`。不 bump、不 tag。已批准的 `v0.30.88` 仍只属于 FIX-LTR-05 那一次发布。
+
+**C/D coverage from:** `FIX-LTR-05`
+
+**Granularity:** `type=migration; axis=am 的本地对象搜索不再把不可读目录当成缺失; recovery=immutable-release前滚; complete=yes; self-contained=yes; AC=2/8; VER=1/8; landing=4; prod-files=4; scope=M; deps=FIX-LTR-05S; writeset=序列化于FIX-LTR-05之前; release=family child; split-from=FIX-LTR-05; exception=N/A`
+
 ### FIX04、FIX02、FIX03 的接续细则（覆盖旧开工快照）
 
 - **FIX04：** Dependencies现为FIX05完整C/D、DEP-QUAL-F2-CLOSE已审定关闭、SOURCE/PUBLISH。从实际已发布main重新建源；仅两cfg与本计划/status行，不携带helper5025。原A1、源B、自己ER05仅在源与覆盖未变且原件可核时限域carry；失败C1的bump/lock、全量、release构建、安装不能继承。先登记当前恢复及新预算，Claude PASS后才claim；default与keyring release必须零项目warning，之后每卡继续零warning。版本只能在FIX05实际版本上patch+1。
@@ -591,7 +645,7 @@ R1真实ER03/RECOVERY PASS、H0/VERDICT FAIL（sessionbb82411c-1e59-4e52-a7f1-93
 
 ## 实施顺序与发布窗口
 
-`DEP-QUAL-SECURITY + DEP-QUAL-SOURCE + DEP-QUAL-PUBLISH -> FIX-LTR-01 -> FIX-LTR-05P -> FIX-LTR-05Q -> FIX-LTR-05R -> FIX-LTR-05S -> FIX-LTR-05 -> FIX-LTR-04 -> FIX-LTR-02 -> FIX-LTR-03 -> DEP-QUAL-HANDOFF`；另有 `DEP-QUAL-F2-ATTRIB + DEC-QUAL-05-RELEASE-WARNING -> FIX-LTR-05`，另有 `FIX05/具名新FIX -> DEP-QUAL-F2-CLOSE -> FIX04`。`FIX-LTR-05S` 当前切片只含 client_storage 的索引补登记和修订后缀类型过滤。其余 exist/search 调用方未迁完时 FIX-LTR-05 仍 blocked。顺序用于共享本计划/版本面的串行发布，不表示合并发布。先修确定性全量阻断，再修共享fixture，最后完成MCP测试清理与整份修复计划的最终资格。每卡真正 C/D 闭合后才发布下一卡。`FIX-LTR-05P`、`FIX-LTR-05Q`、`FIX-LTR-05R` 与 `FIX-LTR-05S` 都是 family child，不占用 v0.30.88。
+`DEP-QUAL-SECURITY + DEP-QUAL-SOURCE + DEP-QUAL-PUBLISH -> FIX-LTR-01 -> FIX-LTR-05P -> FIX-LTR-05Q -> FIX-LTR-05R -> FIX-LTR-05S -> FIX-LTR-05T -> FIX-LTR-05 -> FIX-LTR-04 -> FIX-LTR-02 -> FIX-LTR-03 -> DEP-QUAL-HANDOFF`；另有 `DEP-QUAL-F2-ATTRIB + DEC-QUAL-05-RELEASE-WARNING -> FIX-LTR-05`，另有 `FIX05/具名新FIX -> DEP-QUAL-F2-CLOSE -> FIX04`。`FIX-LTR-05T` 当前切片只含本地 `search_checked` 和 `am` 的三方基线解析。tiered/remote 与 `fetch.rs` 未迁完时 FIX-LTR-05 仍 blocked。顺序用于共享本计划/版本面的串行发布，不表示合并发布。先修确定性全量阻断，再修共享fixture，最后完成MCP测试清理与整份修复计划的最终资格。每卡真正 C/D 闭合后才发布下一卡。`FIX-LTR-05P` 到 `FIX-LTR-05T` 都是 family child，不占用 v0.30.88。
 
 ### 实际 D 映射与现场复核
 
@@ -899,6 +953,7 @@ R1真实ER03/RECOVERY PASS、H0/VERDICT FAIL（sessionbb82411c-1e59-4e52-a7f1-93
 
 | 日期 | 触发 | 变更 | 实际状态 |
 |---|---|---|---|
+| 2026-10-26 10:05:00 UTC | 05T 准入 session 986c352a；实现审查 de5171c1 FAIL 后 02aa713c PASS | 冻结 storage trait、local、client_storage、am；Windows 测试模块改为 cfg(all(test, unix))；不占用 v0.30.88；FIX-LTR-05 仍 blocked；tiered 搜索记为 DEFER-QUAL-05-TIERED-SEARCH | in-progress/空；实现审查 PASS |
 | 2026-10-26 09:40:00 UTC | 05S 准入 session 71cf457d 与实现审查 d6849287 | 冻结 client_storage.rs 的索引补登记与修订后缀类型过滤；focused 测试已通过；不占用 v0.30.88；FIX-LTR-05 仍 blocked | in-progress/空；实现审查 PASS |
 | 2026-10-26 09:20:00 UTC | 05R 准入 session 54f3e8cf 与实现审查 146781d3 | 冻结 snapshot.rs、store.rs、operation restore.rs、repack.rs；focused 测试已通过；不占用 v0.30.88；FIX-LTR-05 仍 blocked | in-progress/空；实现审查 PASS |
 | 2026-10-26 08:10:00 UTC | 05Q 准入 session 3de3e11b 与实现审查 cf7454d4 | 冻结 show.rs、maintenance.rs、restore.rs、object_ext.rs；四个 focused 测试通过；不占用 v0.30.88；FIX-LTR-05 仍 blocked | in-progress/空；实现审查 PASS |
@@ -919,8 +974,9 @@ R1真实ER03/RECOVERY PASS、H0/VERDICT FAIL（sessionbb82411c-1e59-4e52-a7f1-93
 | FIX-LTR-05P | 存储读取失败不再被布尔存在性探测说成对象不存在 | client_storage.rs、fsck.rs、cat_file.rs、obliteration/mod.rs、file.rs 及本卡测试、本计划、plan-status 本计划行 | 6/8、5/8 | 4/5 M；file.rs 只消费 classify_presence 的 Result | FIX-LTR-01 + DEP-QUAL-SOURCE | family child；不占用 v0.30.88；实现审查 dc579753 PASS，尚未推送 |
 | FIX-LTR-05Q | show、maintenance、restore 和 Blob::save 的读取失败不再当成对象不存在 | show.rs、maintenance.rs、restore.rs、object_ext.rs 及本卡测试、本计划、plan-status 本计划行 | 4/8、4/8 | 4/4 M | FIX-LTR-05P | family child；不占用 v0.30.88；已推送 c0373cb |
 | FIX-LTR-05R | 操作日志快照、恢复和 repack 的读取失败不再当成对象不存在 | snapshot.rs、store.rs、operation restore.rs、repack.rs 及本卡测试、本计划、plan-status 本计划行 | 4/8、4/8 | 4/4 M | FIX-LTR-05Q | family child；不占用 v0.30.88；已推送 80ef760 |
-| FIX-LTR-05S | 索引补登记和修订后缀不再把存储读取失败当成对象不存在 | client_storage.rs 及本卡测试、本计划、plan-status 本计划行 | 2/8、2/8 | 2/1 S | FIX-LTR-05R | family child；不占用 v0.30.88；session 71cf457d 已准入 |
-| FIX-LTR-05 | 配置失败与对象存储fail-closed（未准入候选） | client_storage/util/fetch候选及卡内逐文件同步集 | 8/8、6/8 | 3文件候选；落点/规模pending VER-6 | FIX01 + 05P + 05Q + 05R + 05S + SOURCE/PUBLISH + F2-ATTRIB + v0.30.88决定；05S不足以解除阻塞 | independent/self；不得先实施 |
+| FIX-LTR-05S | 索引补登记和修订后缀不再把存储读取失败当成对象不存在 | client_storage.rs 及本卡测试、本计划、plan-status 本计划行 | 2/8、2/8 | 2/1 S | FIX-LTR-05R | family child；不占用 v0.30.88；已推送 6177646 |
+| FIX-LTR-05T | am 的本地对象搜索不再把不可读目录当成缺失 | storage/mod.rs、local.rs、client_storage.rs、am.rs 及本卡测试、本计划、plan-status 本计划行 | 2/8、1/8 | 4/4 M | FIX-LTR-05S | family child；不占用 v0.30.88；session 986c352a 已准入 |
+| FIX-LTR-05 | 配置失败与对象存储fail-closed（未准入候选） | client_storage/util/fetch候选及卡内逐文件同步集 | 8/8、6/8 | 3文件候选；落点/规模pending VER-6 | FIX01 + 05P + 05Q + 05R + 05S + 05T + SOURCE/PUBLISH + F2-ATTRIB + v0.30.88决定；05T不足以解除阻塞 | independent/self；不得先实施 |
 | FIX-LTR-04 | 同步ingress测试构造器profile可用性 | ingress.rs仅两cfg、本计划、plan-status本计划行 | 4/8、5/8 | 1/1 S | FIX-LTR-05 + F2-CLOSE + SOURCE/PUBLISH | independent/self |
 | FIX-LTR-02 | reasoning fixture索引结清 | reasoning_artifact.rs、本计划、plan-status本计划行 | 4/8、3/8 | 1/0 S | FIX-LTR-01/FIX-LTR-04 | independent/self |
 | FIX-LTR-03 | MCP owned worker teardown | agent_mcp_exec_test.rs、本计划、plan-status本计划行 | 4/8、4/8 | 1/0 S | FIX-LTR-02 | independent/self |
@@ -1139,7 +1195,7 @@ root继续承担准入与执行器P2：任何新源码/元数据/help变化先ST
 | DEP-QUAL-HANDOFF | outgoing | 来源资格 | plan-20261015 LTR-10 / LTR-01 | root | 四卡独立C/D完成、FIX03 bump后C及发布后最终资格窗口全量/doc/network与本地Claude明确PASS（绑定实际merge树）、终态登记提交实际PR/main D通过并具名例行补记，再核受控整合树、原工作区受控整合/受影响门通过 | 后续真实提交/版本/远端ref/原件，当前无 | 来源资格未闭合不得解除LTR-10前置；不更改H1或替代LTR各卡门 |
 `DEP-QUAL-SECURITY + DEP-QUAL-SOURCE + DEP-QUAL-PUBLISH -> FIX-LTR-01 -> FIX-LTR-05 -> FIX-LTR-04 -> FIX-LTR-02 -> FIX-LTR-03 -> DEP-QUAL-HANDOFF`；另有 `DEP-QUAL-F2 + DEC-QUAL-05-RELEASE-WARNING -> FIX-LTR-05`，当前授权与诊断未闭合，候选顺序不等于准入。顺序用于共享本计划/版本面的串行发布，不表示合并发布。先修确定性全量阻断，再修共享fixture，最后完成MCP测试清理与整份修复计划的最终资格。每卡真正 C/D 闭合后才发布下一卡。
 
-现行顺序（2026-10-26，不以本快照为准）：`FIX-LTR-01 -> FIX-LTR-05P -> FIX-LTR-05Q -> FIX-LTR-05R -> FIX-LTR-05S -> FIX-LTR-05`。05S 当前切片已准入，但其余调用方未迁完时 FIX-LTR-05 仍 blocked。见上文「实施顺序与发布窗口」。
+现行顺序（2026-10-26，不以本快照为准）：`FIX-LTR-01 -> FIX-LTR-05P -> FIX-LTR-05Q -> FIX-LTR-05R -> FIX-LTR-05S -> FIX-LTR-05T -> FIX-LTR-05`。05T 当前切片已准入，但 tiered/remote 与 fetch 未迁完时 FIX-LTR-05 仍 blocked。见上文「实施顺序与发布窗口」。
 ### 四卡共同适用的逐项D清单
 **Granularity:** `type=implementation; axis=global-schema doctor的auto-upgrade结构oracle对齐; recovery=immutable-release前滚本卡单轴测试修复; complete=yes; self-contained=yes; AC=3/8; VER=3/8; landing=1; prod-files=0; scope=S; deps=DEP-QUAL-SOURCE, DEP-QUAL-SECURITY, DEP-QUAL-PUBLISH; writeset=四卡本计划与R串行; release=independent; split-from=新上游资格20261025实际FAIL/STOP; exception=N/A`
 **Granularity:** `type=implementation; axis=合成checkpoint fixture的索引结清前置; recovery=immutable-release前滚本卡单轴测试修复; complete=yes; self-contained=yes; AC=4/8; VER=3/8; landing=1; prod-files=0; scope=S; deps=FIX-LTR-01,FIX-LTR-04; writeset=四卡本计划与R串行; release=independent; split-from=新上游资格20261025实际FAIL/STOP; exception=N/A`

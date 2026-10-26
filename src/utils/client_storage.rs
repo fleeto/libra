@@ -2586,6 +2586,16 @@ impl ClientStorage {
         }
     }
 
+    /// Prefix search of the object store. Unlike [`Self::search`], this does
+    /// not resolve `HEAD`, branch names, or `~` / `^` navigation, and a
+    /// directory or pack-index read failure stays an error.
+    pub async fn search_checked(&self, prefix: &str) -> Result<Vec<ObjectHash>, GitError> {
+        let mut matches = self.storage.search_checked(prefix).await?;
+        matches.sort_unstable();
+        matches.dedup();
+        Ok(matches)
+    }
+
     /// Search for objects matching `obj_id`, surfacing errors to the caller.
     ///
     /// Functional scope:
@@ -3186,6 +3196,10 @@ impl Storage for ClientStorage {
 
     async fn search(&self, prefix: &str) -> Vec<ObjectHash> {
         ClientStorage::search(self, prefix).await
+    }
+
+    async fn search_checked(&self, prefix: &str) -> Result<Vec<ObjectHash>, GitError> {
+        ClientStorage::search_checked(self, prefix).await
     }
 }
 

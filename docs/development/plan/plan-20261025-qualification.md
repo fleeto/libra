@@ -25,11 +25,12 @@
 | FIX-LTR-05X | family child，实现审查 PASS | ER03 `8059d2f4` PASS；实现审查 `bd0e229d` PASS；已在 main `a729384`；不消耗 v0.30.88 |
 | FIX-LTR-05Y | family child，已在 main `ec98926` | ER03 `db7a5d7f` PASS；实现审查 `a2a2af14` PASS；不消耗 v0.30.88 |
 | FIX-LTR-05Z | family child，实现审查 PASS | ER03 `272c8d7d` PASS；实现审查 `4a42ec63` PASS；不消耗 v0.30.88；不开始 FIX04 |
-| FIX-LTR-05 | 新登记，blocked/空 | 修复配置解析失败被错误当作 LocalStorage 成功的单一行为轴；具体卡见下；发布例外已由用户原话批准为仅 v0.30.88，设计 ER03 要求先拆卡，本卡仍不得先实施 |
+| FIX-LTR-05 | 本地 C 已过，tag 与 D 待观察 | 父卡 VER-1 至 VER-5 与失败关闭的缓存、fetch pack 已在 ae50414 满足。审查 d9641b0d PASS。本提交占用 v0.30.88。F2 仍 unknown。RISK-QUAL-ADD-LOOSE 未修。不开始 FIX04 |
 | FIX-LTR-04 | blocked/locally-accepted | 只保留两行 cfg 候选与旧 A/源审的有限效力；F1/F2 关闭后重新准入、完整新 C/D，消除两方法 release warning |
 | FIX-LTR-02 | blocked/locally-accepted | 在 FIX04 发布后精确恢复索引结清 helper 候选；保留原断言并完成新来源完整 C/D |
 | FIX-LTR-03 | pending/空 | 修复 MCP 测试拥有的暂停 worker 的清理，完成自己的 C/D，随后执行计划最终资格与受控整合 |
 | F3 / RISK-QUAL-STDIN | 具名 P2，未修 | `subagent_content` fixture 的 BrokenPipe/时序风险单独处理；不能混入 FIX05；若升级为 P1 或阻断当前门，先另立 FIX 卡和依赖 |
+| RISK-QUAL-ADD-LOOSE | 具名 P2，未修 | 操作日志在命令前用 `ClientStorage::init_local` 写快照，忽略 `LIBRA_STORAGE_TYPE`。`LIBRA_STORAGE_TYPE=gcs-canary` 时 `libra add` 以 LBR-IO-002 失败且不写 index，仍留下 loose 对象（含 blob `45b983be`）。不宣称失败配置下所有命令零对象写入。不混入本卡发布，也不开始 FIX04 |
 | DOC-LTR-01 | locally-accepted | PR636 的文档修复与实际 main D 已发生，仍按原声明由 FIX03 覆盖；不因本交接晋升 |
 | DOC-LTR-02 | 本次任务定义交接 | 仅本文件、main、signed/DCO、实际本地 Claude；无产品版本发布，覆盖由 FIX03 承载 |
 
@@ -91,7 +92,7 @@ FIX05 前需要只读的 `DEP-QUAL-F2-ATTRIB` 决定与当前本地Claude ER03�
 
 **Task type:** `implementation`
 
-**Lifecycle / Acceptance:** `blocked` / 空（DEC-QUAL-05 用户原话与 session 4042079a 发布次序 PASS 已记录；F2-ATTRIB 仍是 unknown。FIX-LTR-05W 已推送 `2a80a10`。FIX-LTR-05X 已推送 `a729384`，确认失败不再变成可操作的 `LocalStorage`，也不进缓存。未决 TYPE 的这一次调用在 05Y 之前仍是本地结果。FIX-LTR-05Y 已推送 `ec98926`，只让该客户端不进缓存。FIX-LTR-05Z 的 ER03 `272c8d7d` PASS，实现审查 `4a42ec63` PASS，只让未决 TYPE 这一次调用不再构造可写的 `LocalStorage`。无本卡自己的 VER-1 至 VER-5、bump 或发布，所以本卡仍 blocked）
+**Lifecycle / Acceptance:** `in-progress` / 本地 C 已过（DEC-QUAL-05 与 session 4042079a 仍有效。F2-ATTRIB 仍是 unknown。05W 至 05Z 与 ae50414 已在 main。父卡 VER-1 至 VER-5 在 ae50414 通过：93、62、51、58、54，0 failed。完整套件 df24361e：10822 passed，0 failed；`test_fetch_into_mirror_updates_and_prunes_all_refs` 重试后通过。审查 d9641b0d VERDICT PASS，RELEASE_BUMP_ALLOWED yes。本提交把三个版本面改为 0.30.88。tag、Release 与 D 尚未观察，所以还不是 done。不开始 FIX04。RISK-QUAL-ADD-LOOSE 是未修 P2，不宣称失败配置下所有命令都零对象写入）
 
 **Description:** 单一行为轴是对象存储配置解析失败的 fail-closed 语义。普通解析/数据库/解密错误不能自动创建可继续写入的 LocalStorage，也不能用额外 stderr Warning 破坏 machine/JSON 输出。保留明确 local-only、合法 remote 配置、配置角色隔离及 COV/OG 已有 GlobalSchemaFuture 处理策略。优先审计保持 `ClientStorage::init -> Self` 签名的私有失败后端方案，避免把现有约99处调用点改成新的 fallible API；不是只移除 eprintln。候选后端必须审计并覆写所有可能返回成功/执行副作用的方法，尤其 `exist_checked`、`object_size`、`heal`、`evict_local`、`delete_payload` 的默认实现及其batch路径；legacy bool/search 方法不能将未知持久化状态当成功或删除依据。实际调用链若无法在本卡写集内保证正确性，先拆卡，不以返回 false 或空集合掩盖错误。
 
@@ -103,27 +104,27 @@ FIX05 前需要只读的 `DEP-QUAL-F2-ATTRIB` 决定与当前本地Claude ER03�
 
 **Acceptance criteria:**
 
-- [ ] AC-1: 普通配置解析错误不产生可操作的 LocalStorage 后端。
-- [ ] AC-2: 经ClientStorage/Storage的写入和状态变更拒绝失败配置；fetch在pack/index安装前完成同一配置检查，无错误成功及本卡调用路径的对象/index/ref副作用。全局绕过Storage的删除路径先VER-6核清，不把此条伪称覆盖所有命令。
-- [ ] AC-3: machine/JSON 失败输出保持原结构与退出约定，不夹入未结构化 Warning。
-- [ ] AC-4: 错误诊断不泄漏配置值、凭据或解密原文。
-- [ ] AC-5: local-only配置可正常读取时保持原可用行为；DB busy无法判定local/remote时不得静默降级，行为/错误码兼容方案先审定，未经具名决定不改变既有local命令契约。
-- [ ] AC-6: 合法 remote 配置保持原存储选择与持久化行为。
-- [ ] AC-7: COV/OG 的全局 future-schema/配置角色策略保持原契约。
-- [ ] AC-8: 配置瞬时失败不被路径缓存永久固定；配置恢复后同一长进程按已审定策略恢复，无自动无限重试。
+- [x] AC-1: 普通配置解析错误不产生可操作的 LocalStorage 后端。
+- [x] AC-2: 经ClientStorage/Storage的写入和状态变更拒绝失败配置；fetch在pack/index安装前完成同一配置检查，无错误成功及本卡调用路径的对象/index/ref副作用。全局绕过Storage的删除路径先VER-6核清，不把此条伪称覆盖所有命令。
+- [x] AC-3: machine/JSON 失败输出保持原结构与退出约定，不夹入未结构化 Warning。
+- [x] AC-4: 错误诊断不泄漏配置值、凭据或解密原文。
+- [x] AC-5: local-only配置可正常读取时保持原可用行为；DB busy无法判定local/remote时不得静默降级，行为/错误码兼容方案先审定，未经具名决定不改变既有local命令契约。
+- [x] AC-6: 合法 remote 配置保持原存储选择与持久化行为。
+- [x] AC-7: COV/OG 的全局 future-schema/配置角色策略保持原契约。
+- [x] AC-8: 配置瞬时失败不被路径缓存永久固定；配置恢复后同一长进程按已审定策略恢复，无自动无限重试。
 
 **Verification:**
 
-- [ ] VER-1: `source .env.test && source .env.live-test && cargo nextest run --lib -E 'test(utils::client_storage::)' --no-fail-fast --retries 0`；完整模块非零，新增 `storage_config_failure_` 用例覆盖受控真实 SQLite 锁、失败后端全部方法、无落盘副作用、canary不泄漏、local/remote有效路径。使用同步屏障证明锁持有，保持原200ms，不用延长timeout掩盖故障。
-- [ ] VER-2: `source .env.test && source .env.live-test && cargo nextest run --test command_test -E 'test(command::fetch_test::)' --no-fail-fast --retries 0`；完整fetch模块非零，原machine/JSON、code、exit断言保持。
-- [ ] VER-3: `source .env.test && source .env.live-test && cargo nextest run --test command_test -E 'test(command::output_flags_test::)' --no-fail-fast --retries 0`；完整输出模式模块，不能靠过滤stderr使其通过。
-- [ ] VER-4: `source .env.test && source .env.live-test && cargo nextest run --test command_test -E 'test(command::reset_test::)' --no-fail-fast --retries 0`；完整reset模块；F2诊断、归属和已有断言分别记录，未证明根因不记修复。
-- [ ] VER-5: `source .env.test && source .env.live-test && cargo nextest run --test compat_global_config_schema_future --no-fail-fast --retries 0`；完整COV/OG兼容目标，保留权限、只读与future-schema断言。
+- [x] VER-1: `source .env.test && source .env.live-test && cargo nextest run --lib -E 'test(utils::client_storage::)' --no-fail-fast --retries 0`；完整模块非零，新增 `storage_config_failure_` 用例覆盖受控真实 SQLite 锁、失败后端全部方法、无落盘副作用、canary不泄漏、local/remote有效路径。使用同步屏障证明锁持有，保持原200ms，不用延长timeout掩盖故障。ae50414 上 93 passed，0 failed（run 7313ab4a）。登记里的同步屏障真锁用例没有落地，现有覆盖是把仓库库换成目录；这是 P2 缩窄，收据不写「真实锁已覆盖」。
+- [x] VER-2: `source .env.test && source .env.live-test && cargo nextest run --test command_test -E 'test(command::fetch_test::)' --no-fail-fast --retries 0`；完整fetch模块非零，原machine/JSON、code、exit断言保持。ae50414 上 62 passed，0 failed（run f7d066a1）。
+- [x] VER-3: `source .env.test && source .env.live-test && cargo nextest run --test command_test -E 'test(command::output_flags_test::)' --no-fail-fast --retries 0`；完整输出模式模块，不能靠过滤stderr使其通过。ae50414 上 51 passed，0 failed（run e8bb5e44）。
+- [x] VER-4: `source .env.test && source .env.live-test && cargo nextest run --test command_test -E 'test(command::reset_test::)' --no-fail-fast --retries 0`；完整reset模块；F2诊断、归属和已有断言分别记录，未证明根因不记修复。ae50414 上 58 passed，0 failed（run a3d3dc5c）。这不关闭 F2。
+- [x] VER-5: `source .env.test && source .env.live-test && cargo nextest run --test compat_global_config_schema_future --no-fail-fast --retries 0`；完整COV/OG兼容目标，保留权限、只读与future-schema断言。ae50414 上 54 passed，0 skipped（run 9941e16a）。
 - [ ] VER-6: 准入前逐方法/调用者只读审计 `Storage`、`ClientStorage::init`、util缓存、fetch写入顺序、exist_checked/batch、object_size、先unlink后delete_payload、bool/search与错误输出映射；以当前源码列出可能吞错的方法、对应真实测试及残余限制。发现写集外消费者违反fail-closed即ER03，不仅审计get/put。
 
 **Full-suite trigger:** T-1：跨命令共享存储核心；A、C均完整默认套件，沿本文双env/nextest原命令；不以focused PASS替代。
 
-**Dependencies:** `FIX-LTR-01`、`FIX-LTR-05P`、`FIX-LTR-05Q`、`FIX-LTR-05R`、`FIX-LTR-05S`、`FIX-LTR-05T`、`FIX-LTR-05U`、`FIX-LTR-05V`、`FIX-LTR-05W`、`FIX-LTR-05X`、`FIX-LTR-05Y`、`FIX-LTR-05Z`、`DEP-QUAL-SOURCE`、`DEP-QUAL-PUBLISH`、`DEP-QUAL-F2-ATTRIB`、`DEC-QUAL-05-RELEASE-WARNING`。本卡拆出 `FIX-LTR-05P` 至 `FIX-LTR-05Z`。05V 只改 AutoFollow 的对象探测。05W 只增加可失败构造并让 fetch 使用它。05X 只让 `init` 的确认失败不再变成可操作的 `LocalStorage`，且不把该失败写入对象缓存。05Y 只让未决 TYPE 的本地客户端不进对象缓存。05Z 只让这一次未决读取不再构造可写的 `LocalStorage`。本卡自己的 VER-1 至 VER-5、bump 和发布仍未做，所以本卡仍 blocked。F2-CLOSE不是本卡前驱；独立缺陷必须另外登记其FIX-ID和边；不以未来FIX04的C/D为前驱，避免环。
+**Dependencies:** `FIX-LTR-01`、`FIX-LTR-05P`、`FIX-LTR-05Q`、`FIX-LTR-05R`、`FIX-LTR-05S`、`FIX-LTR-05T`、`FIX-LTR-05U`、`FIX-LTR-05V`、`FIX-LTR-05W`、`FIX-LTR-05X`、`FIX-LTR-05Y`、`FIX-LTR-05Z`、`DEP-QUAL-SOURCE`、`DEP-QUAL-PUBLISH`、`DEP-QUAL-F2-ATTRIB`、`DEC-QUAL-05-RELEASE-WARNING`。本卡拆出 `FIX-LTR-05P` 至 `FIX-LTR-05Z`。05V 只改 AutoFollow 的对象探测。05W 只增加可失败构造并让 fetch 使用它。05X 只让 `init` 的确认失败不再变成可操作的 `LocalStorage`，且不把该失败写入对象缓存。05Y 只让未决 TYPE 的本地客户端不进对象缓存。05Z 只让这一次未决读取不再构造可写的 `LocalStorage`。本卡 VER-1 至 VER-5 已在 ae50414 通过。本提交占用 v0.30.88。tag 与 D 尚未观察。F2 仍是 unknown。不开始 FIX04。F2-CLOSE不是本卡前驱；独立缺陷必须另外登记其FIX-ID和边；不以未来FIX04的C/D为前驱，避免环。
 
 **Deliverables:** 单轴生产修复、完整测试、下列同卡文档与证据摘要；不是仅输出诊断报告。
 
@@ -1007,7 +1008,7 @@ R1真实ER03/RECOVERY PASS、H0/VERDICT FAIL（sessionbb82411c-1e59-4e52-a7f1-93
 
 ## 实施顺序与发布窗口
 
-`DEP-QUAL-SECURITY + DEP-QUAL-SOURCE + DEP-QUAL-PUBLISH -> FIX-LTR-01 -> FIX-LTR-05P -> FIX-LTR-05Q -> FIX-LTR-05R -> FIX-LTR-05S -> FIX-LTR-05T -> FIX-LTR-05U -> FIX-LTR-05V -> FIX-LTR-05W -> FIX-LTR-05X -> FIX-LTR-05Y -> FIX-LTR-05Z -> FIX-LTR-05 -> FIX-LTR-04 -> FIX-LTR-02 -> FIX-LTR-03 -> DEP-QUAL-HANDOFF`；另有 `DEP-QUAL-F2-ATTRIB + DEC-QUAL-05-RELEASE-WARNING -> FIX-LTR-05`，另有 `FIX05/具名新FIX -> DEP-QUAL-F2-CLOSE -> FIX04`。`FIX-LTR-05W` 已推送 `2a80a10`，只含 `resolve_configured_storage` 与 fetch 写入前检查。`FIX-LTR-05X` 已推送 `a729384`，只含 `init` 的确认失败拒绝状态和不缓存该状态。`FIX-LTR-05Y` 已推送 `ec98926`，只含未决 TYPE 不进入对象缓存。`FIX-LTR-05Z` 只含未决 TYPE 这一次调用不再构造 `LocalStorage`。ER03 `272c8d7d` PASS，实现审查 `4a42ec63` PASS。父卡自己的 VER-1 至 VER-5 和发布仍未做，所以 FIX-LTR-05 仍 blocked。顺序用于共享本计划/版本面的串行发布，不表示合并发布。先修确定性全量阻断，再修共享fixture，最后完成MCP测试清理与整份修复计划的最终资格。每卡真正 C/D 闭合后才发布下一卡。`FIX-LTR-05P` 到 `FIX-LTR-05Z` 都是 family child，不占用 v0.30.88。
+`DEP-QUAL-SECURITY + DEP-QUAL-SOURCE + DEP-QUAL-PUBLISH -> FIX-LTR-01 -> FIX-LTR-05P -> FIX-LTR-05Q -> FIX-LTR-05R -> FIX-LTR-05S -> FIX-LTR-05T -> FIX-LTR-05U -> FIX-LTR-05V -> FIX-LTR-05W -> FIX-LTR-05X -> FIX-LTR-05Y -> FIX-LTR-05Z -> FIX-LTR-05 -> FIX-LTR-04 -> FIX-LTR-02 -> FIX-LTR-03 -> DEP-QUAL-HANDOFF`；另有 `DEP-QUAL-F2-ATTRIB + DEC-QUAL-05-RELEASE-WARNING -> FIX-LTR-05`，另有 `FIX05/具名新FIX -> DEP-QUAL-F2-CLOSE -> FIX04`。`FIX-LTR-05W` 已推送 `2a80a10`，只含 `resolve_configured_storage` 与 fetch 写入前检查。`FIX-LTR-05X` 已推送 `a729384`，只含 `init` 的确认失败拒绝状态和不缓存该状态。`FIX-LTR-05Y` 已推送 `ec98926`，只含未决 TYPE 不进入对象缓存。`FIX-LTR-05Z` 只含未决 TYPE 这一次调用不再构造 `LocalStorage`。ER03 `272c8d7d` PASS，实现审查 `4a42ec63` PASS。父卡 VER-1 至 VER-5 已在 ae50414 通过。本提交占用 v0.30.88。tag 与 D 尚未观察。F2 仍是 unknown。不开始 FIX04。顺序用于共享本计划/版本面的串行发布，不表示合并发布。先修确定性全量阻断，再修共享fixture，最后完成MCP测试清理与整份修复计划的最终资格。每卡真正 C/D 闭合后才发布下一卡。`FIX-LTR-05P` 到 `FIX-LTR-05Z` 都是 family child，不占用 v0.30.88。
 
 ### 实际 D 映射与现场复核
 
@@ -1315,6 +1316,7 @@ R1真实ER03/RECOVERY PASS、H0/VERDICT FAIL（sessionbb82411c-1e59-4e52-a7f1-93
 
 | 日期 | 触发 | 变更 | 实际状态 |
 |---|---|---|---|
+| 2026-10-26 15:16:12 UTC | 父卡 VER-1 至 VER-5 与缓存/pack 审查 d9641b0d PASS | ae50414 上 VER 计数 93、62、51、58、54，均 0 failed。完整套件 df24361e：10822 passed，0 failed；fetch mirror 用例重试后通过。fmt 与 clippy 通过。default 与 keyring release 只有 from_payload 与 from_payload_with_hint_policy 两条 dead_code，外加 proc-macro-error2。确认失败不进对象缓存。fetch 在安装 pack 前拒绝。精确 local 只在 init 保持历史本地；fetch、pull、clone 仍拒绝精确 local。VER-1 没有同步屏障真锁，覆盖是把仓库库换成目录，记为 P2 缩窄。RISK-QUAL-ADD-LOOSE：操作日志用 init_local 写快照，gcs-canary 的 add 仍留下 loose blob 45b983be，index 未写；未修，不宣称所有命令零对象写入。F2 仍 unknown。本提交占用 v0.30.88。不开始 FIX04 | in-progress/本地 C 已过；tag 与 D 未观察 |
 | 2026-10-26 14:23:00 UTC | 完整套件被未决 TYPE 挡住对象读取 | 仓库库打不开仍失败关闭。全局库存在但打不开时，对象存储回到历史本地后端。解密失败仍失败关闭。审查 9e386060 与 ce4eb432 PASS。完整套件 run db0184d9：10822 passed，0 failed。不消耗 v0.30.88。不开始 FIX04 | in-progress/空；发布 D 未观察 |
 | 2026-10-26 13:08:00 UTC | 05Z 实现审查 4a42ec63 PASS | 未决 TYPE 不再构造 LocalStorage。VER-1 两次 8/8，VER-2 3/3。fmt 与 clippy 通过。不消耗 v0.30.88。不开始 FIX04。FIX-LTR-05 仍 blocked | in-progress/空；实现审查 PASS |
 | 2026-10-26 12:51:00 UTC | 登记 FIX-LTR-05Z 草案 | 具名决定要求未决 TYPE 这一次调用不再构造 LocalStorage。GlobalSchemaFuture、Ok(None) 和正好 local 保持。源码未改。不消耗 v0.30.88。不开始 FIX04 | blocked/空；待 ER03 |

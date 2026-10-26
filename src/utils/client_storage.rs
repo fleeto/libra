@@ -2396,14 +2396,22 @@ impl ClientStorage {
         content_len: usize,
         obj_type: ObjectType,
     ) -> io::Result<()> {
-        if !self.exist(obj_id) {
-            return Err(io::Error::new(
-                io::ErrorKind::NotFound,
-                format!(
-                    "cannot register object {} in the cloud index because its payload is no longer present",
-                    obj_id
-                ),
-            ));
+        match self.exist_checked(obj_id) {
+            Ok(true) => {}
+            Ok(false) => {
+                return Err(io::Error::new(
+                    io::ErrorKind::NotFound,
+                    format!(
+                        "cannot register object {} in the cloud index because its payload is no longer present",
+                        obj_id
+                    ),
+                ));
+            }
+            Err(error) => {
+                return Err(io::Error::other(format!(
+                    "failed to read object {obj_id} while registering its index: {error}"
+                )));
+            }
         }
         self.enqueue_stored_object_index(&obj_id.to_string(), &obj_type.to_string(), content_len)
     }
@@ -2593,7 +2601,8 @@ impl ClientStorage {
     /// - Returns `Ok(vec![])` when the base ref is ambiguous (multiple matching
     ///   commit objects). The caller decides whether ambiguity is an error.
     /// - Returns `Err` when an underlying database/branch read fails (e.g. corrupt
-    ///   `reference` row), so users see the actionable error instead of silent empty.
+    ///   `reference` row), or when a prefix hit's type cannot be read. A missing
+    ///   object stays an empty match. Users see the read error instead of silence.
     /// - See: `test_search_result_surfaces_corrupt_branch_storage`,
     ///   `test_search_result_rejects_empty_base_ref_navigation`.
     pub async fn search_result(&self, obj_id: &str) -> Result<Vec<ObjectHash>, GitError> {
@@ -2658,10 +2667,14 @@ impl ClientStorage {
                                 }
 
                                 let matches = self.storage.search(base_ref).await;
-                                let commits: Vec<ObjectHash> = matches
-                                    .into_iter()
-                                    .filter(|x| self.is_object_type(x, ObjectType::Commit))
-                                    .collect();
+                                let mut commits = Vec::new();
+                                for hash in matches {
+                                    match self.is_object_type_checked(&hash, ObjectType::Commit) {
+                                        Ok(true) => commits.push(hash),
+                                        Ok(false) | Err(GitError::ObjectNotFound(_)) => {}
+                                        Err(error) => return Err(error),
+                                    }
+                                }
 
                                 if commits.len() == 1 {
                                     commits[0]
@@ -5361,6 +5374,104 @@ mod tests {
                 .expect("empty-base ^ navigation should not error")
                 .is_empty()
         );
+    }
+
+    struct PrefixHit {
+        hit: ObjectHash,
+        missing: bool,
+    }
+
+    #[async_trait::async_trait]
+    impl Storage for PrefixHit {
+        async fn get(&self, hash: &ObjectHash) -> Result<(Vec<u8>, ObjectType), GitError> {
+            if self.missing {
+                Err(GitError::ObjectNotFound(hash.to_string()))
+            } else {
+                Err(GitError::IOError(std::io::Error::other(
+                    "simulated type read failure",
+                )))
+            }
+        }
+
+        async fn put(
+            &self,
+            _hash: &ObjectHash,
+            _data: &[u8],
+            _obj_type: ObjectType,
+        ) -> Result<String, GitError> {
+            unreachable!("prefix-hit test must not store")
+        }
+
+        async fn exist(&self, _hash: &ObjectHash) -> bool {
+            false
+        }
+
+        async fn search(&self, _prefix: &str) -> Vec<ObjectHash> {
+            vec![self.hit]
+        }
+    }
+
+    #[tokio::test]
+    #[serial(cwd, env)]
+    async fn search_result_type_read_error_is_not_empty() {
+        let repo = tempdir().unwrap();
+        setup_with_new_libra_in(repo.path()).await;
+        let _guard = ChangeDirGuard::new(repo.path());
+        let hit = ObjectHash::new_for_kind(git_internal::hash::get_hash_kind(), &[8; 20]);
+        let failing = ClientStorage::from_test_storage(
+            Arc::new(PrefixHit {
+                hit,
+                missing: false,
+            }),
+            PathBuf::new(),
+        );
+        let error = failing
+            .search_result("abcdef01~1")
+            .await
+            .expect_err("a type read failure must stay an error");
+        let rendered = error.to_string();
+        assert!(
+            matches!(error, GitError::IOError(_)),
+            "unexpected error: {rendered}"
+        );
+        assert!(
+            rendered.contains("simulated type read failure"),
+            "{rendered}"
+        );
+
+        let missing = ClientStorage::from_test_storage(
+            Arc::new(PrefixHit { hit, missing: true }),
+            PathBuf::new(),
+        );
+        let matches = missing
+            .search_result("abcdef01~1")
+            .await
+            .expect("a missing prefix hit stays an empty match");
+        assert!(matches.is_empty(), "{matches:?}");
+    }
+
+    #[test]
+    fn ensure_existing_object_index_read_error_is_not_missing() {
+        let present = ObjectHash::new_for_kind(git_internal::hash::get_hash_kind(), &[1; 20]);
+        let failed = ObjectHash::new_for_kind(git_internal::hash::get_hash_kind(), &[8; 20]);
+        let absent = ObjectHash::new_for_kind(git_internal::hash::get_hash_kind(), &[2; 20]);
+        let client = ClientStorage::from_test_storage(
+            Arc::new(CheckedProbeStorage::new(present, Some(failed))),
+            PathBuf::new(),
+        );
+        let error = client
+            .ensure_existing_object_index(&failed, 4, ObjectType::Blob)
+            .expect_err("a read failure must not register");
+        let rendered = error.to_string();
+        assert_ne!(error.kind(), std::io::ErrorKind::NotFound);
+        assert!(rendered.contains("simulated probe outage"), "{rendered}");
+        assert!(!rendered.contains("no longer present"), "{rendered}");
+
+        let missing = client
+            .ensure_existing_object_index(&absent, 4, ObjectType::Blob)
+            .expect_err("a missing payload stays NotFound");
+        assert_eq!(missing.kind(), std::io::ErrorKind::NotFound);
+        assert!(missing.to_string().contains("no longer present"));
     }
 
     /// Scenario: zlib compress then decompress must yield the original bytes

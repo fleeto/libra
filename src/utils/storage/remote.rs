@@ -372,6 +372,54 @@ impl Storage for RemoteStorage {
         results
     }
 
+    /// Prefix listing that keeps durable-tier list failures.
+    ///
+    /// `object_store::Error::NotFound` is a missing prefix or object and is
+    /// skipped. Any other list error fails the search instead of returning
+    /// the objects already seen. A non-ASCII prefix that cannot be split on
+    /// a two-byte boundary lists from the store root and then filters.
+    async fn search_checked(&self, prefix: &str) -> Result<Vec<ObjectHash>, GitError> {
+        let list_prefix = if let Some(shard) = prefix.get(..2) {
+            match &self.key_prefix {
+                Some(key_prefix) => ObjectPath::from(format!("{key_prefix}/objects/{shard}")),
+                None => ObjectPath::from(shard),
+            }
+        } else {
+            match &self.key_prefix {
+                Some(key_prefix) => ObjectPath::from(format!("{key_prefix}/objects")),
+                None => ObjectPath::from(""),
+            }
+        };
+        let mut results = Vec::new();
+        let mut stream = self.inner.list(Some(&list_prefix));
+        while let Some(item) = stream.next().await {
+            let meta = match item {
+                Ok(meta) => meta,
+                Err(object_store::Error::NotFound { .. }) => continue,
+                Err(error) => {
+                    return Err(GitError::IOError(std::io::Error::other(format!(
+                        "failed to list durable-tier objects for prefix '{prefix}': {error}"
+                    ))));
+                }
+            };
+            let mut path_str = meta.location.to_string();
+            if let Some(key_prefix) = &self.key_prefix {
+                let expected = format!("{key_prefix}/objects/");
+                if !path_str.starts_with(&expected) {
+                    continue;
+                }
+                path_str = path_str[expected.len()..].to_string();
+            }
+            let hash_str = path_str.replace('/', "");
+            if hash_str.starts_with(prefix)
+                && let Ok(hash) = crate::internal::object_format::parse_repo_oid(&hash_str)
+            {
+                results.push(hash);
+            }
+        }
+        Ok(results)
+    }
+
     /// Bounded-concurrency batch existence probe (`lore.md` §0.6): fire up to
     /// `max_connections()` HEAD requests at once instead of `N` sequential round
     /// trips, preserving input order. Each probe inherits object_store's
@@ -621,5 +669,159 @@ mod tests {
             .await
             .expect_err("oversized tag must be rejected");
         assert!(error.to_string().contains("exceeds 1024 bytes"), "{error}");
+    }
+
+    #[derive(Clone, Copy, Debug)]
+    enum ListFault {
+        Empty,
+        NotFound,
+        Down,
+    }
+
+    #[derive(Clone, Copy, Debug)]
+    struct ListStore {
+        fault: ListFault,
+    }
+
+    impl std::fmt::Display for ListStore {
+        fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+            f.write_str("ListStore")
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl object_store::ObjectStore for ListStore {
+        async fn put_opts(
+            &self,
+            _location: &object_store::path::Path,
+            _payload: object_store::PutPayload,
+            _opts: object_store::PutOptions,
+        ) -> object_store::Result<object_store::PutResult> {
+            Err(object_store::Error::Generic {
+                store: "list-store",
+                source: "unused".into(),
+            })
+        }
+
+        async fn put_multipart_opts(
+            &self,
+            _location: &object_store::path::Path,
+            _opts: object_store::PutMultipartOptions,
+        ) -> object_store::Result<Box<dyn object_store::MultipartUpload>> {
+            Err(object_store::Error::Generic {
+                store: "list-store",
+                source: "unused".into(),
+            })
+        }
+
+        async fn get_opts(
+            &self,
+            _location: &object_store::path::Path,
+            _options: object_store::GetOptions,
+        ) -> object_store::Result<object_store::GetResult> {
+            Err(object_store::Error::Generic {
+                store: "list-store",
+                source: "unused".into(),
+            })
+        }
+
+        fn list(
+            &self,
+            _prefix: Option<&object_store::path::Path>,
+        ) -> futures::stream::BoxStream<'static, object_store::Result<object_store::ObjectMeta>>
+        {
+            match self.fault {
+                ListFault::Empty => Box::pin(futures::stream::empty()),
+                ListFault::NotFound => Box::pin(futures::stream::once(async {
+                    Err(object_store::Error::NotFound {
+                        path: "ab".into(),
+                        source: "gone".into(),
+                    })
+                })),
+                ListFault::Down => Box::pin(futures::stream::once(async {
+                    Err(object_store::Error::Generic {
+                        store: "list-store",
+                        source: "list down".into(),
+                    })
+                })),
+            }
+        }
+
+        async fn list_with_delimiter(
+            &self,
+            _prefix: Option<&object_store::path::Path>,
+        ) -> object_store::Result<object_store::ListResult> {
+            Err(object_store::Error::Generic {
+                store: "list-store",
+                source: "unused".into(),
+            })
+        }
+
+        async fn copy_opts(
+            &self,
+            _from: &object_store::path::Path,
+            _to: &object_store::path::Path,
+            _options: object_store::CopyOptions,
+        ) -> object_store::Result<()> {
+            Err(object_store::Error::Generic {
+                store: "list-store",
+                source: "unused".into(),
+            })
+        }
+
+        fn delete_stream(
+            &self,
+            locations: futures::stream::BoxStream<
+                'static,
+                object_store::Result<object_store::path::Path>,
+            >,
+        ) -> futures::stream::BoxStream<'static, object_store::Result<object_store::path::Path>>
+        {
+            locations
+        }
+    }
+
+    #[tokio::test]
+    async fn remote_search_checked_distinguishes_list_failure_from_absence() {
+        let absent = RemoteStorage::new(Arc::new(ListStore {
+            fault: ListFault::Empty,
+        }));
+        let matches = absent
+            .search_checked("ab")
+            .await
+            .expect("an empty listing is absence");
+        assert!(matches.is_empty());
+        let non_ascii = absent
+            .search_checked("你")
+            .await
+            .expect("a non-ascii prefix lists from the root");
+        assert!(non_ascii.is_empty());
+
+        let missing = RemoteStorage::new(Arc::new(ListStore {
+            fault: ListFault::NotFound,
+        }));
+        let matches = missing
+            .search_checked("ab")
+            .await
+            .expect("a NotFound listing is absence");
+        assert!(matches.is_empty());
+
+        let down = RemoteStorage::new(Arc::new(ListStore {
+            fault: ListFault::Down,
+        }));
+        let error = down
+            .search_checked("ab")
+            .await
+            .expect_err("a list failure must stay an error");
+        let rendered = error.to_string();
+        assert!(
+            rendered.contains("failed to list durable-tier objects"),
+            "{rendered}"
+        );
+        assert!(rendered.contains("list down"), "{rendered}");
+        assert!(
+            down.search("ab").await.is_empty(),
+            "the Vec search still skips a list failure"
+        );
     }
 }

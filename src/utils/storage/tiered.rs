@@ -550,6 +550,21 @@ impl Storage for TieredStorage {
         results.into_iter().collect()
     }
 
+    /// Prefix search across both tiers. A local directory failure or a
+    /// durable-tier list failure stays an error. Under the offline/local
+    /// read policy the durable tier is not consulted.
+    async fn search_checked(&self, prefix: &str) -> Result<Vec<ObjectHash>, GitError> {
+        let local_hits = self.local.search_checked(prefix).await?;
+        if read_policy() == ReadPolicy::LocalOnly {
+            return Ok(local_hits);
+        }
+        let remote_hits = self.remote.search_checked(prefix).await?;
+        let mut results = HashSet::new();
+        results.extend(local_hits);
+        results.extend(remote_hits);
+        Ok(results.into_iter().collect())
+    }
+
     /// Re-fetch a missing or corrupted object from the durable (remote) tier,
     /// verify it, and (over)write it into the local store. lore.md §0.4.
     ///
@@ -963,6 +978,208 @@ mod tests {
         assert!(
             !tiered.local.exist(&hash).await,
             "local-only must not cache the remote object"
+        );
+    }
+
+    #[derive(Clone, Copy, Debug)]
+    struct ListDown;
+
+    impl std::fmt::Display for ListDown {
+        fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+            f.write_str("ListDown")
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl object_store::ObjectStore for ListDown {
+        async fn put_opts(
+            &self,
+            _location: &object_store::path::Path,
+            _payload: object_store::PutPayload,
+            _opts: object_store::PutOptions,
+        ) -> object_store::Result<object_store::PutResult> {
+            Err(object_store::Error::Generic {
+                store: "list-down",
+                source: "unused".into(),
+            })
+        }
+
+        async fn put_multipart_opts(
+            &self,
+            _location: &object_store::path::Path,
+            _opts: object_store::PutMultipartOptions,
+        ) -> object_store::Result<Box<dyn object_store::MultipartUpload>> {
+            Err(object_store::Error::Generic {
+                store: "list-down",
+                source: "unused".into(),
+            })
+        }
+
+        async fn get_opts(
+            &self,
+            _location: &object_store::path::Path,
+            _options: object_store::GetOptions,
+        ) -> object_store::Result<object_store::GetResult> {
+            Err(object_store::Error::Generic {
+                store: "list-down",
+                source: "unused".into(),
+            })
+        }
+
+        fn list(
+            &self,
+            _prefix: Option<&object_store::path::Path>,
+        ) -> futures::stream::BoxStream<'static, object_store::Result<object_store::ObjectMeta>>
+        {
+            Box::pin(futures::stream::once(async {
+                Err(object_store::Error::Generic {
+                    store: "list-down",
+                    source: "list down".into(),
+                })
+            }))
+        }
+
+        async fn list_with_delimiter(
+            &self,
+            _prefix: Option<&object_store::path::Path>,
+        ) -> object_store::Result<object_store::ListResult> {
+            Err(object_store::Error::Generic {
+                store: "list-down",
+                source: "unused".into(),
+            })
+        }
+
+        async fn copy_opts(
+            &self,
+            _from: &object_store::path::Path,
+            _to: &object_store::path::Path,
+            _options: object_store::CopyOptions,
+        ) -> object_store::Result<()> {
+            Err(object_store::Error::Generic {
+                store: "list-down",
+                source: "unused".into(),
+            })
+        }
+
+        fn delete_stream(
+            &self,
+            locations: futures::stream::BoxStream<
+                'static,
+                object_store::Result<object_store::path::Path>,
+            >,
+        ) -> futures::stream::BoxStream<'static, object_store::Result<object_store::path::Path>>
+        {
+            locations
+        }
+    }
+
+    struct RestorePolicy(crate::utils::read_policy::ReadPolicy);
+
+    impl Drop for RestorePolicy {
+        fn drop(&mut self) {
+            crate::utils::read_policy::set_read_policy(self.0);
+        }
+    }
+
+    #[tokio::test]
+    #[serial]
+    async fn tiered_search_checked_local_only_skips_unreachable_remote() {
+        use std::sync::Arc;
+
+        use git_internal::hash::{HashKind, set_hash_kind_for_test};
+
+        use crate::utils::{
+            client_storage::ClientStorage,
+            read_policy::{ReadPolicy, read_policy, set_read_policy},
+        };
+
+        let _kind = set_hash_kind_for_test(HashKind::Sha1);
+        let dir = tempdir().expect("local objects");
+        let tiered: Arc<dyn Storage> = Arc::new(TieredStorage::new(
+            LocalStorage::new(dir.path().to_path_buf()),
+            RemoteStorage::new(Arc::new(ListDown)),
+            1 << 20,
+            1 << 20,
+        ));
+        let client =
+            ClientStorage::from_test_storage(Arc::clone(&tiered), dir.path().to_path_buf());
+        let previous = read_policy();
+        set_read_policy(ReadPolicy::LocalOnly);
+        let _restore = RestorePolicy(previous);
+        let matches = client
+            .search_checked("ab")
+            .await
+            .expect("offline search does not list the durable tier");
+        assert!(matches.is_empty(), "{matches:?}");
+        set_read_policy(ReadPolicy::Auto);
+        let error = client
+            .search_checked("ab")
+            .await
+            .expect_err("an auto search reports a durable-tier list failure");
+        let rendered = error.to_string();
+        assert!(rendered.contains("list down"), "{rendered}");
+        assert!(
+            client.search("ab").await.is_empty(),
+            "the Vec search still skips the list failure"
+        );
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn tiered_search_checked_unreadable_local_dir_is_not_empty() {
+        use std::{os::unix::fs::PermissionsExt, sync::Arc};
+
+        use git_internal::hash::{HashKind, set_hash_kind_for_test};
+
+        use crate::utils::client_storage::ClientStorage;
+
+        // SAFETY: `geteuid` only reads the process credential and has no pointer argument.
+        if unsafe { libc::geteuid() } == 0 {
+            eprintln!("skipped (directory mode bits do not constrain root)");
+            return;
+        }
+        let _kind = set_hash_kind_for_test(HashKind::Sha1);
+        let dir = tempdir().expect("local objects");
+        let objects = dir.path().join("objects");
+        std::fs::create_dir_all(objects.join("ab")).expect("shard");
+        std::fs::write(objects.join("ab/cdef01"), b"loose").expect("loose name");
+        let mut permissions = std::fs::metadata(&objects).expect("meta").permissions();
+        let previous = permissions.mode();
+        permissions.set_mode(0o444);
+        std::fs::set_permissions(&objects, permissions).expect("restrict objects dir");
+        struct RestoreMode {
+            path: std::path::PathBuf,
+            mode: u32,
+        }
+        impl Drop for RestoreMode {
+            fn drop(&mut self) {
+                let Ok(metadata) = std::fs::metadata(&self.path) else {
+                    return;
+                };
+                let mut permissions = metadata.permissions();
+                permissions.set_mode(self.mode);
+                let _ = std::fs::set_permissions(&self.path, permissions);
+            }
+        }
+        let _restore = RestoreMode {
+            path: objects.clone(),
+            mode: previous,
+        };
+        let tiered: Arc<dyn Storage> = Arc::new(TieredStorage::new(
+            LocalStorage::new(objects),
+            RemoteStorage::new(Arc::new(object_store::memory::InMemory::new())),
+            1 << 20,
+            1 << 20,
+        ));
+        let client = ClientStorage::from_test_storage(tiered, dir.path().to_path_buf());
+        let error = client
+            .search_checked("abcdef01")
+            .await
+            .expect_err("an unreadable local directory fails the tiered search");
+        let rendered = error.to_string();
+        assert!(
+            !rendered.contains("missing") && !rendered.contains("absent"),
+            "{rendered}"
         );
     }
 

@@ -1001,6 +1001,9 @@ pub enum FetchError {
     /// Local-path Git `config` objectformat unknown/corrupt or unreadable (B3-12).
     #[error("{0}")]
     GitSourceConfig(GitSourceConfigError),
+    /// AutoFollow could not tell whether a tag object is present.
+    #[error("failed to read object storage while checking fetched tags: {message}")]
+    TagObjectProbe { message: String },
 }
 
 impl From<FetchError> for CliError {
@@ -1115,6 +1118,9 @@ impl From<FetchError> for CliError {
             }
             FetchError::UnsupportedLocalGitSha256 => map_unsupported_local_git_sha256(),
             FetchError::GitSourceConfig(source) => map_git_source_config_error(source),
+            FetchError::TagObjectProbe { .. } => {
+                CliError::fatal(error.to_string()).with_stable_code(StableErrorCode::IoReadFailed)
+            }
         }
     }
 }
@@ -2767,15 +2773,7 @@ async fn fetch_repository_with_result_reusing(
         TagFetchMode::NoTags => Vec::new(),
         TagFetchMode::All => discovered_tags,
         TagFetchMode::AutoFollow => {
-            let storage = util::objects_storage();
-            discovered_tags
-                .into_iter()
-                .filter(|tag| {
-                    crate::internal::object_format::parse_repo_oid(&tag._hash)
-                        .map(|oid| storage.exist(&oid))
-                        .unwrap_or(false)
-                })
-                .collect()
+            select_autofollow_tags(&util::objects_storage(), discovered_tags)?
         }
     };
     let mut fetch_head_records = ref_plans
@@ -5062,6 +5060,50 @@ async fn resolve_tag_mode(remote_name: &str, tag_cli: Option<TagFetchMode>) -> T
     }
 }
 
+/// Keep AutoFollow tags whose objects are present.
+///
+/// An unparseable hash is dropped. `Ok(false)` drops the tag. A storage read
+/// failure, or a batch result that omits a parsed hash, is [`FetchError::TagObjectProbe`].
+/// This runs after reference updates, like [`persist_fetched_tags`]; retrying
+/// the fetch is idempotent.
+fn select_autofollow_tags(
+    storage: &crate::utils::client_storage::ClientStorage,
+    tags: Vec<DiscRef>,
+) -> Result<Vec<DiscRef>, FetchError> {
+    let mut parsed = Vec::new();
+    for tag in tags {
+        if let Ok(oid) = crate::internal::object_format::parse_repo_oid(&tag._hash) {
+            parsed.push((tag, oid));
+        }
+    }
+    if parsed.is_empty() {
+        return Ok(Vec::new());
+    }
+    let ids = parsed
+        .iter()
+        .map(|(_, oid)| *oid)
+        .collect::<Vec<git_internal::hash::ObjectHash>>();
+    let presence =
+        storage
+            .exist_checked_many(&ids)
+            .map_err(|error| FetchError::TagObjectProbe {
+                message: error.to_string(),
+            })?;
+    let mut kept = Vec::new();
+    for (tag, oid) in parsed {
+        match presence.get(&oid).copied() {
+            Some(true) => kept.push(tag),
+            Some(false) => {}
+            None => {
+                return Err(FetchError::TagObjectProbe {
+                    message: format!("presence result did not include object {oid}"),
+                });
+            }
+        }
+    }
+    Ok(kept)
+}
+
 /// Persist fetched tags into the shared `refs/tags/*` namespace (kind=Tag,
 /// remote=None), matching Git. Policy: create when absent; skip when already at
 /// the same target; on a conflicting local tag, clobber when `force`, else keep
@@ -5409,6 +5451,153 @@ async fn read_pkt_line(reader: &mut (impl AsyncRead + Unpin)) -> io::Result<(usi
 
 #[cfg(test)]
 mod tests {
+    #[tokio::test]
+    async fn autofollow_storage_read_error_is_not_a_missing_tag() {
+        use std::sync::Arc;
+
+        use git_internal::{
+            errors::GitError, hash::ObjectHash, internal::object::types::ObjectType,
+        };
+
+        use crate::utils::{
+            client_storage::ClientStorage, error::StableErrorCode, storage::Storage,
+        };
+
+        struct Probe {
+            present: ObjectHash,
+            failed: ObjectHash,
+        }
+
+        #[async_trait::async_trait]
+        impl Storage for Probe {
+            async fn get(&self, hash: &ObjectHash) -> Result<(Vec<u8>, ObjectType), GitError> {
+                Err(GitError::ObjectNotFound(hash.to_string()))
+            }
+
+            async fn put(
+                &self,
+                _hash: &ObjectHash,
+                _data: &[u8],
+                _obj_type: ObjectType,
+            ) -> Result<String, GitError> {
+                unreachable!("autofollow probe test does not store")
+            }
+
+            async fn exist(&self, _hash: &ObjectHash) -> bool {
+                false
+            }
+
+            async fn search(&self, _prefix: &str) -> Vec<ObjectHash> {
+                Vec::new()
+            }
+
+            async fn exist_checked(&self, hash: &ObjectHash) -> Result<bool, GitError> {
+                if *hash == self.failed {
+                    Err(GitError::IOError(std::io::Error::other(
+                        "simulated probe outage",
+                    )))
+                } else {
+                    Ok(*hash == self.present)
+                }
+            }
+        }
+
+        struct EmptyPresence;
+
+        #[async_trait::async_trait]
+        impl Storage for EmptyPresence {
+            async fn get(&self, hash: &ObjectHash) -> Result<(Vec<u8>, ObjectType), GitError> {
+                Err(GitError::ObjectNotFound(hash.to_string()))
+            }
+
+            async fn put(
+                &self,
+                _hash: &ObjectHash,
+                _data: &[u8],
+                _obj_type: ObjectType,
+            ) -> Result<String, GitError> {
+                unreachable!("autofollow probe test does not store")
+            }
+
+            async fn exist(&self, _hash: &ObjectHash) -> bool {
+                false
+            }
+
+            async fn search(&self, _prefix: &str) -> Vec<ObjectHash> {
+                Vec::new()
+            }
+
+            async fn exist_checked_batch(
+                &self,
+                _hashes: &[ObjectHash],
+            ) -> Result<std::collections::HashMap<ObjectHash, bool>, GitError> {
+                Ok(std::collections::HashMap::new())
+            }
+        }
+
+        fn tag(hash: &str, name: &str) -> super::DiscRef {
+            super::DiscRef {
+                _hash: hash.to_string(),
+                _ref: name.to_string(),
+            }
+        }
+
+        let present = ObjectHash::new_for_kind(git_internal::hash::get_hash_kind(), &[1; 20]);
+        let absent = ObjectHash::new_for_kind(git_internal::hash::get_hash_kind(), &[2; 20]);
+        let failed = ObjectHash::new_for_kind(git_internal::hash::get_hash_kind(), &[3; 20]);
+        let storage = ClientStorage::from_test_storage(
+            Arc::new(Probe { present, failed }),
+            std::path::PathBuf::new(),
+        );
+
+        let unparsed =
+            super::select_autofollow_tags(&storage, vec![tag("not-a-hash", "refs/tags/bad")])
+                .expect("an unparseable tag hash is dropped");
+        assert!(unparsed.is_empty());
+
+        let selected = super::select_autofollow_tags(
+            &storage,
+            vec![
+                tag(&present.to_string(), "refs/tags/kept"),
+                tag(&absent.to_string(), "refs/tags/gone"),
+            ],
+        )
+        .expect("absence still drops the tag");
+        assert_eq!(selected.len(), 1);
+        assert_eq!(selected[0]._ref, "refs/tags/kept");
+
+        let error =
+            super::select_autofollow_tags(&storage, vec![tag(&failed.to_string(), "refs/tags/v1")])
+                .expect_err("a storage read failure must not drop the tag");
+        let rendered = error.to_string();
+        assert!(rendered.contains("simulated probe outage"), "{rendered}");
+        assert!(
+            rendered.contains("failed to read object storage"),
+            "{rendered}"
+        );
+        assert!(
+            !rendered.contains("missing") && !rendered.contains("absent"),
+            "{rendered}"
+        );
+        let cli = crate::utils::error::CliError::from(error);
+        assert_eq!(cli.stable_code(), StableErrorCode::IoReadFailed);
+
+        let empty =
+            ClientStorage::from_test_storage(Arc::new(EmptyPresence), std::path::PathBuf::new());
+        let omitted =
+            super::select_autofollow_tags(&empty, vec![tag(&present.to_string(), "refs/tags/v1")])
+                .expect_err("a missing presence key is not a dropped tag");
+        let omitted_text = omitted.to_string();
+        assert!(
+            omitted_text.contains("did not include object"),
+            "{omitted_text}"
+        );
+        assert_eq!(
+            crate::utils::error::CliError::from(omitted).stable_code(),
+            StableErrorCode::IoReadFailed
+        );
+    }
+
     fn pkt13_bad_headers() -> Vec<(&'static [u8; 4], crate::git_protocol::PktLineError)> {
         use crate::git_protocol::PktLineError;
         vec![

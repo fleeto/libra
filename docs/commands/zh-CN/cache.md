@@ -13,7 +13,7 @@ libra cache info
 `cache info` 按分层存储后端解析配置的同一方式报告已解析的存储/缓存参数（先环境变量，再全局 config DB），因此报告值与后端实际使用值一致：
 
 - **storage** — 原始 `LIBRA_STORAGE_TYPE` 值（未设置时为 `local`；否则保留你的精确值，例如 `s3` / `r2` — 大小写错误的 `R2` 会原样显示并报告为非分层）。
-- **tier** — 配置是否选择了持久层：`LIBRA_STORAGE_TYPE` 必须是区分大小写的 `s3` / `r2`，并通过后端连接前应用的所有静态检查（非空 bucket、可解析的 `LIBRA_STORAGE_ENDPOINT`、非空 `LIBRA_STORAGE_ACCESS_KEY` / `LIBRA_STORAGE_SECRET_KEY`）。因此大小写错误的 `R2`、空 key 或格式错误的 endpoint 会报告为非分层。这不表示 `init` 造出了可写的本地后端；这些已确认的设置会让对象命令失败，并且只报告设置名。`LIBRA_STORAGE_TYPE=local` 仍打印原来的警告并保持本地。读不到 `LIBRA_STORAGE_TYPE` 时，这一次调用仍使用那个历史本地后端，进程内对象缓存不保留该客户端。只要类型仍然读不到，之后每一次 `objects_storage` 调用都会重新读取，包括每次经它打开对象的加载。这不是重试循环。future global schema、正好是 `local`、以及可读的未设置类型仍可以缓存。已确认不能使用的设置继续不进这份缓存。缓存参数只在启用分层时生效；纯本地仓库不会缓存任何内容。实际连接还需要有效凭证，本静态报告不会验证凭证。
+- **tier** — 配置是否选择了持久层：`LIBRA_STORAGE_TYPE` 必须是区分大小写的 `s3` / `r2`，并通过后端连接前应用的所有静态检查（非空 bucket、可解析的 `LIBRA_STORAGE_ENDPOINT`、非空 `LIBRA_STORAGE_ACCESS_KEY` / `LIBRA_STORAGE_SECRET_KEY`）。因此大小写错误的 `R2`、空 key 或格式错误的 endpoint 会报告为非分层。这不表示 `ClientStorage::init` 造出了可写的本地后端；这些已确认的设置会让对象命令失败，并且只报告设置名。`LIBRA_STORAGE_TYPE=local` 仍打印原来的警告并保持本地。读不到 `LIBRA_STORAGE_TYPE` 且原因不是 future global schema 时，对象命令失败，不构造可写本地后端，只报告设置名，也不进入进程内对象缓存。这包括仓库库打不开、全局库文件存在但打不开或解密失败，以及解析没有返回。配置修好后的下一次调用会重新读取。future global schema、正好是 `local`、以及可读的未设置类型仍是本地结果，并且仍可以缓存。已确认不能使用的设置继续不进这份缓存。缓存参数只在启用分层时生效；纯本地仓库不会缓存任何内容。实际连接还需要有效凭证，本静态报告不会验证凭证。
 - **threshold** — 小/大对象阈值，单位字节（`LIBRA_STORAGE_THRESHOLD`，默认 1 MiB）。大小达到或超过此值的对象会进入 LRU 缓存，而不是永久存储。
 - **cache** — 大型缓存对象的本地 LRU 磁盘预算，单位字节（`LIBRA_STORAGE_CACHE_SIZE`，默认 200 MiB）。
 

@@ -23,7 +23,8 @@
 | FIX-LTR-05V | family child，已在 main `835cfc5` | fetch AutoFollow 批量探测已推送；准入 95af8652，实现审查 72196c7f PASS；不消耗 v0.30.88 |
 | FIX-LTR-05W | family child，已在 main `2a80a10` | `resolve_configured_storage` 与 fetch 写入前检查；ER03 `c6cf48c1` PASS；实现审查 `2ee621eb` PASS；不改 `init`；不消耗 v0.30.88 |
 | FIX-LTR-05X | family child，实现审查 PASS | ER03 `8059d2f4` PASS；实现审查 `bd0e229d` PASS；已在 main `a729384`；不消耗 v0.30.88 |
-| FIX-LTR-05Y | family child，实现审查 PASS | ER03 `db7a5d7f` PASS；实现审查 `a2a2af14` PASS；不消耗 v0.30.88 |
+| FIX-LTR-05Y | family child，已在 main `ec98926` | ER03 `db7a5d7f` PASS；实现审查 `a2a2af14` PASS；不消耗 v0.30.88 |
+| FIX-LTR-05Z | family child，实现审查 PASS | ER03 `272c8d7d` PASS；实现审查 `4a42ec63` PASS；不消耗 v0.30.88；不开始 FIX04 |
 | FIX-LTR-05 | 新登记，blocked/空 | 修复配置解析失败被错误当作 LocalStorage 成功的单一行为轴；具体卡见下；发布例外已由用户原话批准为仅 v0.30.88，设计 ER03 要求先拆卡，本卡仍不得先实施 |
 | FIX-LTR-04 | blocked/locally-accepted | 只保留两行 cfg 候选与旧 A/源审的有限效力；F1/F2 关闭后重新准入、完整新 C/D，消除两方法 release warning |
 | FIX-LTR-02 | blocked/locally-accepted | 在 FIX04 发布后精确恢复索引结清 helper 候选；保留原断言并完成新来源完整 C/D |
@@ -90,7 +91,7 @@ FIX05 前需要只读的 `DEP-QUAL-F2-ATTRIB` 决定与当前本地Claude ER03�
 
 **Task type:** `implementation`
 
-**Lifecycle / Acceptance:** `blocked` / 空（DEC-QUAL-05 用户原话与 session 4042079a 发布次序 PASS 已记录；F2-ATTRIB 仍是 unknown。FIX-LTR-05W 已推送 `2a80a10`。FIX-LTR-05X 已推送 `a729384`，确认失败不再变成可操作的 `LocalStorage`，也不进缓存。未决 TYPE 的这一次调用仍是本地结果，而且该客户端仍会进缓存。FIX-LTR-05Y 草案只去掉这个缓存。无本卡自己的源码、A/C、提交或版本。05Y 也不解除本卡阻塞）
+**Lifecycle / Acceptance:** `blocked` / 空（DEC-QUAL-05 用户原话与 session 4042079a 发布次序 PASS 已记录；F2-ATTRIB 仍是 unknown。FIX-LTR-05W 已推送 `2a80a10`。FIX-LTR-05X 已推送 `a729384`，确认失败不再变成可操作的 `LocalStorage`，也不进缓存。未决 TYPE 的这一次调用在 05Y 之前仍是本地结果。FIX-LTR-05Y 已推送 `ec98926`，只让该客户端不进缓存。FIX-LTR-05Z 的 ER03 `272c8d7d` PASS，实现审查 `4a42ec63` PASS，只让未决 TYPE 这一次调用不再构造可写的 `LocalStorage`。无本卡自己的 VER-1 至 VER-5、bump 或发布，所以本卡仍 blocked）
 
 **Description:** 单一行为轴是对象存储配置解析失败的 fail-closed 语义。普通解析/数据库/解密错误不能自动创建可继续写入的 LocalStorage，也不能用额外 stderr Warning 破坏 machine/JSON 输出。保留明确 local-only、合法 remote 配置、配置角色隔离及 COV/OG 已有 GlobalSchemaFuture 处理策略。优先审计保持 `ClientStorage::init -> Self` 签名的私有失败后端方案，避免把现有约99处调用点改成新的 fallible API；不是只移除 eprintln。候选后端必须审计并覆写所有可能返回成功/执行副作用的方法，尤其 `exist_checked`、`object_size`、`heal`、`evict_local`、`delete_payload` 的默认实现及其batch路径；legacy bool/search 方法不能将未知持久化状态当成功或删除依据。实际调用链若无法在本卡写集内保证正确性，先拆卡，不以返回 false 或空集合掩盖错误。
 
@@ -122,7 +123,7 @@ FIX05 前需要只读的 `DEP-QUAL-F2-ATTRIB` 决定与当前本地Claude ER03�
 
 **Full-suite trigger:** T-1：跨命令共享存储核心；A、C均完整默认套件，沿本文双env/nextest原命令；不以focused PASS替代。
 
-**Dependencies:** `FIX-LTR-01`、`FIX-LTR-05P`、`FIX-LTR-05Q`、`FIX-LTR-05R`、`FIX-LTR-05S`、`FIX-LTR-05T`、`FIX-LTR-05U`、`FIX-LTR-05V`、`FIX-LTR-05W`、`FIX-LTR-05X`、`FIX-LTR-05Y`、`DEP-QUAL-SOURCE`、`DEP-QUAL-PUBLISH`、`DEP-QUAL-F2-ATTRIB`、`DEC-QUAL-05-RELEASE-WARNING`。本卡拆出 `FIX-LTR-05P` 至 `FIX-LTR-05Y`。05V 只改 AutoFollow 的对象探测。05W 只增加可失败构造并让 fetch 使用它。05X 只让 `init` 的确认失败不再变成可操作的 `LocalStorage`，且不把该失败写入对象缓存。05Y 只让未决 TYPE 的本地客户端不进对象缓存，这一次调用的本地结果仍在，所以本卡仍 blocked。F2-CLOSE不是本卡前驱；独立缺陷必须另外登记其FIX-ID和边；不以未来FIX04的C/D为前驱，避免环。
+**Dependencies:** `FIX-LTR-01`、`FIX-LTR-05P`、`FIX-LTR-05Q`、`FIX-LTR-05R`、`FIX-LTR-05S`、`FIX-LTR-05T`、`FIX-LTR-05U`、`FIX-LTR-05V`、`FIX-LTR-05W`、`FIX-LTR-05X`、`FIX-LTR-05Y`、`FIX-LTR-05Z`、`DEP-QUAL-SOURCE`、`DEP-QUAL-PUBLISH`、`DEP-QUAL-F2-ATTRIB`、`DEC-QUAL-05-RELEASE-WARNING`。本卡拆出 `FIX-LTR-05P` 至 `FIX-LTR-05Z`。05V 只改 AutoFollow 的对象探测。05W 只增加可失败构造并让 fetch 使用它。05X 只让 `init` 的确认失败不再变成可操作的 `LocalStorage`，且不把该失败写入对象缓存。05Y 只让未决 TYPE 的本地客户端不进对象缓存。05Z 只让这一次未决读取不再构造可写的 `LocalStorage`。本卡自己的 VER-1 至 VER-5、bump 和发布仍未做，所以本卡仍 blocked。F2-CLOSE不是本卡前驱；独立缺陷必须另外登记其FIX-ID和边；不以未来FIX04的C/D为前驱，避免环。
 
 **Deliverables:** 单轴生产修复、完整测试、下列同卡文档与证据摘要；不是仅输出诊断报告。
 
@@ -675,7 +676,7 @@ FIX05 前需要只读的 `DEP-QUAL-F2-ATTRIB` 决定与当前本地Claude ER03�
 
 **Description:** 单一行为轴是：`LIBRA_STORAGE_TYPE` 这一次没有读到，而且原因不是 `GlobalSchemaFuture` 时，这次调用仍得到今天的可写 `LocalStorage` 和今天的解析 Warning，但返回的 `ClientStorage` 不得写入 `OBJECTS_STORAGE_CACHE`。下一次 `objects_storage` 或 `try_objects_storage` 重新调用 `ClientStorage::init`。没有重试循环。这一次调用不改成拒绝状态。`resolve_configured_storage` 对同一种未决读取仍返回 `Ok`。
 
-**Out of scope:** 不把未决 TYPE 改成 `Rejected`，也不对它调用 `process::exit`。没有具名决定把这一次本地命令改成新的错误。不改 `GlobalSchemaFuture` 的 Warning、本地结果或可缓存性。不改 `Ok(None)` 的纯本地结果。不改正好是 `local` 的历史 Warning，也不改 `historical_local_word` 里 bucket 读失败的可缓存本地结果，因为那时 TYPE 已经确认是 `local`。不改确认失败的拒绝状态，也不改它已经不进缓存的行为。不改 fetch、pull、clone 的写入前检查，也不把 `TYPE=local` 在这三条命令上的 `Err` 改掉。不改 `exist`、`search`、`is_object_type` 的签名，不返回 `false` 或空 `Vec` 来掩盖错误。不新增 `Storage` 实现，不使用名字 `try_init`。不改 `storage_config_resolution_fallback` 的文本。不第二次读 TYPE。不改 `resolve_cache_config` 和 `libra cache info` 的静态报告。不 bump，不打 tag，不消耗 v0.30.88。本卡完成也不准入 FIX-LTR-05。不改 ingress、reasoning helper、MCP worker。网站 `cf` 当前不能快进，且有无关脏文件，本卡不改网站，也不 force-push。
+**Out of scope:** 不把未决 TYPE 改成 `Rejected`，也不对它调用 `process::exit`。没有具名决定把这一次本地命令改成新的错误。本句是 05Y 当时的范围。其后的 FIX-LTR-05Z 按 2026-10-26 的具名决定把这一次调用改成拒绝状态，不再构造可写的 `LocalStorage`。不改 `GlobalSchemaFuture` 的 Warning、本地结果或可缓存性。不改 `Ok(None)` 的纯本地结果。不改正好是 `local` 的历史 Warning，也不改 `historical_local_word` 里 bucket 读失败的可缓存本地结果，因为那时 TYPE 已经确认是 `local`。不改确认失败的拒绝状态，也不改它已经不进缓存的行为。不改 fetch、pull、clone 的写入前检查，也不把 `TYPE=local` 在这三条命令上的 `Err` 改掉。不改 `exist`、`search`、`is_object_type` 的签名，不返回 `false` 或空 `Vec` 来掩盖错误。不新增 `Storage` 实现，不使用名字 `try_init`。不改 `storage_config_resolution_fallback` 的文本。不第二次读 TYPE。不改 `resolve_cache_config` 和 `libra cache info` 的静态报告。不 bump，不打 tag，不消耗 v0.30.88。本卡完成也不准入 FIX-LTR-05。不改 ingress、reasoning helper、MCP worker。网站 `cf` 当前不能快进，且有无关脏文件，本卡不改网站，也不 force-push。
 
 **Current evidence:** `open_after_type_read` 在 `src/utils/client_storage.rs:1751`。TYPE 的 `Err` 调用 `storage_config_resolution_fallback`（`:1699`）后 `return Ok(Self::ready(storage, base_path))`（`:1757`）。`ready`（`:1595`）是 `HeldStorage::Ready`。`configuration_variable`（`:1609`）对 Ready 返回 `None`。`cached_objects_storage` 在 `src/utils/util.rs:1383`，只有 `configuration_variable().is_some()` 时才不插入（`:1392`）。因此未决 TYPE 的可写本地客户端会留在缓存里，后面的调用不再读配置。`resolve_env_sync_typed`（`:3376`）先看进程环境变量，命中就不再读库。`break_repository_database`（`:7086`）把仓库库换成目录，用来制造未决读取。`storage_config_resolve_unresolved_type_stays_local`（`:7287`）断言 `resolve_configured_storage` 仍是 `Ok`。`storage_config_hold_cache_does_not_keep_rejection`（`:7939`）只覆盖确认失败。`storage_config_resolve_type_global_schema_stays_local`（`:7376`）覆盖 future schema 的本地结果。`try_objects_storage`（`util.rs:1368`）走同一个 `cached_objects_storage`。`resolve_configured_objects_storage`（`:1378`）不读写这份缓存。
 
@@ -724,6 +725,64 @@ FIX05 前需要只读的 `DEP-QUAL-F2-ATTRIB` 决定与当前本地Claude ER03�
 **Granularity:** `type=implementation; axis=未决的对象存储类型不进入对象缓存; recovery=immutable-release前滚; complete=yes; self-contained=yes; AC=5/8; VER=1/8; landing=2; prod-files=2; scope=S; deps=FIX-LTR-05X; writeset=序列化于FIX-LTR-05之前; release=family child; split-from=FIX-LTR-05; exception=N/A`
 
 两个落点是：未决且不是 `GlobalSchemaFuture` 的 TYPE 读取把客户端标成不进入对象缓存，以及 `cached_objects_storage` 看到这个标记后不插入。两个生产文件是 `client_storage.rs` 和 `util.rs`。签名不变。这一次调用的可写本地结果仍在，所以 FIX-LTR-05 仍 blocked，本卡不消耗 v0.30.88。
+
+### Task FIX-LTR-05Z: 未决的对象存储类型不再构造本地存储
+
+**Task type:** `implementation`
+
+**Lifecycle / Acceptance:** `in-progress` / 空（ER03 `272c8d7d-255b-4e8d-9c2c-bf6129512723` PASS。实现审查 `4a42ec63-fb88-4cb8-af8e-d15fd43d487f` PASS。VER-1 两次都是 8 通过，VER-2 是 3 通过。不消耗 v0.30.88。不开始 FIX04。FIX-LTR-05 自己的 VER-1 至 VER-5、bump 和发布仍未做，所以父卡仍 blocked。本卡无独立发布）
+
+**Description:** 单一行为轴是：`LIBRA_STORAGE_TYPE` 这一次没有读到，而且原因不是 `GlobalSchemaFuture` 时，这次调用不得构造可写的 `LocalStorage`。`open_after_type_read` 对这种错误返回 `Err(StorageConfigFailure)`，变量名只有 `LIBRA_STORAGE_TYPE`。`ClientStorage::init` 因此得到已经存在的拒绝状态。`resolve_configured_storage` 对同一种错误返回 `Err`。不打印 `Warning`，不保留底层错误或路径。`GlobalSchemaFuture`、`Ok(None)` 和正好 `local` 仍是今天的可写本地结果。
+
+**Out of scope:** 不改 `GlobalSchemaFuture` 的 Warning、本地结果或可缓存性。不改可读的未设置类型，包括全局配置库文件不存在时的 `Ok(None)`。不改正好是 `local` 的历史 Warning，也不改 `historical_local_word` 里 bucket 读失败的本地结果。不改已经确认的 `gcs`、`S3`、空 bucket、空 key、空 secret 和非法 endpoint。不改 `exist`、`search`、`is_object_type` 的签名，不返回 `false` 或空 `Vec`。不新增 `Storage`，不使用名字 `try_init`。不改 `storage_config_resolution_fallback` 的文本。不第二次读 TYPE。不改 `resolve_cache_config` 和 `libra cache info`。不把 fetch 的检查移到发现远程之前。不给损坏的仓库库新增 fetch 命令测试，因为 `resolve_prune_mode`（`fetch.rs:1593`）早于存储检查（`fetch.rs:2524`），那条命令失败不能证明这条臂。不 bump，不打 tag，不消耗 v0.30.88，不开始 FIX04。本卡不跑父卡的完整 VER-1 至 VER-5，也不宣称父卡发布完成。不改 ingress、reasoning helper、MCP worker。网站 `cf` 不能快进且有无关脏文件，本卡不改网站，也不 force-push。
+
+**Current evidence:** 具名决定是本轮评估指令，UTC 2026-10-26 12:51:00 UTC：未决的 `LIBRA_STORAGE_TYPE` 必须失败关闭，这一次调用不得有可操作的 `LocalStorage`。`open_after_type_read` 的 TYPE `Err` 臂在 `src/utils/client_storage.rs:1762`。它调用 `storage_config_resolution_fallback`（`:1710`），然后对非 `GlobalSchemaFuture` 把 `retains_objects_cache` 设为 `false` 并返回 `Ok`（`:1771`）。因此这一次 `put` 仍能写入。`init`（`:1646`）把 `Err` 变成拒绝状态。`cached_objects_storage` 在 `src/utils/util.rs:1393`，拒绝状态已经不插入。`resolve_env_sync_typed`（`client_storage.rs:3376`）先看进程环境变量。`break_repository_database`（`:7086`）把仓库库换成目录。`storage_config_resolve_unresolved_type_stays_local`（`:7304`）仍断言 `Ok`。`storage_config_unresolved_fetch_stays_local_fetch`（`tests/command/fetch_test.rs:3539`）以及 pull、clone 的同名测试只把 `LIBRA_CONFIG_GLOBAL_DB` 指到不存在的文件，仓库库仍可读，所以是 `Ok(None)`，不是这条 `Err`。`COMPATIBILITY.md` 的 fetch 行写着未设置且配置库读不到时仍走历史本地 fetch，并写 `init` 的旧降级不变。
+
+**Acceptance criteria:**
+
+- [ ] AC-1: `open_after_type_read` 的 TYPE `Err` 臂先区分 `GlobalSchemaFuture`。这种错误仍调用原来的 `storage_config_resolution_fallback`，仍返回 `Ok` 的可写本地客户端，并且 `retains_objects_cache` 不再存在后仍会被 `cached_objects_storage` 插入。其它 `Err` 不调用 fallback，不构造 `LocalStorage`，不打印 `Warning`，返回 `Err(StorageConfigFailure { variable: "LIBRA_STORAGE_TYPE" })`。判断使用已经拿在手里的错误，不再读 TYPE。`Debug`、`Display` 和 `Error::source` 不带底层错误、路径或配置值。
+- [ ] AC-2: 删除 `retains_objects_cache` 字段、它的构造赋值和 `retains_objects_cache()`。`cached_objects_storage` 只在 `configuration_variable().is_some()` 时跳过插入。未决 TYPE 经 `init` 变成拒绝状态，所以本来就不会插入。没有重试循环。
+- [ ] AC-3: 特征测试调用真正的 `objects_storage` 和 `resolve_configured_storage`。准备是 `isolate_storage_env`、新仓库、先保存仓库库字节、再 `break_repository_database`、以及指向不存在文件的 `LIBRA_CONFIG_GLOBAL_DB`。`objects_storage` 之前把 `STORAGE_TYPE_READS` 置 0。调用后计数是 1，`configuration_variable()` 是 `Some("LIBRA_STORAGE_TYPE")`，缓存没有 `path::objects()`，`put` 的 `Display` 正好是 `failed to read storage configuration for LIBRA_STORAGE_TYPE`，并且不含仓库路径。再把计数器置 0，对一个尚不存在的侧路径调用 `resolve_configured_storage`：计数是 1，结果是 `Err`，变量名是 `LIBRA_STORAGE_TYPE`，该路径不被创建。然后删掉充当数据库的目录，把保存的字节写回去。下一次 `objects_storage` 的 `configuration_variable()` 是 `None`，缓存含有该路径，`put` 成功。这证明拒绝状态没有被钉死。子进程覆盖没有 `Warning`：父进程准备同一个损坏仓库，子进程的工作目录是该仓库，`HOME` 和 `LIBRA_CONFIG_GLOBAL_DB` 都落在临时目录，模式 `unresolved_put` 在现有 `storage_config_hold_probe` 里于原有 `ClientStorage::init` 之前返回。子进程调用 `objects_storage().put`，只有 `Display` 等于上面的句子才退出 0。父进程断言退出码 0，stderr 不含 `Warning`，也不含 `Falling back`。`storage_config_hold_cache_skips_unresolved_type` 改名为 `storage_config_hold_unresolved_type_is_not_local`，不再断言可写，也不再读取已删除的字段。`storage_config_resolve_unresolved_type_stays_local` 改名为 `storage_config_resolve_unresolved_type_is_not_local`，改为断言 `Err` 和侧路径不存在。另有一例把全局库文件写成无法打开的内容，仓库库仍可读：`objects_storage` 同样是拒绝状态。子进程不使用 `spawn_hold_probe` 的空目录。`storage_config_hold_cache_keeps_readable_unset_type`、`storage_config_hold_cache_keeps_local_word` 和 `storage_config_hold_cache_keeps_global_schema_future` 去掉字段断言，仍断言缓存含有路径。可读未设置的那例在随后设上 `gcs-canary` 时，下一次 `put` 仍成功。
+- [ ] AC-4: `docs/commands/cache.md`、`docs/commands/zh-CN/cache.md` 和 `docs/development/commands/cache.md` 改成：读不到 `LIBRA_STORAGE_TYPE` 且原因不是 future global schema 时，对象命令失败，不构造可写本地后端，只报告设置名，也不进入进程内对象缓存。这包括仓库库打不开、全局库文件存在但打不开或解密失败，以及解析线程没有返回。修好配置后的下一次调用会重新读取。future global schema、正好 `local`、以及可读的未设置类型仍是本地结果，并且仍可缓存。`docs/commands/fetch.md`、`docs/commands/zh-CN/fetch.md` 和 `docs/development/commands/fetch.md` 把“配置库读不到仍走历史本地路径”拆开：可读的未设置，包括全局库文件不存在，仍走历史本地路径；仓库库存在但打不开，或解析没有返回，则 `fetch`、`pull`、`clone` 以 `LBR-IO-001` 失败，只报告 `LIBRA_STORAGE_TYPE`，并且不安装 pack。`ClientStorage::init` 使用同一规则。文档和 `COMPATIBILITY.md` 不把这个类型写成 `libra init`。`COMPATIBILITY.md` 的 fetch 行把 “An unset `LIBRA_STORAGE_TYPE` whose configuration database cannot be read keeps the historical local fetch. Unsupported type values such as `gcs` fail the same way. `init`'s older local fallback is unchanged.” 换成与上面相同的区分，并写明 `init` 对这种未决读取不再构造可写本地后端。不改 cache 行，它描述的是 `libra cache`。不新增稳定错误码。
+
+**Verification:**
+
+- [ ] VER-1: `source .env.test && source .env.live-test && cargo nextest run --lib -E 'test(storage_config_hold_unresolved_) | test(storage_config_hold_cache_) | test(storage_config_resolve_unresolved_type_)' --no-fail-fast --retries 0`。同一命令再跑一次，两次都通过。过滤器包含 `storage_config_hold_unresolved_type_is_not_local`、`storage_config_hold_unresolved_type_stderr_has_no_warning`、`storage_config_resolve_unresolved_type_is_not_local`，以及三例仍可缓存的 `storage_config_hold_cache_keeps_*` 和已有的 `storage_config_hold_cache_does_not_keep_rejection`。新测试使用 `#[serial(cwd, env)]`。`src/` 的 serial 行不进入 `tests/SERIAL_REGISTRY.tsv`，不手改 `.config/nextest.toml`。
+- [ ] VER-2: `source .env.test && source .env.live-test && cargo nextest run --test command_test -E 'test(storage_config_unresolved_fetch_stays_local)' --no-fail-fast --retries 0`。fetch、pull、clone 三例都通过，退出码 0，输出不含存储配置错误。它们覆盖的是全局库文件缺失，不是本卡的 `Err`。
+
+**Full-suite trigger:** 无。本卡不改公开签名、CLI 注册、稳定错误码、SQL、安装器或版本面。父卡 FIX-LTR-05 的全量和 VER-1 至 VER-5 仍留在父卡发布。
+
+**Dependencies:** `FIX-LTR-05Y`。
+
+**Deliverables:** 未决且不是 `GlobalSchemaFuture` 的 TYPE 读取返回 `StorageConfigFailure`、删除只为可写降级服务的缓存标记、特征测试，以及 cache、fetch 和 `COMPATIBILITY.md` fetch 行。
+
+**Implementation write set:** `src/utils/client_storage.rs`、`src/utils/util.rs`、`docs/commands/cache.md`、`docs/commands/zh-CN/cache.md`、`docs/development/commands/cache.md`、`docs/commands/fetch.md`、`docs/commands/zh-CN/fetch.md`、`docs/development/commands/fetch.md`、`COMPATIBILITY.md` 仅 fetch 行里上述那句、本计划、`docs/development/plan/plan-status.md` 仅本计划行。不改 `src/command/fetch.rs`、`pull.rs`、`clone.rs`。不改 `tests/SERIAL_REGISTRY.tsv` 和 `.config/nextest.toml`。不改 `docs/error-codes.md`。不改网站。
+
+**Release write set:** `N/A`
+
+**Files likely touched:** 与 I 相同。
+
+**Docs and compatibility impact:** 见 AC-4。先中文后英文。`cache info` 的 JSON 字段和退出约定不变。可读的未设置类型在 fetch、pull、clone 上的成功结果不变。
+
+**Rollback mode:** `immutable-release`
+
+**Migration and rollback:** 无 schema 迁移。已推送提交只以前滚修正。未决 TYPE 不再写出新的本地对象。`ClientStorage::init` 的调用者，包括 commit、cat-file、show 和 hooks，在仓库库锁超时这类暂时读不到类型时，这一次调用也会失败关闭，不再改用本地后端继续写。用户修好配置后，下一次未缓存的调用重新解析。不自动重试，不删除已经存在的对象。
+
+**Security and privacy:** 错误文本只有变量名。不把解析器的路径或底层错误写进 `Display`、`Debug` 或 stderr。测试不使用真实凭据。
+
+**Performance budget:** 保持 200ms 配置库锁上限。拒绝状态不插入缓存，所以下一次调用会再解析一次。这不是重试循环。本卡本地验证一次 3600 秒，含编译。
+
+**Estimated scope:** `S`
+
+**Version increment:** `N/A`
+
+**Release boundary:** `family child`。不 bump、不 tag。已批准的 `v0.30.88` 仍只属于 FIX-LTR-05。本卡的审查通过之后才允许提交。提交本身不发布 v0.30.88，也不开始 FIX04。
+
+**C/D coverage from:** `FIX-LTR-05`
+
+**Granularity:** `type=implementation; axis=未决的对象存储类型不再构造本地存储; recovery=immutable-release前滚; complete=yes; self-contained=yes; AC=4/8; VER=2/8; landing=2; prod-files=2; scope=S; deps=FIX-LTR-05Y; writeset=序列化于FIX-LTR-05之前; release=family child; split-from=FIX-LTR-05; exception=N/A`
+
+两个落点是：非 `GlobalSchemaFuture` 的 TYPE 读取错误返回 `StorageConfigFailure` 且不构造 `LocalStorage`，以及删掉因此不再需要的 `retains_objects_cache` 标记。两个生产文件是 `client_storage.rs` 和 `util.rs`。`fetch.rs` 已把 `StorageConfigFailure` 映射为 `LBR-IO-001`，本卡不改它。签名不变。父卡的发布门仍未跑，所以 FIX-LTR-05 仍 blocked，本卡不消耗 v0.30.88。
 
 ### FIX04、FIX02、FIX03 的接续细则（覆盖旧开工快照）
 
@@ -948,7 +1007,7 @@ R1真实ER03/RECOVERY PASS、H0/VERDICT FAIL（sessionbb82411c-1e59-4e52-a7f1-93
 
 ## 实施顺序与发布窗口
 
-`DEP-QUAL-SECURITY + DEP-QUAL-SOURCE + DEP-QUAL-PUBLISH -> FIX-LTR-01 -> FIX-LTR-05P -> FIX-LTR-05Q -> FIX-LTR-05R -> FIX-LTR-05S -> FIX-LTR-05T -> FIX-LTR-05U -> FIX-LTR-05V -> FIX-LTR-05W -> FIX-LTR-05X -> FIX-LTR-05Y -> FIX-LTR-05 -> FIX-LTR-04 -> FIX-LTR-02 -> FIX-LTR-03 -> DEP-QUAL-HANDOFF`；另有 `DEP-QUAL-F2-ATTRIB + DEC-QUAL-05-RELEASE-WARNING -> FIX-LTR-05`，另有 `FIX05/具名新FIX -> DEP-QUAL-F2-CLOSE -> FIX04`。`FIX-LTR-05W` 已推送 `2a80a10`，只含 `resolve_configured_storage` 与 fetch 写入前检查。`FIX-LTR-05X` 已推送 `a729384`，只含 `init` 的确认失败拒绝状态和不缓存该状态。`FIX-LTR-05Y` 只含未决 TYPE 不进入对象缓存，这一次调用的本地结果仍在。ER03 `db7a5d7f` PASS，实现审查 `a2a2af14` PASS。所以 FIX-LTR-05 仍 blocked。顺序用于共享本计划/版本面的串行发布，不表示合并发布。先修确定性全量阻断，再修共享fixture，最后完成MCP测试清理与整份修复计划的最终资格。每卡真正 C/D 闭合后才发布下一卡。`FIX-LTR-05P` 到 `FIX-LTR-05Y` 都是 family child，不占用 v0.30.88。
+`DEP-QUAL-SECURITY + DEP-QUAL-SOURCE + DEP-QUAL-PUBLISH -> FIX-LTR-01 -> FIX-LTR-05P -> FIX-LTR-05Q -> FIX-LTR-05R -> FIX-LTR-05S -> FIX-LTR-05T -> FIX-LTR-05U -> FIX-LTR-05V -> FIX-LTR-05W -> FIX-LTR-05X -> FIX-LTR-05Y -> FIX-LTR-05Z -> FIX-LTR-05 -> FIX-LTR-04 -> FIX-LTR-02 -> FIX-LTR-03 -> DEP-QUAL-HANDOFF`；另有 `DEP-QUAL-F2-ATTRIB + DEC-QUAL-05-RELEASE-WARNING -> FIX-LTR-05`，另有 `FIX05/具名新FIX -> DEP-QUAL-F2-CLOSE -> FIX04`。`FIX-LTR-05W` 已推送 `2a80a10`，只含 `resolve_configured_storage` 与 fetch 写入前检查。`FIX-LTR-05X` 已推送 `a729384`，只含 `init` 的确认失败拒绝状态和不缓存该状态。`FIX-LTR-05Y` 已推送 `ec98926`，只含未决 TYPE 不进入对象缓存。`FIX-LTR-05Z` 只含未决 TYPE 这一次调用不再构造 `LocalStorage`。ER03 `272c8d7d` PASS，实现审查 `4a42ec63` PASS。父卡自己的 VER-1 至 VER-5 和发布仍未做，所以 FIX-LTR-05 仍 blocked。顺序用于共享本计划/版本面的串行发布，不表示合并发布。先修确定性全量阻断，再修共享fixture，最后完成MCP测试清理与整份修复计划的最终资格。每卡真正 C/D 闭合后才发布下一卡。`FIX-LTR-05P` 到 `FIX-LTR-05Z` 都是 family child，不占用 v0.30.88。
 
 ### 实际 D 映射与现场复核
 
@@ -1256,6 +1315,8 @@ R1真实ER03/RECOVERY PASS、H0/VERDICT FAIL（sessionbb82411c-1e59-4e52-a7f1-93
 
 | 日期 | 触发 | 变更 | 实际状态 |
 |---|---|---|---|
+| 2026-10-26 13:08:00 UTC | 05Z 实现审查 4a42ec63 PASS | 未决 TYPE 不再构造 LocalStorage。VER-1 两次 8/8，VER-2 3/3。fmt 与 clippy 通过。不消耗 v0.30.88。不开始 FIX04。FIX-LTR-05 仍 blocked | in-progress/空；实现审查 PASS |
+| 2026-10-26 12:51:00 UTC | 登记 FIX-LTR-05Z 草案 | 具名决定要求未决 TYPE 这一次调用不再构造 LocalStorage。GlobalSchemaFuture、Ok(None) 和正好 local 保持。源码未改。不消耗 v0.30.88。不开始 FIX04 | blocked/空；待 ER03 |
 | 2026-10-26 12:48:00 UTC | 05Y 实现审查 a2a2af14 PASS | 未决 TYPE 不进入对象缓存。VER-1 两次都是 6 通过。fmt 与 clippy 通过。不消耗 v0.30.88。FIX-LTR-05 仍 blocked | in-progress/空；实现审查 PASS |
 | 2026-10-26 12:35:00 UTC | 05Y ER03 db7a5d7f PASS | 准入不缓存未决 TYPE。补上 TYPE 只读一次，以及 VER-1 包含 storage_config_resolve_unresolved_type_stays_local。类型一直读不到时，每次 objects_storage 都重新解析。不消耗 v0.30.88。FIX-LTR-05 仍 blocked | in-progress/空；实现待审查 |
 | 2026-10-26 12:29:00 UTC | 登记 FIX-LTR-05Y 草案 | 未决且不是 GlobalSchemaFuture 的 TYPE 读取仍返回今天的本地结果，但不得写入对象缓存。下一次 objects_storage 重新解析。源码未改。不消耗 v0.30.88。FIX-LTR-05 仍 blocked | blocked/空；待 ER03 |
@@ -1300,8 +1361,9 @@ R1真实ER03/RECOVERY PASS、H0/VERDICT FAIL（sessionbb82411c-1e59-4e52-a7f1-93
 | FIX-LTR-05V | fetch AutoFollow 不再把存储读取失败当成缺失标签 | fetch.rs、pull.rs、clone.rs 及本卡测试、本计划、plan-status 本计划行 | 2/8、1/8 | 4/3 M | FIX-LTR-05U | family child；不占用 v0.30.88；已推送 835cfc5；session 95af8652 已准入 |
 | FIX-LTR-05W | fetch 在写入前拒绝读不到的对象存储配置 | client_storage.rs、util.rs、fetch.rs、pull.rs、clone.rs、fetch/pull/clone 测试、fetch 文档、COMPATIBILITY fetch 行、本计划、plan-status 本计划行 | 8/8、3/8 | 4/5 M | FIX-LTR-05V | family child；不占用 v0.30.88；已推送 2a80a10；ER03 c6cf48c1 PASS；实现审查 2ee621eb PASS |
 | FIX-LTR-05X | init 在确认失败时不再构造本地存储 | client_storage.rs、util.rs、intent.rs、clean.rs、subagent_content.rs、checkpoint.rs、fetch 与 cache 文档、本计划、plan-status 本计划行 | 8/8、2/8 | 4/6 M | FIX-LTR-05W | family child；不占用 v0.30.88；ER03 8059d2f4 PASS；实现审查 bd0e229d PASS |
-| FIX-LTR-05Y | 未决的对象存储类型不进入对象缓存 | client_storage.rs、util.rs、cache 与 fetch 文档、本计划、plan-status 本计划行 | 5/8、1/8 | 2/2 S | FIX-LTR-05X | family child；不占用 v0.30.88；ER03 db7a5d7f PASS；实现审查 a2a2af14 PASS |
-| FIX-LTR-05 | 配置失败与对象存储fail-closed（未准入候选） | client_storage/util/fetch候选及卡内逐文件同步集 | 8/8、6/8 | 3文件候选；落点/规模pending VER-6 | FIX01 + 05P 至 05Y + SOURCE/PUBLISH + F2-ATTRIB + v0.30.88决定；05Y不足以解除阻塞 | independent/self；不得先实施 |
+| FIX-LTR-05Y | 未决的对象存储类型不进入对象缓存 | client_storage.rs、util.rs、cache 与 fetch 文档、本计划、plan-status 本计划行 | 5/8、1/8 | 2/2 S | FIX-LTR-05X | family child；不占用 v0.30.88；已推送 ec98926；ER03 db7a5d7f PASS；实现审查 a2a2af14 PASS |
+| FIX-LTR-05Z | 未决的对象存储类型不再构造本地存储 | client_storage.rs、util.rs、cache 与 fetch 文档、COMPATIBILITY fetch 行、本计划、plan-status 本计划行 | 4/8、2/8 | 2/2 S | FIX-LTR-05Y | family child；不占用 v0.30.88；ER03 272c8d7d PASS；实现审查 4a42ec63 PASS |
+| FIX-LTR-05 | 配置失败与对象存储fail-closed（未准入候选） | client_storage/util/fetch候选及卡内逐文件同步集 | 8/8、6/8 | 3文件候选；落点/规模pending VER-6 | FIX01 + 05P 至 05Z + SOURCE/PUBLISH + F2-ATTRIB + v0.30.88决定；05Z不足以解除阻塞 | independent/self；不得先实施 |
 | FIX-LTR-04 | 同步ingress测试构造器profile可用性 | ingress.rs仅两cfg、本计划、plan-status本计划行 | 4/8、5/8 | 1/1 S | FIX-LTR-05 + F2-CLOSE + SOURCE/PUBLISH | independent/self |
 | FIX-LTR-02 | reasoning fixture索引结清 | reasoning_artifact.rs、本计划、plan-status本计划行 | 4/8、3/8 | 1/0 S | FIX-LTR-01/FIX-LTR-04 | independent/self |
 | FIX-LTR-03 | MCP owned worker teardown | agent_mcp_exec_test.rs、本计划、plan-status本计划行 | 4/8、4/8 | 1/0 S | FIX-LTR-02 | independent/self |
@@ -1520,7 +1582,7 @@ root继续承担准入与执行器P2：任何新源码/元数据/help变化先ST
 | DEP-QUAL-HANDOFF | outgoing | 来源资格 | plan-20261015 LTR-10 / LTR-01 | root | 四卡独立C/D完成、FIX03 bump后C及发布后最终资格窗口全量/doc/network与本地Claude明确PASS（绑定实际merge树）、终态登记提交实际PR/main D通过并具名例行补记，再核受控整合树、原工作区受控整合/受影响门通过 | 后续真实提交/版本/远端ref/原件，当前无 | 来源资格未闭合不得解除LTR-10前置；不更改H1或替代LTR各卡门 |
 `DEP-QUAL-SECURITY + DEP-QUAL-SOURCE + DEP-QUAL-PUBLISH -> FIX-LTR-01 -> FIX-LTR-05 -> FIX-LTR-04 -> FIX-LTR-02 -> FIX-LTR-03 -> DEP-QUAL-HANDOFF`；另有 `DEP-QUAL-F2 + DEC-QUAL-05-RELEASE-WARNING -> FIX-LTR-05`，当前授权与诊断未闭合，候选顺序不等于准入。顺序用于共享本计划/版本面的串行发布，不表示合并发布。先修确定性全量阻断，再修共享fixture，最后完成MCP测试清理与整份修复计划的最终资格。每卡真正 C/D 闭合后才发布下一卡。
 
-现行顺序（2026-10-26，不以本快照为准）：`FIX-LTR-01 -> FIX-LTR-05P -> FIX-LTR-05Q -> FIX-LTR-05R -> FIX-LTR-05S -> FIX-LTR-05T -> FIX-LTR-05U -> FIX-LTR-05V -> FIX-LTR-05W -> FIX-LTR-05X -> FIX-LTR-05Y -> FIX-LTR-05`。05X 已推送 `a729384`。05Y 的 ER03 `db7a5d7f` PASS，实现审查 `a2a2af14` PASS。未决 TYPE 的这一次本地结果仍使 FIX-LTR-05 blocked。见上文「实施顺序与发布窗口」。
+现行顺序（2026-10-26，不以本快照为准）：`FIX-LTR-01 -> FIX-LTR-05P -> FIX-LTR-05Q -> FIX-LTR-05R -> FIX-LTR-05S -> FIX-LTR-05T -> FIX-LTR-05U -> FIX-LTR-05V -> FIX-LTR-05W -> FIX-LTR-05X -> FIX-LTR-05Y -> FIX-LTR-05Z -> FIX-LTR-05`。05Y 已推送 `ec98926`。05Z 的 ER03 `272c8d7d` PASS，实现审查 `4a42ec63` PASS。父卡发布仍使 FIX-LTR-05 blocked。见上文「实施顺序与发布窗口」。
 ### 四卡共同适用的逐项D清单
 **Granularity:** `type=implementation; axis=global-schema doctor的auto-upgrade结构oracle对齐; recovery=immutable-release前滚本卡单轴测试修复; complete=yes; self-contained=yes; AC=3/8; VER=3/8; landing=1; prod-files=0; scope=S; deps=DEP-QUAL-SOURCE, DEP-QUAL-SECURITY, DEP-QUAL-PUBLISH; writeset=四卡本计划与R串行; release=independent; split-from=新上游资格20261025实际FAIL/STOP; exception=N/A`
 **Granularity:** `type=implementation; axis=合成checkpoint fixture的索引结清前置; recovery=immutable-release前滚本卡单轴测试修复; complete=yes; self-contained=yes; AC=4/8; VER=3/8; landing=1; prod-files=0; scope=S; deps=FIX-LTR-01,FIX-LTR-04; writeset=四卡本计划与R串行; release=independent; split-from=新上游资格20261025实际FAIL/STOP; exception=N/A`

@@ -24,15 +24,18 @@ DB), so the reported values match what the backend uses:
   applies before connecting (non-empty bucket, parseable `LIBRA_STORAGE_ENDPOINT`,
   non-empty `LIBRA_STORAGE_ACCESS_KEY` / `LIBRA_STORAGE_SECRET_KEY`). So a
   wrong-case `R2`, an empty key, or a malformed endpoint reports non-tiered.
-  That report does not mean `init` built a writable local backend. Those
+  That report does not mean `ClientStorage::init` built a writable local backend. Those
   confirmed settings make object commands fail and name only the setting.
   `LIBRA_STORAGE_TYPE=local` still warns and stays local. An unreadable
-  `LIBRA_STORAGE_TYPE` still uses that historical local backend for the current
-  call. The process object cache does not keep that client, so every later
-  `objects_storage` call reads the setting again, including each object load
-  that goes through it. A future global schema, an exact `local` value, and a
-  readable unset type can still be cached. Confirmed unusable settings stay out
-  of that cache. The cache tunables only take effect when tiered; a
+  `LIBRA_STORAGE_TYPE`, other than a future global schema, fails the object
+  command. That includes a repository database that cannot be opened, a global
+  database file that exists but cannot be opened or decrypted, and a resolver
+  that does not return. `ClientStorage::init` does not build a writable local
+  backend, names only the setting, and does not keep the client in the process
+  object cache. The next call reads the setting again after the configuration
+  is repaired. A future global schema, an exact `local` value, and a readable
+  unset type stay local and can still be cached. Confirmed unusable settings
+  stay out of that cache. The cache tunables only take effect when tiered; a
   local-only repository caches nothing. An actual connection additionally needs
   valid credentials, which this static report does not validate.
 - **threshold** — the small/large object threshold in bytes

@@ -38,7 +38,7 @@
 
 ## 当前状态
 
-- 读不到 `LIBRA_STORAGE_TYPE` 且原因不是 future global schema 时，这一次调用仍是历史本地后端，进程内对象缓存不保留该客户端。类型一直读不到时，每一次 `objects_storage` 都会重新解析。future global schema、正好 `local` 和可读的未设置类型仍可缓存。
+- 读不到 `LIBRA_STORAGE_TYPE` 且原因不是 future global schema 时，`ClientStorage::init` 失败，不构造可写本地后端，只报告设置名，也不进入进程内对象缓存。这包括仓库库打不开、全局库文件存在但打不开或解密失败，以及解析没有返回。future global schema、正好 `local` 和可读的未设置类型仍是本地结果，并且仍可缓存。
 - 公开状态：已公开（`Commands::Cache`）。
 - 测试：`tests/command/cache_test.rs`（local 默认、tiered env 覆盖、非法数值回落默认、
   human 输出标签）。

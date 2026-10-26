@@ -1374,8 +1374,7 @@ pub fn try_objects_storage() -> io::Result<ClientStorage> {
 /// Resolve object storage for a caller that can handle configuration failure.
 ///
 /// This does not read or write [`OBJECTS_STORAGE_CACHE`]. [`try_objects_storage`]
-/// remains the cached entry. A confirmed failure and an unread storage type are
-/// not inserted.
+/// remains the cached entry. A rejected configuration is not inserted.
 pub fn resolve_configured_objects_storage()
 -> Result<ClientStorage, crate::utils::client_storage::StorageConfigFailure> {
     crate::utils::client_storage::ClientStorage::resolve_configured_storage(path::objects())
@@ -1390,7 +1389,7 @@ fn cached_objects_storage(base_path: PathBuf) -> ClientStorage {
     }
 
     let storage = ClientStorage::init(base_path.clone());
-    if storage.configuration_variable().is_some() || !storage.retains_objects_cache() {
+    if storage.configuration_variable().is_some() {
         return storage;
     }
     cache.insert(base_path, storage.clone());

@@ -27,14 +27,14 @@ DB), so the reported values match what the backend uses:
   That report does not mean `ClientStorage::init` built a writable local backend. Those
   confirmed settings make object commands fail and name only the setting.
   `LIBRA_STORAGE_TYPE=local` still warns and stays local. An unreadable
-  `LIBRA_STORAGE_TYPE`, other than a future global schema, fails the object
-  command. That includes a repository database that cannot be opened, a global
-  database file that exists but cannot be opened or decrypted, and a resolver
-  that does not return. `ClientStorage::init` does not build a writable local
-  backend, names only the setting, and does not keep the client in the process
-  object cache. The next call reads the setting again after the configuration
-  is repaired. A future global schema, an exact `local` value, and a readable
-  unset type stay local and can still be cached. Confirmed unusable settings
+  repository database, or a resolver that does not return, fails the object
+  command. `ClientStorage::init` does not build a writable local backend for
+  that case, names only the setting, and does not keep the client in the
+  process object cache. An unreadable global config store, after the repository
+  has no type, stays on the historical local backend so existing objects can
+  still be read. The next call reads the setting again after the repository
+  database is repaired. A future global schema, an exact `local` value, and a
+  readable unset type stay local and can still be cached. Confirmed unusable settings
   stay out of that cache. The cache tunables only take effect when tiered; a
   local-only repository caches nothing. An actual connection additionally needs
   valid credentials, which this static report does not validate.

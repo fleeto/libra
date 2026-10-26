@@ -3594,9 +3594,15 @@ pub(crate) mod tests {
             },
         };
 
-        // The existing local fallback avoids cloud lookups for delete-only push.
-        // Keyed lanes and per-test nextest processes follow existing env fixtures.
-        let _storage = ScopedEnvVar::set("LIBRA_STORAGE_TYPE", "local");
+        // Fetch, pull, and clone reject `LIBRA_STORAGE_TYPE=local`. Leave the
+        // type unset and point the global config at a missing file so object
+        // storage stays local and the transport error is the one under test.
+        let _storage = ScopedEnvVar::unset("LIBRA_STORAGE_TYPE");
+        let isolated = tempfile::tempdir().unwrap();
+        let _global = ScopedEnvVar::set(
+            "LIBRA_CONFIG_GLOBAL_DB",
+            isolated.path().join("missing-global.db"),
+        );
         let mut checked = 0;
         for (malformed, native_stderr) in [
             b"0001".as_slice(),

@@ -1384,6 +1384,12 @@ impl std::fmt::Display for GlobalConfigSchemaFuture {
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum StorageConfigResolutionError {
     GlobalSchemaFuture(GlobalConfigSchemaFuture),
+    /// The repository scope has no value, and the global config store exists
+    /// but cannot be read. Object storage stays local so an unreadable global
+    /// store does not block reads of existing objects. A stored value that
+    /// cannot be decrypted is `Other` and stays fail-closed. The command's own
+    /// config read still fails.
+    GlobalStoreUnreadable(String),
     Other(String),
 }
 
@@ -1391,7 +1397,7 @@ impl std::fmt::Display for StorageConfigResolutionError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Self::GlobalSchemaFuture(future) => future.fmt(f),
-            Self::Other(message) => f.write_str(message),
+            Self::GlobalStoreUnreadable(message) | Self::Other(message) => f.write_str(message),
         }
     }
 }
@@ -1642,8 +1648,9 @@ impl ClientStorage {
     ///
     /// Boundary conditions:
     /// - Does not panic on misconfiguration. Confirmed failures name only the
-    ///   setting. An unreadable type, other than a future global schema, does
-    ///   not construct `LocalStorage`.
+    ///   setting. An unreadable repository database does not construct
+    ///   `LocalStorage`. An unreadable global store still uses the historical
+    ///   local backend. A failed decryption of a stored type stays fail-closed.
     pub fn init(base_path: PathBuf) -> ClientStorage {
         match Self::open_init_storage(base_path.clone()) {
             Ok(storage) => storage,
@@ -1720,8 +1727,9 @@ impl ClientStorage {
     ///
     /// Confirmed remote settings that cannot be completed return
     /// [`StorageConfigFailure`] and do not build `LocalStorage`. A readable
-    /// unset type and a future global schema stay on the historical local
-    /// result. Any other unread type is also [`StorageConfigFailure`].
+    /// unset type, a future global schema, and an unreadable global store stay
+    /// on the historical local result. An unreadable repository database, or a
+    /// stored type that cannot be decrypted, is [`StorageConfigFailure`].
     pub fn resolve_configured_storage(
         base_path: PathBuf,
     ) -> Result<ClientStorage, StorageConfigFailure> {
@@ -1751,7 +1759,11 @@ impl ClientStorage {
             Ok(Some(storage_type)) => storage_type,
             Ok(None) => return Ok(Self::local_configured_client(base_path)),
             Err(error) => {
-                if matches!(error, StorageConfigResolutionError::GlobalSchemaFuture(_)) {
+                if matches!(
+                    error,
+                    StorageConfigResolutionError::GlobalSchemaFuture(_)
+                        | StorageConfigResolutionError::GlobalStoreUnreadable(_)
+                ) {
                     let storage = Self::storage_config_resolution_fallback(
                         &base_path,
                         "LIBRA_STORAGE_TYPE",
@@ -1759,8 +1771,9 @@ impl ClientStorage {
                     );
                     return Ok(Self::ready(storage, base_path));
                 }
-                // The value already in hand is not a schema policy. Do not build
-                // a writable backend or keep the underlying error text.
+                // A repository database that cannot be read, or a resolver that
+                // does not return, cannot tell local from remote. Do not build a
+                // writable backend or keep the underlying error text.
                 return Err(StorageConfigFailure {
                     variable: "LIBRA_STORAGE_TYPE",
                 });
@@ -3447,11 +3460,18 @@ async fn resolve_env_for_storage_init_typed(
             DatabaseRole::GlobalConfig,
         )
         .await
-        .map_err(StorageConfigResolutionError::Other)
         {
             Ok(Some(value)) => return Ok(Some(value)),
             Ok(None) => {}
-            Err(err) => return Err(err),
+            Err(message) => {
+                // A stored value that cannot be decrypted is not an unreadable
+                // store. Keep that fail-closed. Connection and query errors
+                // leave object reads on the historical local backend.
+                if message.starts_with("failed to decrypt ") {
+                    return Err(StorageConfigResolutionError::Other(message));
+                }
+                return Err(StorageConfigResolutionError::GlobalStoreUnreadable(message));
+            }
         }
     }
 
@@ -8053,7 +8073,7 @@ mod tests {
 
     #[tokio::test]
     #[serial(cwd, env)]
-    async fn storage_config_hold_unresolved_global_file_is_not_local() {
+    async fn storage_config_hold_unreadable_global_stays_local() {
         let _hash = set_hash_kind_for_test(HashKind::Sha1);
         let _env = isolate_storage_env();
         let repo = tempdir().expect("temp");
@@ -8063,19 +8083,14 @@ mod tests {
         let _cwd = ChangeDirGuard::new(repo.path());
         let _global = ScopedEnvVar::set("LIBRA_CONFIG_GLOBAL_DB", &global);
         let storage = crate::utils::util::objects_storage();
-        assert_eq!(storage.configuration_variable(), Some("LIBRA_STORAGE_TYPE"));
-        assert!(!crate::utils::util::objects_storage_cache_contains(
+        assert!(storage.configuration_variable().is_none());
+        assert!(crate::utils::util::objects_storage_cache_contains(
             &crate::utils::path::objects()
         ));
         let blob = Blob::from_content("broken-global");
-        let put_error = storage
+        storage
             .put(&blob.id, &blob.data, blob.get_type())
-            .expect_err("a broken global database is not local");
-        assert_eq!(
-            put_error.to_string(),
-            "failed to read storage configuration for LIBRA_STORAGE_TYPE"
-        );
-        assert!(!put_error.to_string().contains("not a sqlite"));
+            .expect("an unreadable global store does not block local objects");
     }
 
     fn spawn_unresolved_probe(repo: &std::path::Path) -> std::process::Output {

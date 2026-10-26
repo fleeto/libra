@@ -70,13 +70,12 @@ endpoint that is not a URL fails with `LBR-IO-001` and reports only the
 setting name. An unset bucket, endpoint, region, key, secret, allow-http
 flag, threshold, or cache size keeps its existing default. The same check applies to
 `pull` and `clone`. A readable unset type, including a missing global
-configuration file, stays on the historical local path. An unread
-`LIBRA_STORAGE_TYPE` fails `fetch`, `pull`, and `clone` with `LBR-IO-001`
-before a pack is installed and reports only that setting name. That includes a
-repository database that cannot be opened, a global database file that exists
-but cannot be opened or decrypted, and a resolver that does not return. A
-future global schema while reading the type stays on the historical local
-path. A type other than `s3` or `r2`, including `gcs`, also fails with
+configuration file, stays on the historical local path. An unread repository database, or a resolver that does not return, fails
+`fetch`, `pull`, and `clone` with `LBR-IO-001` before a pack is installed and
+reports only `LIBRA_STORAGE_TYPE`. An unreadable global config store, after the
+repository has no type, stays on the historical local path so existing objects
+can still be read. A future global schema while reading the type stays on that
+same local path. A type other than `s3` or `r2`, including `gcs`, also fails with
 `LBR-IO-001`. `ClientStorage::init` uses the same rule and does not build a
 writable local backend for an unread type. `LIBRA_STORAGE_TYPE=local` still
 warns and stays local for `ClientStorage::init`. Fetch, pull, and clone

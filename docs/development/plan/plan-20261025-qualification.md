@@ -1315,6 +1315,7 @@ R1真实ER03/RECOVERY PASS、H0/VERDICT FAIL（sessionbb82411c-1e59-4e52-a7f1-93
 
 | 日期 | 触发 | 变更 | 实际状态 |
 |---|---|---|---|
+| 2026-10-26 14:23:00 UTC | 完整套件被未决 TYPE 挡住对象读取 | 仓库库打不开仍失败关闭。全局库存在但打不开时，对象存储回到历史本地后端。解密失败仍失败关闭。审查 9e386060 与 ce4eb432 PASS。完整套件 run db0184d9：10822 passed，0 failed。不消耗 v0.30.88。不开始 FIX04 | in-progress/空；发布 D 未观察 |
 | 2026-10-26 13:08:00 UTC | 05Z 实现审查 4a42ec63 PASS | 未决 TYPE 不再构造 LocalStorage。VER-1 两次 8/8，VER-2 3/3。fmt 与 clippy 通过。不消耗 v0.30.88。不开始 FIX04。FIX-LTR-05 仍 blocked | in-progress/空；实现审查 PASS |
 | 2026-10-26 12:51:00 UTC | 登记 FIX-LTR-05Z 草案 | 具名决定要求未决 TYPE 这一次调用不再构造 LocalStorage。GlobalSchemaFuture、Ok(None) 和正好 local 保持。源码未改。不消耗 v0.30.88。不开始 FIX04 | blocked/空；待 ER03 |
 | 2026-10-26 12:48:00 UTC | 05Y 实现审查 a2a2af14 PASS | 未决 TYPE 不进入对象缓存。VER-1 两次都是 6 通过。fmt 与 clippy 通过。不消耗 v0.30.88。FIX-LTR-05 仍 blocked | in-progress/空；实现审查 PASS |

@@ -38,7 +38,7 @@
 
 ## 当前状态
 
-- 读不到 `LIBRA_STORAGE_TYPE` 且原因不是 future global schema 时，`ClientStorage::init` 失败，不构造可写本地后端，只报告设置名，也不进入进程内对象缓存。这包括仓库库打不开、全局库文件存在但打不开或解密失败，以及解析没有返回。future global schema、正好 `local` 和可读的未设置类型仍是本地结果，并且仍可缓存。
+- 仓库库打不开，或解析没有返回时，`ClientStorage::init` 失败，不构造可写本地后端，只报告设置名，也不进入进程内对象缓存。全局库文件存在但打不开时，对象存储仍用历史本地后端，已有对象仍可读取。future global schema、正好 `local` 和可读的未设置类型仍是本地结果，并且仍可缓存。
 - 公开状态：已公开（`Commands::Cache`）。
 - 测试：`tests/command/cache_test.rs`（local 默认、tiered env 覆盖、非法数值回落默认、
   human 输出标签）。

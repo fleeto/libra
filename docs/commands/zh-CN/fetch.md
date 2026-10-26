@@ -26,7 +26,7 @@ Fetch 支持 SSH、HTTPS、本地文件、Git v2 bundle 文件和 `git://` 传�
 `curl --proto '=https' --tlsv1.2 -sSf https://download.libra.tools/install.sh | sh`。
 禁止手工删除或修改 SQLite receipt。仅在明确需要本地对象访问时使用 `--offline` 或 `LIBRA_READ_POLICY=offline|local`；这些模式会告警，并不授权远端同步。
 
-`LIBRA_STORAGE_TYPE` 为 `s3` 或 `r2` 时，`fetch` 会在更新引用或安装 pack 之前检查其余对象存储设置。读不到设置、bucket、access key 或 secret 为空，或 endpoint 不是 URL 时，以 `LBR-IO-001` 失败，并且只报告变量名。未设置的 bucket、endpoint、region、key、secret、allow-http、threshold 或 cache size 仍用原来的默认值。`pull` 和 `clone` 走同一检查。可读的未设置类型，包括全局库文件不存在，fetch 仍走原来的本地路径。`LIBRA_STORAGE_TYPE` 没有读到时，`fetch`、`pull` 和 `clone` 以 `LBR-IO-001` 失败，只报告这个设置名，并且不安装 pack。这包括仓库库打不开、全局库文件存在但打不开或解密失败，以及解析没有返回。读取类型时遇到 future global schema 仍走原来的本地路径。`gcs` 这类不受支持的类型同样以 `LBR-IO-001` 失败。`ClientStorage::init` 对这种未决读取也不构造可写的本地后端。`LIBRA_STORAGE_TYPE=local` 对 `ClientStorage::init` 仍打印原来的警告并保持本地。`fetch`、`pull` 和 `clone` 对这个精确值已经失败。
+`LIBRA_STORAGE_TYPE` 为 `s3` 或 `r2` 时，`fetch` 会在更新引用或安装 pack 之前检查其余对象存储设置。读不到设置、bucket、access key 或 secret 为空，或 endpoint 不是 URL 时，以 `LBR-IO-001` 失败，并且只报告变量名。未设置的 bucket、endpoint、region、key、secret、allow-http、threshold 或 cache size 仍用原来的默认值。`pull` 和 `clone` 走同一检查。可读的未设置类型，包括全局库文件不存在，fetch 仍走原来的本地路径。仓库库打不开，或解析没有返回时，`fetch`、`pull` 和 `clone` 以 `LBR-IO-001` 失败，只报告 `LIBRA_STORAGE_TYPE`，并且不安装 pack。全局库文件存在但打不开时，对象存储仍走原来的本地路径，已有对象仍可读取。读取类型时遇到 future global schema 仍走原来的本地路径。`gcs` 这类不受支持的类型同样以 `LBR-IO-001` 失败。`ClientStorage::init` 对这种未决读取也不构造可写的本地后端。`LIBRA_STORAGE_TYPE=local` 对 `ClientStorage::init` 仍打印原来的警告并保持本地。`fetch`、`pull` 和 `clone` 对这个精确值已经失败。
 
 ### 抓取相关的 config 默认值（`fetch.prune`、`remote.<name>.prune`）
 

@@ -5,14 +5,17 @@
 # stack frames; `command_test`'s switch/detach path crossed the 2 MiB
 # std::thread default and aborted the whole test binary with a stack
 # overflow (first seen 2026-08-18, W5-09 full-suite gate; measured: aborts
-# at the 2 MiB std::thread default, passes at 4 MiB — 16 MiB leaves
-# headroom for further debug-frame growth). This
-# mirrors the production binary's own posture: `src/main.rs` runs the CLI
-# on an explicit 32 MiB thread. Installed release binaries are unaffected
-# (this env applies only to cargo-launched processes; release frames are
-# far smaller).
+# at the 2 MiB std::thread default, passes at 4 MiB). The floor is 32 MiB,
+# the same size as the production CLI thread in `src/main.rs`.
+# `cargo blaze test` does not apply this table: ra-jit compiles with
+# `cargo test --no-run` and then starts the test binary itself. Every blaze
+# invocation must export `RUST_MIN_STACK=33554432` in the process
+# environment so libtest's threads inherit it. See
+# docs/development/integration/integration-test-plan.md section 3.4.
+# Installed release binaries are unaffected (this env applies only to
+# cargo-launched processes; release frames are far smaller).
 [env]
-RUST_MIN_STACK = "16777216"
+RUST_MIN_STACK = "33554432"
 #
 # LIBSQLITE3_FLAGS — extra compile options for the bundled SQLite, read by
 # libsqlite3-sys. SQLITE_DEFAULT_MEMSTATUS=0 turns off SQLite's memory-usage

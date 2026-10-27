@@ -112,6 +112,10 @@ pub fn filter_refresh_candidates(files: &[PathBuf], pathspecs: &PathspecSet) -> 
 ///   executable-bit change counts only under `file_mode` (git's trust-mode).
 /// - The refreshed entry keeps its staged mode, hash and extended flags; only
 ///   the stat fields follow the worktree.
+/// - Every stage-0 candidate loses a stale assume-unchanged (`CE_VALID`) bit,
+///   whatever the outcome (issues/637). Libra has no assume-unchanged
+///   semantics, so the bit can only be a leftover from git-internal <= 0.10.3;
+///   Git would keep it here and keep skipping the worktree stat.
 pub fn refresh_candidates(
     index: &mut Index,
     candidates: &[PathBuf],
@@ -148,6 +152,7 @@ pub fn refresh_candidates(
         else {
             continue;
         };
+        crate::utils::index_ext::clear_assume_valid(index, name, 0);
         if skip_worktree {
             // CE_SKIP_WORKTREE: the user promised the worktree copy is good.
             continue;

@@ -4653,9 +4653,9 @@ checksum = "e629b9b98ef3dd8afe6ca2bd0f89306cec16d43d907889945bc5d6687f2f13c7"
 
 [[package]]
 name = "git-internal"
-version = "0.10.2"
+version = "0.10.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "d119c7387b2fa0b751436dc2b8dd1da6d3356c4a7eb9e821dc78a37a0f3eb8ab"
+checksum = "e56cb086640057dbcb71f0524e3f6412e72d1fd850a985be2151037147d0a939"
 dependencies = [
  "ahash 0.8.12",
  "async-trait",

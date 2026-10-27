@@ -1019,6 +1019,84 @@ fn update_index_really_refresh_equals_refresh() {
     );
 }
 
+/// Stage-0 paths whose index entry carries assume-unchanged (`CE_VALID`).
+fn assume_valid_paths(repo: &std::path::Path) -> Vec<String> {
+    use git_internal::{hash::HashKind, internal::index::Index};
+    let index =
+        Index::load_with_hash_kind(HashKind::Sha1, repo.join(".libra/index")).expect("load index");
+    index
+        .tracked_entries(0)
+        .into_iter()
+        .filter(|entry| entry.flags.assume_valid)
+        .map(|entry| entry.name.clone())
+        .collect()
+}
+
+/// Rewrite the index the way git-internal <= 0.10.3 wrote it: `CE_VALID` on
+/// every entry.
+fn mark_all_assume_valid(repo: &std::path::Path) {
+    use git_internal::{hash::HashKind, internal::index::Index};
+    let index_path = repo.join(".libra/index");
+    let mut index = Index::load_with_hash_kind(HashKind::Sha1, &index_path).expect("load index");
+    let names: Vec<String> = index
+        .tracked_entries(0)
+        .into_iter()
+        .map(|entry| entry.name.clone())
+        .collect();
+    for name in names {
+        let mut entry = index.remove(&name, 0).expect("tracked entry");
+        entry.flags.assume_valid = true;
+        index.add(entry);
+    }
+    index
+        .save_with_hash_kind(HashKind::Sha1, &index_path)
+        .expect("save index");
+}
+
+/// issues/637: newly staged entries carry no `CE_VALID`, and `--refresh`
+/// clears the bit left by older releases from every stage-0 entry — clean,
+/// stat-refreshed and modified alike — so Git reading the index sees edits.
+#[test]
+fn update_index_refresh_clears_legacy_assume_valid() {
+    let repo = init_repo();
+    super::configure_identity_via_cli(repo.path());
+    write_and_commit(repo.path(), "a.txt", "a\n");
+    write_and_commit(repo.path(), "b.txt", "b\n");
+    write_and_commit(repo.path(), "c.txt", "c\n");
+    assert!(
+        assume_valid_paths(repo.path()).is_empty(),
+        "new entries must not carry CE_VALID"
+    );
+
+    mark_all_assume_valid(repo.path());
+    assert_eq!(
+        assume_valid_paths(repo.path()),
+        ["a.txt", "b.txt", "c.txt"],
+        "precondition: legacy index with CE_VALID on every entry"
+    );
+
+    // a.txt: untouched; b.txt: stat-only drift; c.txt: modified content.
+    std::thread::sleep(std::time::Duration::from_millis(1500));
+    fs::write(repo.path().join("b.txt"), "b\n").expect("rewrite same content");
+    fs::write(repo.path().join("c.txt"), "changed\n").expect("modify");
+
+    let output = run_libra_command(&["update-index", "--refresh"], repo.path());
+    assert_eq!(
+        output.status.code(),
+        Some(1),
+        "modified c.txt must still be reported: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert_eq!(
+        String::from_utf8_lossy(&output.stdout).trim(),
+        "c.txt: needs update"
+    );
+    assert!(
+        assume_valid_paths(repo.path()).is_empty(),
+        "refresh must clear the legacy CE_VALID bit from every entry"
+    );
+}
+
 /// UI-03 C1/C2: `--chmod=(+|-)x` applies positionally to the paths that
 /// follow it (git t2107:93-97 matrix).
 #[test]

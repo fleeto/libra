@@ -2,6 +2,20 @@
 
 ## Unreleased
 
+### Fixed
+
+- Index entries no longer carry Git's assume-unchanged bit (issues/637).
+  Libra now depends on `git-internal` 0.10.4, whose `Flags::new()` no longer
+  sets `CE_VALID` (`0x8000`). Every entry written by clone, add, reset,
+  restore, checkout, merge and the other index-writing commands used to carry
+  it, so Git reading a Libra index skipped the working-tree `stat` and missed
+  edits and deletions. Strict index comparison against Git also failed.
+- An index written by an earlier release keeps the bit on untouched entries.
+  Run `libra update-index --refresh` (or `--really-refresh`) to clear it:
+  Libra has no assume-unchanged semantics, so its refresh clears the bit from
+  every stage-0 entry it examines. Git's `--refresh` keeps the bit; Libra's
+  does not. See `docs/commands/update-index.md`.
+
 ## [0.30.85] — 2026-10-22
 
 ### Integrated upstream changes

@@ -28,13 +28,13 @@
 | FIX-LTR-05 | done，v0.30.88 D 已观察 | 父卡 VER-1 至 VER-5 与失败关闭的缓存、fetch pack 已在 ae50414 满足。审查 d9641b0d PASS。发布 e85470a。D 于 2026-10-26T18:23:07Z 成功：base 40349034162 attempt 2、CodeQL 40349034316、release 40349204443。F2 仍 unknown。RISK-QUAL-ADD-LOOSE 未修 |
 | FIX-LTR-04 | done，v0.30.89 D 已观察，F2 仍 unknown | 2026-10-26T19:12:37Z 修订：历史 TRY1 stderr 不可恢复，CLOSE 保持 unknown，P1 不关闭。实现审查 354b5170 PASS。发布 ff30d4a。D 于 2026-10-26T20:44:43Z 成功：base 40391580491、CodeQL 40391580303、release 40391698253。本卡只加了两行 cfg |
 | FIX-LTR-02 | done，v0.30.90 D 已观察 | 发布 `98852b7`。D 成功：base `40406196457`、CodeQL `40406196519`、release `40406331881`。fixture `b5c92ec6-90ec-4a3e-a1c4-2faa9b2ae259`。F2 仍 unknown |
-| FIX-LTR-03 | 本地实现已接入，本卡 D 未观察 | `read_worker_status_spawns_no_helpers` 先记录 MCP 父进程的子进程和 starttime，断言前绑定 pause 文件中的 worker。回收时先向核过身份的 worker 组发退出信号，再结束父进程，并在父进程 wait 之后单独确认 worker 不再存活。不按进程名清理。F2 仍 unknown |
+| FIX-LTR-03 | done，v0.30.91 D 已观察 | 发布 `e24c88b`。D 成功：base `40426098305`、CodeQL `40426098171`、release `40426201816`。worker 回收先核身份再结束父进程。F2 仍 unknown。四个具名 P2 未修 |
 | F3 / RISK-QUAL-STDIN | 具名 P2，未修 | `subagent_content` fixture 的 BrokenPipe/时序风险单独处理；不能混入 FIX05；若升级为 P1 或阻断当前门，先另立 FIX 卡和依赖 |
 | RISK-QUAL-ADD-LOOSE | 具名 P2，未修 | 操作日志在命令前用 `ClientStorage::init_local` 写快照，忽略 `LIBRA_STORAGE_TYPE`。`LIBRA_STORAGE_TYPE=gcs-canary` 时 `libra add` 以 LBR-IO-002 失败且不写 index，仍留下 loose 对象（含 blob `45b983be`）。不宣称失败配置下所有命令零对象写入。不混入本卡发布，也不开始 FIX04 |
 | DOC-LTR-01 | locally-accepted | PR636 的文档修复与实际 main D 已发生，仍按原声明由 FIX03 覆盖；不因本交接晋升 |
 | DOC-LTR-02 | 本次任务定义交接 | 仅本文件、main、signed/DCO、实际本地 Claude；无产品版本发布，覆盖由 FIX03 承载 |
 
-新增 FIX05 后，本外部计划实现卡为 **1/5**；DOC01、DOC02 单独记账。原 Libra scoped-traces 计划仍 **0/26**，不增加其分母；Mega2 已完成 MTR103，**23/118**，联合 **23/144**。卡片数不表示工时比例。两仓原计划、plan-status 的本轮单文件交接后置同步由 root 在既有协调写集中完成；用户本次明确只提交此文件，不能为满足索引同步而混入原工作区整份 plan-status。
+历史时点：新增 FIX05 后，本外部计划实现卡曾记为 **1/5**；DOC01、DOC02 单独记账。当前完成数见文末「当前（2026-10-26）」段，不以这句作为现状。原 Libra scoped-traces 计划仍 **0/26**，不增加其分母；Mega2 已完成 MTR103，**23/118**，联合 **23/144**。卡片数不表示工时比例。两仓原计划、plan-status 的本轮单文件交接后置同步由 root 在既有协调写集中完成；用户本次明确只提交此文件，不能为满足索引同步而混入原工作区整份 plan-status。
 
 ### 实际失败与可移植证据
 
@@ -92,7 +92,7 @@ FIX05 前需要只读的 `DEP-QUAL-F2-ATTRIB` 决定与当前本地Claude ER03�
 
 **Task type:** `implementation`
 
-**Lifecycle / Acceptance:** `in-progress` / 本地 C 已过（DEC-QUAL-05 与 session 4042079a 仍有效。F2-ATTRIB 仍是 unknown。05W 至 05Z 与 ae50414 已在 main。父卡 VER-1 至 VER-5 在 ae50414 通过：93、62、51、58、54，0 failed。完整套件 df24361e：10822 passed，0 failed；`test_fetch_into_mirror_updates_and_prunes_all_refs` 重试后通过。审查 d9641b0d VERDICT PASS，RELEASE_BUMP_ALLOWED yes。本提交把三个版本面改为 0.30.88。tag、Release 与 D 尚未观察，所以还不是 done。不开始 FIX04。RISK-QUAL-ADD-LOOSE 是未修 P2，不宣称失败配置下所有命令都零对象写入）
+**Lifecycle / Acceptance:** `done` / v0.30.88 D 已观察（DEC-QUAL-05 与 session 4042079a 仍有效。F2-ATTRIB 仍是 unknown。05W 至 05Z 与 ae50414 已在 main。父卡 VER-1 至 VER-5 在 ae50414 通过：93、62、51、58、54，0 failed。完整套件 df24361e：10822 passed，0 failed；`test_fetch_into_mirror_updates_and_prunes_all_refs` 重试后通过。审查 d9641b0d VERDICT PASS，RELEASE_BUMP_ALLOWED yes。本提交把三个版本面改为 0.30.88。tag v0.30.88、Release 与 D 已于 2026-10-26T18:23:07Z 观察成功：base 40349034162 attempt 2、CodeQL 40349034316、release 40349204443。RISK-QUAL-ADD-LOOSE 是未修 P2，不宣称失败配置下所有命令都零对象写入）
 
 **Description:** 单一行为轴是对象存储配置解析失败的 fail-closed 语义。普通解析/数据库/解密错误不能自动创建可继续写入的 LocalStorage，也不能用额外 stderr Warning 破坏 machine/JSON 输出。保留明确 local-only、合法 remote 配置、配置角色隔离及 COV/OG 已有 GlobalSchemaFuture 处理策略。优先审计保持 `ClientStorage::init -> Self` 签名的私有失败后端方案，避免把现有约99处调用点改成新的 fallible API；不是只移除 eprintln。候选后端必须审计并覆写所有可能返回成功/执行副作用的方法，尤其 `exist_checked`、`object_size`、`heal`、`evict_local`、`delete_payload` 的默认实现及其batch路径；legacy bool/search 方法不能将未知持久化状态当成功或删除依据。实际调用链若无法在本卡写集内保证正确性，先拆卡，不以返回 false 或空集合掩盖错误。
 
@@ -1240,7 +1240,7 @@ R1真实ER03/RECOVERY PASS、H0/VERDICT FAIL（sessionbb82411c-1e59-4e52-a7f1-93
 
 **Task type:** `implementation`
 
-**Lifecycle / Acceptance:** `in-progress` / FIX02 的 v0.30.90 D 已观察后实现 owned worker teardown（发布 `98852b791d553e72277230dde5bc23377e2ed089`。base `40406196457`、CodeQL `40406196519`、release `40406331881` 均成功。MCP 目标 `6e211dc4-14f9-4ce0-9732-ceb0dfa3e03e` 16 passed。精确用例 `fa7ba635-8b22-47ff-9af0-d0f09da6e66d` 1 passed。network `d4b03bd4-1542-4e2d-a427-8b2aee137781` 3 passed，0 skipped。doc exit 0。默认全量 `3b39b1e1-910d-4479-b1bf-2e49962a42dd`：10822 passed，0 failed，22 skipped。F2 仍 unknown。实现审查 `b11fc563-8b6f-485a-b467-30787bf750fc` VERDICT PASS，OWNED_CLEANUP yes，NO_NAME_KILL yes。未修 P2：`RISK-QUAL-MACOS-CHILD`（`proc_listallpids` 返回个数，不能再除以 4）、`RISK-QUAL-CLEANUP-SIGKILL`（只发 SIGTERM）、`RISK-QUAL-WIN-PARENT`（Windows 父 pid 不刷新且未比较创建时间）、`RISK-QUAL-HELPER-THREAD`（`descendant_pids` 仍只读主线程 children，原有行为）。本卡发布与 D 未完成）
+**Lifecycle / Acceptance:** `done` / v0.30.91 D 已观察。FIX02 的 v0.30.90 D 已观察后实现 owned worker teardown（发布 `98852b791d553e72277230dde5bc23377e2ed089`。base `40406196457`、CodeQL `40406196519`、release `40406331881` 均成功。MCP 目标 `6e211dc4-14f9-4ce0-9732-ceb0dfa3e03e` 16 passed。精确用例 `fa7ba635-8b22-47ff-9af0-d0f09da6e66d` 1 passed。network `d4b03bd4-1542-4e2d-a427-8b2aee137781` 3 passed，0 skipped。doc exit 0。默认全量 `3b39b1e1-910d-4479-b1bf-2e49962a42dd`：10822 passed，0 failed，22 skipped。F2 仍 unknown。实现审查 `b11fc563-8b6f-485a-b467-30787bf750fc` VERDICT PASS，OWNED_CLEANUP yes，NO_NAME_KILL yes。未修 P2：`RISK-QUAL-MACOS-CHILD`（`proc_listallpids` 返回个数，不能再除以 4）、`RISK-QUAL-CLEANUP-SIGKILL`（只发 SIGTERM）、`RISK-QUAL-WIN-PARENT`（Windows 父 pid 不刷新且未比较创建时间）、`RISK-QUAL-HELPER-THREAD`（`descendant_pids` 仍只读主线程 children，原有行为）。D 已观察成功：base `40426098305`、CodeQL `40426098171`、release `40426201816`，SHA `e24c88bb4c6b61b228d40f4505b6096064826829`，tag v0.30.91。最终资格窗口在这棵已发布树上执行：fmt check 0，clippy `-D warnings` 0（仅 proc-macro-error2），全量 `8bb4fff2-e7b3-4f04-a8ff-70c4b179b58d` 10822 passed、0 failed、22 skipped，doc exit 0，network `990e6bd6-d0f8-4a9e-a371-83a59b870482` 3 passed、0 skipped。不解除 LTR10 incoming，不改 H1，scoped-traces 仍 0/26）
 
 **Description:** 仅修当前MCP测试的owned worker/父进程清理，成功、断言panic及可归属的失败路径均回收；不改变产品worker生命周期。
 
@@ -1308,7 +1308,7 @@ R1真实ER03/RECOVERY PASS、H0/VERDICT FAIL（sessionbb82411c-1e59-4e52-a7f1-93
 
 五张实现卡分别实际A/B、Claude ER-05 PASS、精确signed/DCO提交、独立patch/PR/merge/tag/人工Release、实际CI与发布artifact D完成；全部P0/P1关闭，P2具名处置。FIX-LTR-03 的C④在bump后树执行完整默认套件、`cargo test --doc`及原3例network；merge树与被测树不等即STOP。五张实现卡各自实际D完成后，在与FIX03发布merge树相同的冻结来源执行上述一次10800秒计划最终资格窗口（fmt、strict Clippy、双env完整默认套件、doc、原3例network），核全部身份/退出/ignored/flake/runtime skip与owned资源；根因未知的缺口不得改成已证。最终实际本地Claude来源资格PASS后，才把五个具体发布SHA/版本及适用覆盖交给原scoped-traces计划；其H1、原merge签名政策、LTR自身A/B/C/D仍独立。
 
-当前（2026-10-26）两原计划正式23/118、0/26、23/144；本外部五实现卡 4/5（FIX01、FIX05、FIX04、FIX02 的 D 已观察），FIX03 尚未发布，DOC01/02另记，不增加原26卡。联合依赖按文首ATTRIB→FIX05、FIX05/新FIX→CLOSE→FIX04→FIX02→FIX03与H0/H1/LIVE/LTR10核无环；任一卡/末端证据不足均未完成。旧17/118、1/4统计保留于下方2026-10-25快照。
+当前（2026-10-26）两原计划正式23/118、0/26、23/144；本外部五实现卡 5/5（FIX01、FIX05、FIX04、FIX02、FIX03 的 D 已观察），DOC01/02另记，不增加原26卡。最终资格窗口已在 FIX03 发布树 `e24c88b` 上通过。终态文档审查 `bde085f1-c67e-439c-bdac-df02fce6b97c` VERDICT PASS。该提交自己的 main D 尚未观察。F2 仍 unknown。不解除 LTR10 incoming，不改 H1。联合依赖按文首ATTRIB→FIX05、FIX05/新FIX→CLOSE→FIX04→FIX02→FIX03与H0/H1/LIVE/LTR10核无环；任一卡/末端证据不足均未完成。旧17/118、1/4统计保留于下方2026-10-25快照。
 
 > 历史初稿统计：原Mega14/112、Libra0/26、联合14/138；外部0/3，保留其原时点。
 
@@ -1372,6 +1372,8 @@ R1真实ER03/RECOVERY PASS、H0/VERDICT FAIL（sessionbb82411c-1e59-4e52-a7f1-93
 | FIX-LTR-02 | reasoning fixture索引结清 | reasoning_artifact.rs、本计划、plan-status本计划行 | 4/8、3/8 | 1/0 S | FIX-LTR-01/FIX-LTR-04 | independent/self |
 | FIX-LTR-03 | MCP owned worker teardown | agent_mcp_exec_test.rs、本计划、plan-status本计划行 | 4/8、4/8 | 1/0 S | FIX-LTR-02 | independent/self |
 
+上表是开工时的粒度快照，其中「未准入候选／不得先实施」不是当前状态。当前完成状态以文首任务表为准：五张实现卡的 D 均已观察。
+
 ## 风险登记
 
 **现行profile警告 / root：** P2-QUAL-RELEASE-DEADCODE的旧接受仅解释v0.30.87历史，本轮用户严格项目warning指令取代该放行，由FIX04独立关闭；只排除proc-macro-error2第三方future提示。DOC-LTR01旧句“默认debug build如出现capture-ingress警告”保留为历史措辞，现已证明该警告只在默认release出现，DOC的debug build无该警告不是修复证据。新FIX04 A及C必须实际跑default/keyring release并对项目warning失败；不得用dev Clippy/测试PASS代替。
@@ -1380,7 +1382,13 @@ R1真实ER03/RECOVERY PASS、H0/VERDICT FAIL（sessionbb82411c-1e59-4e52-a7f1-93
 | ID | 事实/边界 | root处置/重启条件 | 状态 |
 |---|---|---|---|
 | RISK-QUAL-FUTURE | proc-macro-error2现有future-incompat提示；旧Clippy exit0不等于无诊断 | 原件保留；任何适用发布门拒绝则STOP独立归属，不allow压制 | open P2 |
-| RISK-QUAL-FLAKE | marker为什么未drain尚未证；fixture边界缺等待有源码证据 | FIX02严格有界等待并独立核marker，真实云消费者；不能宣称证明历史C2 | open，FIX02验收待 |
+| RISK-QUAL-FLAKE | marker为什么未drain尚未证；fixture边界缺等待有源码证据 | FIX02 已在 v0.30.90 加入有界等待。历史原因仍未证明，不能宣称关闭历史 C2 | open P2 |
+| RISK-QUAL-ADD-LOOSE | 操作日志在命令前用 init_local 写快照，忽略 LIBRA_STORAGE_TYPE。gcs-canary 的 add 仍留下 loose 对象 | 不混入已发布修复。若要消除，另立卡 | open P2 |
+| RISK-QUAL-STDIN | subagent_content fixture 的 BrokenPipe/时序风险 | 不混入 FIX05。若升级为 P1 或阻断当前门，先另立卡 | open P2 |
+| RISK-QUAL-MACOS-CHILD | macOS `proc_listallpids` 返回 pid 个数，FIX03 曾按字节数截断 | 只影响未在本计划 CI 执行的 macOS 分支。另立卡前不宣称该平台已测 | open P2 |
+| RISK-QUAL-CLEANUP-SIGKILL | FIX03 回收只发 SIGTERM，1 秒后仍存活就让测试失败，不升级 SIGKILL | 正常路径已由 Linux 精确用例覆盖。若 SIGTERM 被忽略，另立卡 | open P2 |
+| RISK-QUAL-WIN-PARENT | Windows 子进程快照的父 pid 不刷新，也未比较创建时间 | 本计划 CI 不跑该分支。另立卡前不宣称 Windows 归属已证 | open P2 |
+| RISK-QUAL-HELPER-THREAD | `descendant_pids` 仍只读主线程 children | 原有断言未改。若要覆盖非主线程 fork，另立卡 | open P2 |
 | RISK-QUAL-HOLDER | 历史PID不能排除stdout-holder；KillHold早期失败缺口及裸kill -9已知 | root接受为FIX03当前范围外残余风险，尚未排期；若实际资源审计命中或当前路径失败，立即STOP并ER03新增修复，不以手工kill当自动PASS | open P2，非历史PID确定归因 |
 | RISK-QUAL-CACHE | 独立路径可能使Cargo重新冷编译，暖缓存时间不保证 | 独占缓存、记录配置；安全复制不可用或需超候选预算则claim前ER03；运行超时STOP不自动续时 | open P2 |
 | RISK-QUAL-MERGE | PR期间upstream/tree/版本可能变化；原unsigned merge未处理 | 比较被测tree与merge tree，不等STOP；原merge仅原工作区后续解决，不进入修复祖先 | open，硬门 |

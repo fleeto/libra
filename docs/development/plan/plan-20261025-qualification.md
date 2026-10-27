@@ -27,8 +27,8 @@
 | FIX-LTR-05Z | family child，实现审查 PASS | ER03 `272c8d7d` PASS；实现审查 `4a42ec63` PASS；不消耗 v0.30.88；不开始 FIX04 |
 | FIX-LTR-05 | done，v0.30.88 D 已观察 | 父卡 VER-1 至 VER-5 与失败关闭的缓存、fetch pack 已在 ae50414 满足。审查 d9641b0d PASS。发布 e85470a。D 于 2026-10-26T18:23:07Z 成功：base 40349034162 attempt 2、CodeQL 40349034316、release 40349204443。F2 仍 unknown。RISK-QUAL-ADD-LOOSE 未修 |
 | FIX-LTR-04 | done，v0.30.89 D 已观察，F2 仍 unknown | 2026-10-26T19:12:37Z 修订：历史 TRY1 stderr 不可恢复，CLOSE 保持 unknown，P1 不关闭。实现审查 354b5170 PASS。发布 ff30d4a。D 于 2026-10-26T20:44:43Z 成功：base 40391580491、CodeQL 40391580303、release 40391698253。本卡只加了两行 cfg |
-| FIX-LTR-02 | 本地实现已接入，本卡 D 未观察 | `seed_checkpoint` 在 writer marker 退休后用现有 10 秒 `wait_for_background_tasks_until` 结清索引，再枚举 `.libra/object-index-repair`。真实云用例已通过并留下 fixture UUID。不关闭 F2 |
-| FIX-LTR-03 | pending/空 | 修复 MCP 测试拥有的暂停 worker 的清理，完成自己的 C/D，随后执行计划最终资格与受控整合 |
+| FIX-LTR-02 | done，v0.30.90 D 已观察 | 发布 `98852b7`。D 成功：base `40406196457`、CodeQL `40406196519`、release `40406331881`。fixture `b5c92ec6-90ec-4a3e-a1c4-2faa9b2ae259`。F2 仍 unknown |
+| FIX-LTR-03 | 本地实现已接入，本卡 D 未观察 | `read_worker_status_spawns_no_helpers` 先记录 MCP 父进程的子进程和 starttime，断言前绑定 pause 文件中的 worker。回收时先向核过身份的 worker 组发退出信号，再结束父进程，并在父进程 wait 之后单独确认 worker 不再存活。不按进程名清理。F2 仍 unknown |
 | F3 / RISK-QUAL-STDIN | 具名 P2，未修 | `subagent_content` fixture 的 BrokenPipe/时序风险单独处理；不能混入 FIX05；若升级为 P1 或阻断当前门，先另立 FIX 卡和依赖 |
 | RISK-QUAL-ADD-LOOSE | 具名 P2，未修 | 操作日志在命令前用 `ClientStorage::init_local` 写快照，忽略 `LIBRA_STORAGE_TYPE`。`LIBRA_STORAGE_TYPE=gcs-canary` 时 `libra add` 以 LBR-IO-002 失败且不写 index，仍留下 loose 对象（含 blob `45b983be`）。不宣称失败配置下所有命令零对象写入。不混入本卡发布，也不开始 FIX04 |
 | DOC-LTR-01 | locally-accepted | PR636 的文档修复与实际 main D 已发生，仍按原声明由 FIX03 覆盖；不因本交接晋升 |
@@ -1181,7 +1181,7 @@ R1真实ER03/RECOVERY PASS、H0/VERDICT FAIL（sessionbb82411c-1e59-4e52-a7f1-93
 
 **Task type:** `implementation`
 
-**Lifecycle / Acceptance:** `in-progress` / FIX04 的 v0.30.89 D 已观察后按本卡重建索引结清（不 pop 旧 stash。真实云 nextest `219d5a37-340f-4a92-900d-3f1c52112e7f` 1 passed，fixture `b5c92ec6-90ec-4a3e-a1c4-2faa9b2ae259`，清理在场景断言传播前完成。导出模块 `6bbd9880-c208-4fd8-aba3-20371cce847c` 15 passed。默认全量 `58f94c1b-0af6-4909-aaec-559cc382a2ac`：10822 passed，0 failed，22 skipped；`rename_limit_warning_exit_nine_over_dirty` 第一次失败后重试通过，不是 reset TRY1。F2 仍 unknown。实现审查 `0a4e9544-9fe1-47f7-ae29-b409040a0ec3` VERDICT PASS，HELPER_ONLY yes，LIVE_NOT_SKIP yes，RELEASE_BUMP_ALLOWED yes。本卡发布与 D 未完成）
+**Lifecycle / Acceptance:** `done` / v0.30.90 D 已观察。FIX04 的 v0.30.89 D 已观察后按本卡重建索引结清（不 pop 旧 stash。真实云 nextest `219d5a37-340f-4a92-900d-3f1c52112e7f` 1 passed，fixture `b5c92ec6-90ec-4a3e-a1c4-2faa9b2ae259`，清理在场景断言传播前完成。导出模块 `6bbd9880-c208-4fd8-aba3-20371cce847c` 15 passed。默认全量 `58f94c1b-0af6-4909-aaec-559cc382a2ac`：10822 passed，0 failed，22 skipped；`rename_limit_warning_exit_nine_over_dirty` 第一次失败后重试通过，不是 reset TRY1。F2 仍 unknown。实现审查 `0a4e9544-9fe1-47f7-ae29-b409040a0ec3` VERDICT PASS，HELPER_ONLY yes，LIVE_NOT_SKIP yes，RELEASE_BUMP_ALLOWED yes。D 已观察成功：base `40406196457`、CodeQL `40406196519`、release `40406331881`，SHA `98852b7`）
 
 **Description:** 在 `seed_checkpoint` 中既有writer marker退休成功后、`conn.close()`之前建立有界、可失败的索引结清前置（在调用方直接INSERT索引及CLI erase之前），保留原删除保护和所有reasoning隐私/生命周期断言；不是修改生产erase为等待或重试。
 
@@ -1240,7 +1240,7 @@ R1真实ER03/RECOVERY PASS、H0/VERDICT FAIL（sessionbb82411c-1e59-4e52-a7f1-93
 
 **Task type:** `implementation`
 
-**Lifecycle / Acceptance:** `pending` / 空（ER-03候选；无源码/测试/提交/发布）
+**Lifecycle / Acceptance:** `in-progress` / FIX02 的 v0.30.90 D 已观察后实现 owned worker teardown（发布 `98852b791d553e72277230dde5bc23377e2ed089`。base `40406196457`、CodeQL `40406196519`、release `40406331881` 均成功。MCP 目标 `6e211dc4-14f9-4ce0-9732-ceb0dfa3e03e` 16 passed。精确用例 `fa7ba635-8b22-47ff-9af0-d0f09da6e66d` 1 passed。network `d4b03bd4-1542-4e2d-a427-8b2aee137781` 3 passed，0 skipped。doc exit 0。默认全量 `3b39b1e1-910d-4479-b1bf-2e49962a42dd`：10822 passed，0 failed，22 skipped。F2 仍 unknown。实现审查 `b11fc563-8b6f-485a-b467-30787bf750fc` VERDICT PASS，OWNED_CLEANUP yes，NO_NAME_KILL yes。未修 P2：`RISK-QUAL-MACOS-CHILD`（`proc_listallpids` 返回个数，不能再除以 4）、`RISK-QUAL-CLEANUP-SIGKILL`（只发 SIGTERM）、`RISK-QUAL-WIN-PARENT`（Windows 父 pid 不刷新且未比较创建时间）、`RISK-QUAL-HELPER-THREAD`（`descendant_pids` 仍只读主线程 children，原有行为）。本卡发布与 D 未完成）
 
 **Description:** 仅修当前MCP测试的owned worker/父进程清理，成功、断言panic及可归属的失败路径均回收；不改变产品worker生命周期。
 
@@ -1250,17 +1250,17 @@ R1真实ER03/RECOVERY PASS、H0/VERDICT FAIL（sessionbb82411c-1e59-4e52-a7f1-93
 
 **Acceptance criteria:**
 
-- [ ] 保留descendant_pids(worker).is_empty原断言；取得worker PID后先建立具有身份核验的cleanup guard，再执行可能panic的断言。
-- [ ] 成功/panic以及PID取得前后的失败路径均处理当前测试拥有的父进程与可证明归属的worker；不信任复用PID、不杀其它用例或系统进程。
-- [ ] 保留pause文件发现上限10秒，cleanup退出观察上限1秒；先向核身份的owned worker/其独立组发退出信号，再kill+wait MCP父进程，避免先杀父丢失归属；不把父进程wait成功当worker清理证明；Linux核 `/proc/<pid>/stat` 的starttime/state，区分已退出僵尸与活进程并另记是否已回收，不以kill(pid,0)独证；其它平台用实际进程身份/退出能力，不能照搬procfs或跳过原测试；现有descendant_pids在非Linux上恒为空，不能当归属证据，若当前I/现有平台API不足以建立安全身份，必须在claim前ER-03。PID文件取得前先枚举MCP父进程的真实子关系并核身份（Linux覆盖所有 `/proc/<mcp>/task/*/children`），再执行清理；不能先杀父进程再猜孤儿归属。不提高测试超时。
-- [ ] 完整agent_mcp_exec_test通过，原deadline、内存、slot、禁止helper断言全部保持；本卡bump后C全量/doc/network通过，实际本卡Claude ER-05通过；五张实现卡D之后的计划最终资格属于计划完成门，不倒挂本卡done条件。
+- [x] 保留descendant_pids(worker).is_empty原断言；取得worker PID后先建立具有身份核验的cleanup guard，再执行可能panic的断言。
+- [x] 成功/panic以及PID取得前后的失败路径均处理当前测试拥有的父进程与可证明归属的worker；不信任复用PID、不杀其它用例或系统进程。
+- [x] 保留pause文件发现上限10秒，cleanup退出观察上限1秒；先向核身份的owned worker/其独立组发退出信号，再kill+wait MCP父进程，避免先杀父丢失归属；不把父进程wait成功当worker清理证明；Linux核 `/proc/<pid>/stat` 的starttime/state，区分已退出僵尸与活进程并另记是否已回收，不以kill(pid,0)独证；其它平台用实际进程身份/退出能力，不能照搬procfs或跳过原测试；现有descendant_pids在非Linux上恒为空，不能当归属证据，若当前I/现有平台API不足以建立安全身份，必须在claim前ER-03。PID文件取得前先枚举MCP父进程的真实子关系并核身份（Linux覆盖所有 `/proc/<mcp>/task/*/children`），再执行清理；不能先杀父进程再猜孤儿归属。不提高测试超时。
+- [x] 完整agent_mcp_exec_test通过，原deadline、内存、slot、禁止helper断言全部保持；本卡bump后C全量/doc/network通过，实际本卡Claude ER-05通过；五张实现卡D之后的计划最终资格属于计划完成门，不倒挂本卡done条件。全量 `3b39b1e1-910d-4479-b1bf-2e49962a42dd`：10822 passed，0 failed，22 skipped。审查 `b11fc563-8b6f-485a-b467-30787bf750fc` VERDICT PASS。
 
 **Verification:**
 
-- [ ] `source .env.test && source .env.live-test && cargo nextest run --test agent_mcp_exec_test --no-fail-fast --retries 0`；完整目标按listing逐名核验。
-- [ ] `source .env.test && source .env.live-test && cargo nextest run --test agent_mcp_exec_test -E 'test(=read_worker_status_spawns_no_helpers)' --retries 0`；精确1例。成功路径核owned PID/start identity/PGID与exit；失败路径逐分支静态审查spawn/write/try_wait/读PID/parse/panic及Drop顺序，不宣称已做错误注入运行；不运行无界循环或额外重试。若当前I不足以确定安全归属，先ER-03停止，不能退化为按进程名批量kill。
-- [ ] `source .env.test && source .env.live-test && cargo test --doc`；原doc目录/计数/ignored与实际退出核实。
-- [ ] `source .env.test && source .env.live-test && cargo nextest run --features test-network --test network_remotes_test --no-fail-fast --retries 0`；精确原3例，无skip/过滤。其oracle分别是refs、有限PACK标头、LFS batch JSON，不冒称完整对象下载。
+- [x] `source .env.test && source .env.live-test && cargo nextest run --test agent_mcp_exec_test --no-fail-fast --retries 0`；完整目标按listing逐名核验。run `6e211dc4-14f9-4ce0-9732-ceb0dfa3e03e`：16 passed，0 skipped。
+- [x] `source .env.test && source .env.live-test && cargo nextest run --test agent_mcp_exec_test -E 'test(=read_worker_status_spawns_no_helpers)' --retries 0`；精确1例。成功路径核owned PID/start identity/PGID与exit；失败路径逐分支静态审查spawn/write/try_wait/读PID/parse/panic及Drop顺序，不宣称已做错误注入运行；不运行无界循环或额外重试。若当前I不足以确定安全归属，先ER-03停止，不能退化为按进程名批量kill。run `fa7ba635-8b22-47ff-9af0-d0f09da6e66d`：1 passed。成功路径要求 worker 是已观察子进程、starttime 未变、且在 Linux 上 pgrp 等于自身 pid；父进程 wait 之后再次读取 worker 身份。失败路径由 `Drop` 回收，没有做错误注入运行。
+- [x] `source .env.test && source .env.live-test && cargo test --doc`；原doc目录/计数/ignored与实际退出核实。exit 0：2 passed / 3 ignored，以及 10 passed。
+- [x] `source .env.test && source .env.live-test && cargo nextest run --features test-network --test network_remotes_test --no-fail-fast --retries 0`；精确原3例，无skip/过滤。其oracle分别是refs、有限PACK标头、LFS batch JSON，不冒称完整对象下载。run `d4b03bd4-1542-4e2d-a427-8b2aee137781`：3 passed，0 skipped。
 
 **Full-suite trigger:** T-5：本计划最后一个独立修复，A及最终C完整默认套件并完成doc/network；不是把前三卡聚合为一次发布。
 
@@ -1308,7 +1308,7 @@ R1真实ER03/RECOVERY PASS、H0/VERDICT FAIL（sessionbb82411c-1e59-4e52-a7f1-93
 
 五张实现卡分别实际A/B、Claude ER-05 PASS、精确signed/DCO提交、独立patch/PR/merge/tag/人工Release、实际CI与发布artifact D完成；全部P0/P1关闭，P2具名处置。FIX-LTR-03 的C④在bump后树执行完整默认套件、`cargo test --doc`及原3例network；merge树与被测树不等即STOP。五张实现卡各自实际D完成后，在与FIX03发布merge树相同的冻结来源执行上述一次10800秒计划最终资格窗口（fmt、strict Clippy、双env完整默认套件、doc、原3例network），核全部身份/退出/ignored/flake/runtime skip与owned资源；根因未知的缺口不得改成已证。最终实际本地Claude来源资格PASS后，才把五个具体发布SHA/版本及适用覆盖交给原scoped-traces计划；其H1、原merge签名政策、LTR自身A/B/C/D仍独立。
 
-当前（2026-10-26）两原计划正式23/118、0/26、23/144；本外部五实现卡 3/5（FIX01、FIX05、FIX04 的 D 已观察），FIX02 尚未发布，DOC01/02另记，不增加原26卡。联合依赖按文首ATTRIB→FIX05、FIX05/新FIX→CLOSE→FIX04→FIX02→FIX03与H0/H1/LIVE/LTR10核无环；任一卡/末端证据不足均未完成。旧17/118、1/4统计保留于下方2026-10-25快照。
+当前（2026-10-26）两原计划正式23/118、0/26、23/144；本外部五实现卡 4/5（FIX01、FIX05、FIX04、FIX02 的 D 已观察），FIX03 尚未发布，DOC01/02另记，不增加原26卡。联合依赖按文首ATTRIB→FIX05、FIX05/新FIX→CLOSE→FIX04→FIX02→FIX03与H0/H1/LIVE/LTR10核无环；任一卡/末端证据不足均未完成。旧17/118、1/4统计保留于下方2026-10-25快照。
 
 > 历史初稿统计：原Mega14/112、Libra0/26、联合14/138；外部0/3，保留其原时点。
 

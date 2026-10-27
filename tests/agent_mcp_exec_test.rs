@@ -1,10 +1,11 @@
 //! Read-worker executor gates (plan-20261019 MC-29).
 
 use std::{
+    collections::HashMap,
     fs,
     io::Write,
     path::Path,
-    process::{Command, Output, Stdio},
+    process::{Child, Command, Output, Stdio},
     thread,
     time::{Duration, Instant},
 };
@@ -665,43 +666,479 @@ fn read_worker_status_spawns_no_helpers() {
         .spawn()
         .expect("spawn");
     let mut stdin = child.stdin.take().expect("stdin");
+    let mut guard = OwnedPauseCleanup::arm(child);
     stdin.write_all(session(&call).as_bytes()).expect("write");
     let started = Instant::now();
     while started.elapsed() < Duration::from_secs(10) {
+        guard.observe_children();
         if let Ok(text) = fs::read_to_string(&pause_file)
             && text.trim().parse::<u32>().is_ok()
         {
             break;
         }
-        if child.try_wait().expect("wait").is_some() {
+        if guard.parent_exited().expect("wait") {
             drop(stdin);
-            let _ = child.kill();
             panic!("mcp exited before the status pause file existed");
         }
         thread::sleep(Duration::from_millis(20));
     }
     drop(stdin);
+    guard.observe_children();
     let text = match fs::read_to_string(&pause_file) {
         Ok(text) => text,
-        Err(error) => {
-            let _ = child.kill();
-            panic!("status pause file was not written: {error}");
-        }
+        Err(error) => panic!("status pause file was not written: {error}"),
     };
     let worker: u32 = match text.trim().parse() {
         Ok(pid) => pid,
-        Err(error) => {
-            let _ = child.kill();
-            panic!("pause text {text:?} could not be parsed: {error}");
-        }
+        Err(error) => panic!("pause text {text:?} could not be parsed: {error}"),
     };
+    guard
+        .bind_worker(worker)
+        .unwrap_or_else(|error| panic!("pause pid {worker} is not an owned child: {error}"));
     assert!(
         descendant_pids(worker).is_empty(),
         "read worker {worker} spawned helpers: {:?}",
         descendant_pids(worker)
     );
-    let _ = child.kill();
-    let _ = child.wait();
+    let proof = guard.finish();
+    assert!(
+        proof.checked_worker_after_parent_wait,
+        "parent wait was treated as worker exit"
+    );
+    assert!(
+        proof.worker_not_live,
+        "owned worker {worker} was still live after cleanup; reaped={} zombie={}",
+        proof.worker_reaped, proof.worker_zombie
+    );
+    #[cfg(unix)]
+    assert!(
+        proof.own_group,
+        "owned worker {worker} was not the leader of its own process group"
+    );
+}
+
+struct ProcessView {
+    start: u64,
+    state_zombie: bool,
+    pgrp: u32,
+    ppid: u32,
+}
+
+#[derive(Clone, Copy)]
+struct OwnedWorker {
+    pid: u32,
+    start: u64,
+    own_group: bool,
+}
+
+struct PauseCleanupProof {
+    own_group: bool,
+    worker_not_live: bool,
+    worker_reaped: bool,
+    worker_zombie: bool,
+    checked_worker_after_parent_wait: bool,
+}
+
+struct OwnedPauseCleanup {
+    child: Option<Child>,
+    parent_pid: u32,
+    parent_start: u64,
+    observed: HashMap<u32, u64>,
+    worker: Option<OwnedWorker>,
+    finished: bool,
+}
+
+impl OwnedPauseCleanup {
+    fn arm(child: Child) -> Self {
+        let parent_pid = child.id();
+        let parent_start = process_view(parent_pid)
+            .map(|view| view.start)
+            .unwrap_or_else(|| panic!("mcp parent {parent_pid} has no process identity"));
+        Self {
+            child: Some(child),
+            parent_pid,
+            parent_start,
+            observed: HashMap::new(),
+            worker: None,
+            finished: false,
+        }
+    }
+
+    fn observe_children(&mut self) {
+        for pid in child_pids(self.parent_pid) {
+            if pid <= 1 {
+                continue;
+            }
+            if let Some(view) = process_view(pid) {
+                #[cfg(not(windows))]
+                if view.ppid != self.parent_pid {
+                    continue;
+                }
+                self.observed.entry(pid).or_insert(view.start);
+            }
+        }
+    }
+
+    fn parent_exited(&mut self) -> std::io::Result<bool> {
+        Ok(self
+            .child
+            .as_mut()
+            .expect("parent handle")
+            .try_wait()?
+            .is_some())
+    }
+
+    fn bind_worker(&mut self, pid: u32) -> Result<(), String> {
+        if pid <= 1 {
+            return Err("refusing a privileged pid".to_string());
+        }
+        let Some(seen) = self.observed.get(&pid).copied() else {
+            return Err(
+                "pid was not in the parent's child list before the pause file was accepted"
+                    .to_string(),
+            );
+        };
+        let Some(view) = process_view(pid) else {
+            return Err("pid disappeared before its identity was checked".to_string());
+        };
+        if view.start != seen {
+            return Err("pid was reused before it could be bound".to_string());
+        }
+        #[cfg(not(windows))]
+        if view.ppid != self.parent_pid {
+            return Err(format!(
+                "ppid {} is not the mcp parent {}",
+                view.ppid, self.parent_pid
+            ));
+        }
+        self.worker = Some(OwnedWorker {
+            pid,
+            start: seen,
+            own_group: view.pgrp == pid && pid > 1,
+        });
+        Ok(())
+    }
+
+    fn finish(mut self) -> PauseCleanupProof {
+        let worker = self.worker;
+        let proof = self.reap(worker);
+        self.finished = true;
+        proof
+    }
+
+    fn reap(&mut self, worker: Option<OwnedWorker>) -> PauseCleanupProof {
+        let own_group = worker.as_ref().is_some_and(|worker| worker.own_group);
+        let mut targets: Vec<(u32, u64)> = self
+            .observed
+            .iter()
+            .map(|(pid, start)| (*pid, *start))
+            .filter(|(pid, _)| *pid != self.parent_pid && *pid > 1)
+            .collect();
+        if let Some(worker) = &worker {
+            targets.retain(|(pid, _)| *pid != worker.pid);
+            targets.insert(0, (worker.pid, worker.start));
+        }
+        for (pid, start) in &targets {
+            signal_verified(*pid, *start);
+        }
+        let deadline = Instant::now() + Duration::from_secs(1);
+        if let Some(worker) = &worker {
+            while same_live_identity(worker.pid, worker.start) && Instant::now() < deadline {
+                thread::sleep(Duration::from_millis(20));
+            }
+        }
+        if let Some(child) = self.child.as_mut()
+            && process_view(self.parent_pid)
+                .is_some_and(|view| view.start == self.parent_start && !view.state_zombie)
+        {
+            let _ = child.kill();
+        }
+        if let Some(mut child) = self.child.take() {
+            let _ = child.wait();
+        }
+        let after = worker.as_ref().map(|worker| {
+            let view = process_view(worker.pid);
+            match view {
+                None => (true, false, true),
+                Some(view) if view.start != worker.start => (true, false, true),
+                Some(view) if view.state_zombie => (false, true, true),
+                Some(_) => (false, false, false),
+            }
+        });
+        let (worker_reaped, worker_zombie, worker_not_live) =
+            after.unwrap_or((false, false, false));
+        PauseCleanupProof {
+            own_group,
+            worker_not_live,
+            worker_reaped,
+            worker_zombie,
+            checked_worker_after_parent_wait: worker.is_some(),
+        }
+    }
+}
+
+impl Drop for OwnedPauseCleanup {
+    fn drop(&mut self) {
+        if !self.finished {
+            let worker = self.worker;
+            let _ = self.reap(worker);
+        }
+    }
+}
+
+fn same_live_identity(pid: u32, start: u64) -> bool {
+    process_view(pid).is_some_and(|view| view.start == start && !view.state_zombie)
+}
+
+fn signal_verified(pid: u32, start: u64) {
+    let Some(view) = process_view(pid) else {
+        return;
+    };
+    if pid <= 1 || view.start != start || view.state_zombie {
+        return;
+    }
+    #[cfg(unix)]
+    {
+        // SAFETY: the pid was observed as a child of this test's mcp parent and
+        // still has that start token. A private group is signaled only when the
+        // pid is that group's leader. Otherwise only this pid is signaled.
+        unsafe {
+            if view.pgrp == pid && view.pgrp > 1 {
+                libc::kill(-(pid as libc::pid_t), libc::SIGTERM);
+            } else {
+                libc::kill(pid as libc::pid_t, libc::SIGTERM);
+            }
+        }
+    }
+    #[cfg(windows)]
+    {
+        use windows_sys::Win32::{
+            Foundation::CloseHandle,
+            System::Threading::{
+                GetProcessTimes, OpenProcess, PROCESS_QUERY_LIMITED_INFORMATION, PROCESS_TERMINATE,
+                TerminateProcess,
+            },
+        };
+        // SAFETY: query-and-terminate handle for the verified pid; closed on every path.
+        unsafe {
+            let handle = OpenProcess(
+                PROCESS_QUERY_LIMITED_INFORMATION | PROCESS_TERMINATE,
+                0,
+                pid,
+            );
+            if handle.is_null() {
+                return;
+            }
+            let mut creation = windows_sys::Win32::Foundation::FILETIME {
+                dwLowDateTime: 0,
+                dwHighDateTime: 0,
+            };
+            let mut exit_time = creation;
+            let mut kernel = creation;
+            let mut user = creation;
+            let ok = GetProcessTimes(
+                handle,
+                &mut creation,
+                &mut exit_time,
+                &mut kernel,
+                &mut user,
+            );
+            let current =
+                ((creation.dwHighDateTime as u64) << 32) | (creation.dwLowDateTime as u64);
+            if ok != 0 && current == start {
+                let _ = TerminateProcess(handle, 1);
+            }
+            let _ = CloseHandle(handle);
+        }
+    }
+}
+
+#[cfg(target_os = "linux")]
+fn child_pids(parent: u32) -> Vec<u32> {
+    let mut found = Vec::new();
+    let Ok(tasks) = fs::read_dir(format!("/proc/{parent}/task")) else {
+        return found;
+    };
+    for task in tasks.flatten() {
+        let Ok(text) = fs::read_to_string(task.path().join("children")) else {
+            continue;
+        };
+        for token in text.split_whitespace() {
+            if let Ok(pid) = token.parse::<u32>() {
+                found.push(pid);
+            }
+        }
+    }
+    found
+}
+
+#[cfg(target_os = "macos")]
+fn child_pids(parent: u32) -> Vec<u32> {
+    let mut buffer = vec![0i32; 8192];
+    let bytes = unsafe {
+        libc::proc_listallpids(
+            buffer.as_mut_ptr().cast(),
+            (buffer.len() * std::mem::size_of::<i32>()) as i32,
+        )
+    };
+    if bytes <= 0 {
+        return Vec::new();
+    }
+    let count = (bytes as usize) / std::mem::size_of::<i32>();
+    buffer
+        .into_iter()
+        .take(count)
+        .filter_map(|pid| u32::try_from(pid).ok())
+        .filter(|pid| process_view(*pid).is_some_and(|view| view.ppid == parent))
+        .collect()
+}
+
+#[cfg(windows)]
+fn child_pids(parent: u32) -> Vec<u32> {
+    use windows_sys::Win32::{
+        Foundation::CloseHandle,
+        System::Diagnostics::ToolHelp::{
+            CreateToolhelp32Snapshot, PROCESSENTRY32, Process32First, Process32Next,
+            TH32CS_SNAPPROCESS,
+        },
+    };
+    let mut found = Vec::new();
+    // SAFETY: process snapshot is closed before return. Entries are only read
+    // after a successful Process32First/Next call.
+    unsafe {
+        let snapshot = CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0);
+        if snapshot.is_null() {
+            return found;
+        }
+        let mut entry: PROCESSENTRY32 = std::mem::zeroed();
+        entry.dwSize = std::mem::size_of::<PROCESSENTRY32>() as u32;
+        if Process32First(snapshot, &mut entry) != 0 {
+            loop {
+                if entry.th32ParentProcessID == parent {
+                    found.push(entry.th32ProcessID);
+                }
+                if Process32Next(snapshot, &mut entry) == 0 {
+                    break;
+                }
+            }
+        }
+        let _ = CloseHandle(snapshot);
+    }
+    found
+}
+
+#[cfg(not(any(target_os = "linux", target_os = "macos", windows)))]
+fn child_pids(_parent: u32) -> Vec<u32> {
+    Vec::new()
+}
+
+#[cfg(target_os = "linux")]
+fn process_view(pid: u32) -> Option<ProcessView> {
+    if pid <= 1 {
+        return None;
+    }
+    let raw = fs::read_to_string(format!("/proc/{pid}/stat")).ok()?;
+    let rest = raw.rsplit_once(')')?.1;
+    let mut fields = rest.split_whitespace();
+    let state = fields.next()?;
+    let ppid = fields.next()?.parse().ok()?;
+    let pgrp = fields.next()?.parse().ok()?;
+    let start = fields.nth(16)?.parse().ok()?;
+    Some(ProcessView {
+        start,
+        state_zombie: state.starts_with('Z'),
+        pgrp,
+        ppid,
+    })
+}
+
+#[cfg(target_os = "macos")]
+fn process_view(pid: u32) -> Option<ProcessView> {
+    if pid <= 1 {
+        return None;
+    }
+    let pid_i = i32::try_from(pid).ok()?;
+    let size = i32::try_from(std::mem::size_of::<libc::proc_bsdinfo>()).ok()?;
+    let mut info = std::mem::MaybeUninit::<libc::proc_bsdinfo>::uninit();
+    // SAFETY: the kernel writes a full `proc_bsdinfo` into this sized buffer.
+    // `assume_init` follows only an exact-size read.
+    let read = unsafe {
+        libc::proc_pidinfo(
+            pid_i,
+            libc::PROC_PIDTBSDINFO,
+            0,
+            info.as_mut_ptr().cast(),
+            size,
+        )
+    };
+    if read != size {
+        return None;
+    }
+    let info = unsafe { info.assume_init() };
+    if info.pbi_pid != pid || info.pbi_start_tvusec >= 1_000_000 {
+        return None;
+    }
+    let start = info
+        .pbi_start_tvsec
+        .checked_mul(1_000_000)?
+        .checked_add(info.pbi_start_tvusec)?;
+    Some(ProcessView {
+        start,
+        state_zombie: info.pbi_status == libc::SZOMB,
+        pgrp: info.pbi_pgid,
+        ppid: info.pbi_ppid,
+    })
+}
+
+#[cfg(windows)]
+fn process_view(pid: u32) -> Option<ProcessView> {
+    use windows_sys::Win32::{
+        Foundation::{CloseHandle, FILETIME, STILL_ACTIVE},
+        System::Threading::{
+            GetExitCodeProcess, GetProcessTimes, OpenProcess, PROCESS_QUERY_LIMITED_INFORMATION,
+        },
+    };
+    if pid <= 1 {
+        return None;
+    }
+    // SAFETY: query-only handle, closed on every path.
+    unsafe {
+        let handle = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, 0, pid);
+        if handle.is_null() {
+            return None;
+        }
+        let mut creation = FILETIME {
+            dwLowDateTime: 0,
+            dwHighDateTime: 0,
+        };
+        let mut exit_time = creation;
+        let mut kernel = creation;
+        let mut user = creation;
+        let timed = GetProcessTimes(
+            handle,
+            &mut creation,
+            &mut exit_time,
+            &mut kernel,
+            &mut user,
+        );
+        let mut exit_code = 0u32;
+        let queried = GetExitCodeProcess(handle, &mut exit_code);
+        let _ = CloseHandle(handle);
+        if timed == 0 || queried == 0 {
+            return None;
+        }
+        Some(ProcessView {
+            start: ((creation.dwHighDateTime as u64) << 32) | (creation.dwLowDateTime as u64),
+            state_zombie: exit_code != STILL_ACTIVE as u32,
+            pgrp: 0,
+            ppid: 0,
+        })
+    }
+}
+
+#[cfg(not(any(target_os = "linux", target_os = "macos", windows)))]
+fn process_view(_pid: u32) -> Option<ProcessView> {
+    None
 }
 
 #[test]

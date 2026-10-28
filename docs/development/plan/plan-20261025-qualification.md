@@ -1,5 +1,148 @@
 # Libra 2026-10-25 来源资格前滚修复
 
+## 2026-10-27 来源资格交接复核（当前要求）
+
+本段由用户指定的 Claude 执行 Agent 写入（2026-10-27 起草，2026-10-28 按本地 Claude R1 FAIL 前滚修订），覆盖下方 2026-10-26 入口中「当前」的现状表述；旧入口、旧计数和全部 FAIL/STOP 保留为历史。本段只登记已核事实和待决事项，不把来源资格写成完成，`DEP-QUAL-HANDOFF` 与原计划 `DEP-TR-QUAL-REPAIRS` 仍是 incoming。
+
+**写者与所有权。** 2026-10-27T15:51Z 的首次核验是执行器观察，未留原始输出；2026-10-28T06:11Z 重新观察并保存原件（`observations-20261028/writers.txt`、`root-copy.txt`、`ancestry.txt`）：Grok 会话 `01a17bc9-9d7b-7f82-b295-4d91217837d2` 的 `last_active_at` 为 2026-10-27T10:24:30Z，无 grok 进程，`~/.grok/active_sessions.json` 为 `[]`；原仓 `.libra` 实目录、无 `.git`。root（Codex）推进 Mega2 FIX-MTR-19；其独立 Libra 副本 `/media/eli/data/libra-h0-sync-20261026` HEAD `2c87fcd`，其 `origin/main` 为 `380c262` 且是 HEAD 祖先（`observations-20261028/root-copy-origin.txt`），plan-20261015/plan-long/plan-status 三个文件与 HEAD blob 不同，未交接，本 Agent 不消费、不修改（只用 rev-parse/log/cat-file/sha256sum/merge-base --is-ancestor 读取；`root-copy-origin.txt` 第 4 行的祖先结果由执行器用 `libra merge-base --is-ancestor <origin/main> HEAD` 得到，该原件表头只写了 read-only rev-parse，未记录这条命令）。全机 Cargo/测试/发布窗口按 `DEP-TR-ENV-DIAG-CARGO` 由 root 串行交接；root 于 2026-10-28T07:49:04Z 以 `coordination/root-grant-20261028T074904Z.json` 授予窗口（范围 DOC-LTR-03 本地门，之后 FIX-LTR-06 A、C 与最终资格，各自先经准入）；截至本段冻结时本 Agent 尚未 claim、未运行任何 Cargo 命令；每个窗口仍须满足其开工条件与各自准入，未取得不编译、不测试、不发布。
+
+**上游变化。** 2026-10-27T16:50:25Z 另一写者直接向 main 推送 `29eaa97b3854d6a337b493072374b05a8d2b3509`（`fix(index): stop writing assume-unchanged on index entries (#637)`，9 路径，含 `git-internal` 0.10.2→0.10.4、`src/utils/index_ext.rs` 等生产改动，无版本变化，无 tag）。其签名 `NO_PUBKEY FD937770ADCF0EF6B73E48DED406339EBA910E88`（GitHub `unknown_key`，见 `observations-20261028/github-verification.txt`；keys.openpgp.org 404，见 `keyservers.txt`），DCO 有；D：Build/Test 40544991374 8/8、CodeQL 40544991453 2/2 success。本 Agent 已把本地 main 快进到该提交，三份计划文件的改动按原差异（SHA256 `e7097c3b…`）原样重放，三份文件在 db331cd 与 29eaa97 的 blob 相同。2026-10-28T06:07:23Z（提交时间；PR #649 的 `merged_at` 为 06:07:24Z，见 `observations-20261028/github-8abdcf7-pr649.txt`）又合入 `8abdcf7633f8fef8f6d0994d9f0621bb074de292`（单亲、committer 为 GitHub，PR #649 的 `merge_commit_sha` 即此提交，合并方式由此推断为 squash 或 rebase；web-flow 公钥 GOODSIG/VALIDSIG、GitHub `valid`，DCO 有；只新增 `docs/development/plan/plan-20261028-status-performance.md` 并在 plan-status 计划一览加一行，无产品改动）；D：Build/Test 40641949469 8/8、CodeQL 40641949418 2/2 success（`ci/d-8abdcf7.json`）。本 Agent 在使用 root 授予的窗口前快进到该提交（`docs-change/rebase-8abdcf7/`）；快进重放时，三份计划文件的新增文字逐行与受审字节相同，upstream 新增行保留。整合范围因此为 e24c88b..8abdcf7，其中 29eaa97..8abdcf7 只有文档。FIX-LTR-06 的源随之为 8abdcf7。
+
+**用户决定（2026-10-28T06:03:22Z，本会话 AskUserQuestion，原文存仓外 `user-decisions.json`）：**
+
+- `DEP-QUAL-F2-GATE`：「批准限定关闭条件：F2 历史根因永久记为 unknown。FIX-LTR-06 完整 C/D 发布、F2 用例保留诊断，并且本地 Claude 关闭审查 PASS 后，F2 P1 关闭。仅限 F2。以今天的 UTC 接受 FIX04/02/03 已在 CLOSE=unknown 下发布的事实，不把 19:12:37Z 例外改写成历史批准。」该决定只改变 F2 的关闭条件，不改变其它 P0/P1 的关闭要求，也不追认 19:12:37Z 例外。
+- `DEP-QUAL-CARGO-WINDOW`：「root A3 结束后交给 Libra：用户转告 root。root 确认 A3 终态和资源已关闭、明确交接后，Libra 依次使用窗口，期间 root 不启动 Cargo。」root 2026-10-28T05:59:20Z 的协调收据写明尚未向 Libra 发放窗口，Libra 保持不编译、不测试、不发布。
+- `DEP-QUAL-SIGNING-KEY` / `DEP-QUAL-REMOTE-ORIGINALS`：「取不到：签名保持未验证，原件登记为缺失。用最终树上的新资格窗口作为新证据，不补造旧 PASS。」
+
+**证据位置。** 仓外持久目录 `/media/eli/data/libra-source-qual-20261027/`：`inputs-manifest.sha256`（79 项）、`inputs/local-tmp-originals.sha256`（2959 项，本机 `/tmp` 下 FIX01/DOC01/FIX02/FIX04 历史原件的逐字节副本）、`observations-20261028.sha256`（18 项）及 `sig/`、`ci/`、`integration/`、`f2/` 各自的哈希文件。root 复核原件 `report.md`、`receipt.json`、`ci.stdout`、`jobs.stdout`、`annotations.stdout`、`compare.stdout`、`public-key-check.json`、`signature-audit.json`、`fee4bd5f-….review.md` 均存在，哈希已入清单。217cea… 迁机包仍不可得。
+
+| 组 | 已核结论 | 未解决与 owner |
+|---|---|---|
+| 1 F2 | ATTRIB 维持 unknown；历史 TRY1 根因不可证。当前源有可证缺陷：全局配置库存在但不可读时，`libra --json reset --pathspec-from-file=paths.txt` 退出 129、stderr 首行为纯文本 `Warning: failed to resolve LIBRA_STORAGE_TYPE …`，stderr 不是 JSON（garbage/chmod000 两种受控复现，不存在全局库时为单一 JSON）。复现用的是 0.30.91 debug 二进制（SHA256 `874ce7d3…`，2026-10-27T07:24:13Z 构建，非受控窗口内编译）。对 db331cd 而言，其后唯一改动的源文件改动位于 `#[cfg(test)]`，源与二进制的对应是推断；29eaa97 另有生产改动（`src/utils/index_ext.rs`、`src/command/refresh.rs`、`src/command/update_index.rs`、`git-internal` 0.10.4 与 `Cargo.lock`），不涉及 `client_storage.rs` 与警告通道（`output.rs`、`error.rs`、`cli.rs`），对 29eaa97 的对应同样是推断、未复测，由 FIX-LTR-06 VER-5 的 RED 在实际树上确认。这与 TRY1 形状相同，也与 FIX05 AC-3 勾选不一致；F2 原场景中全局库不存在（`observations-20261028/f2-scenario-global-db-listing.txt`），所以不能据此认定历史根因。按 ER-03 登记下方 FIX-LTR-06。2026-10-26T19:12:37Z 例外是执行器记录，不是用户批准。 | CLOSE 未关闭（P1）。按 `DEP-QUAL-F2-GATE` 用户决定，FIX-LTR-06 完整 C/D、F2 用例诊断与本地 Claude 关闭审查 PASS 后才关闭；owner 本 Agent |
+| 2 每卡 C / 最终窗口 | FIX01 C/D 原件本机可得，D 终态 `4e2009fa…` 与 job 收据 `c66879aa…` 哈希一致，可限域 carry-forward。FIX05、FIX04、FIX02、FIX03 的 C 与 e24c88b 最终资格窗口在另一台机器执行，本机无原件，只有计划中的 run ID 与计数；用户已确认取不到。FIX05 卡：VER-6 未勾却 done；VER-1 同步屏障真锁未落地；VER-4 的 F2 诊断未落地（`reset_test.rs` 与 b73 逐字相同）；AC-3 被上面的复现反证。 | 原件永久缺失（RISK-QUAL-ORIGINALS-MISSING）。不补造旧 PASS；最终源树已不同于 e24c88b，须在最终树重新执行计划最终资格窗口；owner 本 Agent（窗口待 root 交接） |
+| 3 来源资格 Claude | 计划中没有任何来源资格审查 session；`fee4bd5f` 只审交接文字；`bde085f1` 是终态文档审查，原件本机不可得 | 最终源树本地验收有效后另起本地 Claude 来源资格审查；owner 本 Agent |
+| 4 签名 | f33be958 用 GitHub web-flow 公钥 `968479A1AFF927E37D1A566BB5690EEEBB952194` 实际 GOODSIG/VALIDSIG（exit 0）。e24c88b..db331cd 中 15 个提交用本仓 vault 公钥 `E5F0A2A2D2D7BFFCDAD104649D3B6B4C1CD756A1` 实际验签通过。e85470a、ff30d4a、98852b7、e24c88b、e5424c5、380c262 与 tag v0.30.88–v0.30.91 均为 `NO_PUBKEY 3F5F84D5E79CEF6C414339F20005024EAF59B8E4`；该公钥不在本机任一 Libra vault（`observations-20261028/vault-key-search.txt`）、不在 genedna 的 GitHub 公钥，keys.openpgp.org 与 keyserver.ubuntu.com 均返回 404（`keyservers.txt`）。GitHub 对这六个提交为 `unknown_key`，对四个附注 tag 为 `unverified_email`，对 f33be958 为 `valid`（`observations-20261028/github-verification.txt`）。全部提交 gpgsig 头与 DCO 存在。v0.30.87 是轻量 tag，直接指向 f33be958；v0.30.88–v0.30.91 是附注 tag，均解引用到对应发布提交且为 main 祖先，tagger 为 `user <user@example.com>`（RISK-QUAL-TAGGER-IDENTITY，P2） | 3F5F84D5… 未验证，不是无效；用户确认取不到公钥（RISK-QUAL-SIGNING-UNVERIFIED）。不改写历史、不移动 tag |
+| 5 整合与 D | e24c88b..db331cd 共 17 个提交、9 路径：`verify.rs` 改动在 `#[cfg(test)]` 模块内；`.cargo/config.toml` 把 `RUST_MIN_STACK` 由 16 MiB 改为 32 MiB，影响所有 cargo 启动的测试进程，触发全量；AGENTS/CLAUDE/测试说明为 blaze 用法；其余为治理文档。其中 12 个原工作区治理提交（10 个日期为 10-24/25，`ecd6150`、`cc09e57` 为 10-27）已由 Grok 以新 SHA 线性推送（`ed566b0`、`7541e9b`、`2755eb7` 不是 db331cd 或 29eaa97 的祖先），这与本计划「不直接推送原 main 整条 ahead 历史」的约定不符，现已不可撤回（RISK-QUAL-GOV-PUSHED）。之后又有 29eaa97（见上）。db331cd 的 Build/Test 40484795115 attempt 1 failure：原始日志 2108115 字节（SHA256 `30c89e18ab06a177c35a85672029cee906cfedba4fd4a7971a63181d73703d3a`）止于 11:35:07Z 的 9706/10822，之后 runner 失联，根因未证；同次运行 `init_from_git_rejects_unknown_source_format` 与 `init_from_git_rejects_unreadable_source_config` TRY1 FAIL→TRY2 PASS，原因是执行前快照含夹具 `git commit` 触发的 `git-src/.git/objects/maintenance.lock`（RISK-QUAL-GIT-MAINT-LOCK，P2）。2026-10-27T16:11:24Z 在确认 runner 在线空闲后只重跑一次失败 job（attempt 2，job 16:11:33Z 在 mi-omarchy 开始），attempt 1 保留；29eaa97 推送后，取消旧 main 运行的 workflow 40544991510（16:51:21Z–16:53:07Z）期间该 job 于 16:52:16Z 变为 cancelled。db331cd 的 D 因此未闭合，已被 29eaa97 取代 | root 独立治理增量未交接；本 Agent 最终源 SHA 的 D 尚未取得 |
+
+**恢复顺序（候选，待各自审查）：** `FIX-LTR-06（ER-03 → A → ER-05 → C → v0.30.92 → D）→ F2 关闭审查（依 DEP-QUAL-F2-GATE）→ 在 v0.30.92 发布树执行计划最终资格窗口 → 本地 Claude 来源资格审查 → 终态登记提交及其 D`。每一步的 Cargo 窗口都要先取得 root 交接。
+
+### Task FIX-LTR-06: 结构化输出下存储配置降级警告不写原始 stderr
+
+**Task type:** `implementation`
+
+**Lifecycle / Acceptance:** `blocked` / 空（ER-03 已由本地 Claude R5/R6 PASS；root 已授予窗口；待 DOC-LTR-03 落地及本卡 A 执行器准入）
+
+**Description:** 单一行为轴：`--json`/`--machine` 等结构化输出下，对象存储配置降级警告不得以纯文本写入 stderr，改为写入进程的待渲染警告缓冲（`record_warning_message`，与 `emit_warning` 及 GlobalSchemaFuture 降级的现行通道相同）；文本模式下的输出与是否触发 warning 追踪逐字不变。现实影响：任何在全局配置库不可读时以结构化输出失败的命令，其 stderr 当前不是单一 JSON。注意该缓冲只由 `status`（preflight）和 `agent import` 渲染，通用成功信封与错误信封都不渲染它，因此其余命令在结构化输出下看不到这条文字（RISK-QUAL-ENVELOPE-WARNINGS，与 GlobalSchemaFuture 现状相同）；同时它会计入 warning 追踪，结构化输出加 `--exit-code-on-warning` 时原本退出 0 的成功命令会改为退出 9（`LBR-WARN-001`）；文本模式维持历史行为，不计入追踪、仍退出 0（RISK-QUAL-TEXT-WARN-EXIT，P2）。`status` 的 JSON 文档承诺「退出 9 必对应 `data.warnings[]` 中至少一条」（`docs/commands/status.md:317-331`），而 status 在收集前快照缓冲（`src/command/status.rs:582-586`），对象存储却在收集中懒打开（`status/scan.rs:101` → `status.rs:1029` → `util::objects_storage()` → `ClientStorage::init` → `open_init_storage`）；因此本卡同时让 status **仅在结构化输出时**、于进入各模式分发（`src/command/status.rs:575` 之前）先解析一次对象存储并丢弃返回值（成功的客户端进入既有进程缓存供扫描复用；被拒绝的配置不进缓存，也不改变 status 的退出码与 error code，之后照旧由扫描中的对象读取报告），使降级警告在快照前记录，并以既有的 `repository_preflight`/`config` 条目出现在 `data.warnings[]`。文本模式仍走原来的懒打开路径，输出逐字不变。结构化输出下，这也使无提交仓库与缓存命中的 `--cached`/`--check-dirty` 开始报告该降级，并每次多做一次存储配置解析（不访问网络；s3/r2 配置且 `libra.repoid` 缺失、为空或为 `unknown-repo` 的边缘仓库可能写入该文件，见 `src/utils/client_storage.rs:3709-3721`）。全局配置库不可读时 status 仍在更早的配置默认值读取处 fail-closed（`status/input.rs:706-709`，128/`LBR-IO-001`），不受本卡影响。
+
+**Out of scope:** 历史 TRY1 根因（永久 unknown，不由本卡证明）；F2 关闭（由 `DEP-QUAL-F2-GATE` 决定的关闭审查承担）；`src/utils/util.rs:3880`、`:3889` 两处 ignore 文件告警的原始 `eprintln!`（RISK-QUAL-IGNORE-WARN，P2，尚未排期）；`src/utils/client_storage.rs:1220-1223` `refuse_rejected_presence` 的纯文本加 `exit(1)` 与 `src/cli.rs:3397` init 转换重试警告（RISK-QUAL-RAW-STDERR-OTHER，P2，尚未排期）；通用成功信封与错误信封不渲染待渲染警告（RISK-QUAL-ENVELOPE-WARNINGS，P2，尚未排期）；不改变降级本身（全局库不可读时对象存储仍为历史本地后端）。
+
+**Current evidence:**
+
+| 事实 | 证据 |
+|---|---|
+| 三处原始 `eprintln!` | `src/utils/client_storage.rs:1719`（`storage_config_resolution_fallback` 非 GlobalSchemaFuture 分支）、`:1898`（空 bucket）、`:1903`（`LIBRA_STORAGE_TYPE=local`） |
+| 结构化输出通道 | `src/utils/error.rs:1346` `emit_warning`；`src/utils/output.rs:504` `record_warning_message`（同时调用 `record_warning`）；`src/utils/output.rs:540` `structured_output_active`，由 `src/cli.rs:3388` 在存储解析前设置 |
+| 缓冲的渲染者 | 仅 `src/command/status/input.rs:216` 与 `src/command/agent/import.rs:4382` 读取 `pending_warning_messages` |
+| 退出码 | `src/cli.rs:3954`：`--exit-code-on-warning` 且已记录警告时返回 `LBR-WARN-001`，退出 9（`docs/error-codes.md`） |
+| 受控复现 | 仓外 `f2/probe-{garbage,chmod000}.stderr`：exit 129、stderr 非 JSON；`f2/probe-none` 为单一 JSON |
+| 现有文本模式断言 | `src/utils/client_storage.rs:7901` `storage_config_init_fallback_local_word_stays_writable`、`:7917` `storage_config_init_fallback_local_empty_bucket_keeps_bucket_warning`（子进程，结构化标志默认关闭）；`:8076` `storage_config_hold_unreadable_global_stays_local` |
+| 文档描述位置 | `docs/commands/fetch.md:75-81`、`docs/commands/cache.md:29-35`、`docs/commands/zh-CN/cache.md:16`、`COMPATIBILITY.md:223` fetch 行；`docs/commands/zh-CN/fetch.md:29`（含与英文对应的全局库降级句与 `local` 警告句） |
+
+**Acceptance criteria:**
+
+- [ ] AC-1: 结构化输出下，全局配置库存在但不可读时，失败命令的 stderr 只包含其原有的单一 JSON 信封；退出码、`error_code` 与降级到本地对象存储的行为不变（status 在此条件下保持既有的 128/`LBR-IO-001`）。
+- [ ] AC-2: 结构化输出下，`LIBRA_STORAGE_TYPE=local` 与空 bucket 两条既有警告同样不写原始 stderr，消息进入待渲染警告缓冲。
+- [ ] AC-3: 结构化输出加 `--exit-code-on-warning` 时，触发降级的成功命令退出 9，stderr 为单一 `LBR-WARN-001` JSON（status 除外，见 AC-7）；此变化与文本模式仍退出 0 的不对称写入文档。
+- [ ] AC-4: 文本模式下三条警告的字节、顺序与是否触发 warning 追踪均与当前一致；上表三个现有用例不修改、不弱化。
+- [ ] AC-5: 原 F2 用例保留全部断言；退出码或 JSON 解析失败时输出 exit、stdout、stderr。
+- [ ] AC-6: 不新增配置值或凭据输出；GlobalSchemaFuture、仓库库读取失败与确认配置失败的 fail-closed 行为不变。
+- [ ] AC-7: `LIBRA_STORAGE_TYPE=local`（含 `LIBRA_STORAGE_TYPE=local` 且 `LIBRA_STORAGE_BUCKET` 为空）时，`--json --exit-code-on-warning status` 在有提交的默认模式、无提交的默认模式与缓存新鲜的 `--cached` 模式下均退出 9、stderr 为空，`data.warnings[]` 含 code `repository_preflight`、source `config` 的降级消息；文本模式下无提交仓库的 status stderr 与修复前逐字相同。`--scan`、`--check-dirty` 走同一分发前预解析，不单列用例（RISK-QUAL-STATUS-MODES，P2）。
+
+**Verification:**
+
+- [ ] VER-1: `source .env.test && source .env.live-test && cargo nextest run --lib -E 'test(utils::client_storage::)' --no-fail-fast --retries 0`；完整模块非零，含上表三个现有用例；本卡不在该模块新增单测，不改全局 `STRUCTURED_OUTPUT`，不新增 serial 键，不改 `tests/SERIAL_REGISTRY.tsv` 或 `.config/nextest.toml`。
+- [ ] VER-2: `source .env.test && source .env.live-test && cargo nextest run --test command_test -E 'test(command::reset_test::)' --no-fail-fast --retries 0`；含新增 `reset_json_error_stays_single_document_when_global_store_is_unreadable`（全局库写入非 SQLite 内容，不用 chmod，root 身份下同样有效）与 F2 诊断，完整模块非零。
+- [ ] VER-3: `source .env.test && source .env.live-test && cargo nextest run --test command_test -E 'test(command::output_flags_test::)' --no-fail-fast --retries 0`；含新增 `json_exit_code_on_warning_reports_storage_degrade`（AC-1/AC-3，cat-file，全局库写入非 SQLite 内容）、`json_init_local_storage_type_warning_leaves_stderr_json`（AC-2：stderr 无原始 `Warning:` 行；加 `--exit-code-on-warning` 时退出 9、stderr 为单一 `LBR-WARN-001`）、`text_exit_code_on_warning_keeps_storage_degrade_exit_zero`（AC-4 的追踪不变）、`json_status_exit_code_on_warning_lists_storage_degrade`（有提交）、`json_status_unborn_exit_code_on_warning_lists_storage_degrade`（无提交）、`json_status_cached_exit_code_on_warning_lists_storage_degrade`（先以文本 `status --scan` 建立新鲜缓存，再断言 JSON `freshness` 为 `cached`、`warnings[]` 含该条目且不含 `dirty_cache_stale_fallback`）与 `text_status_unborn_stderr_unchanged`（AC-7 的文本不变量）。VER-3 共七个新增用例（连同 VER-2 的一个共八个），均为子进程、只给子进程设环境变量，不使用 `#[serial]`，不改 `tests/SERIAL_REGISTRY.tsv`。VER-1 不新增单测：结构化分支只能在 CLI 设置结构化标志后观察，由 VER-2/VER-3 的子进程用例覆盖。
+- [ ] VER-4: `source .env.test && source .env.live-test && cargo nextest run --test compat_global_config_schema_future --no-fail-fast --retries 0`。
+- [ ] VER-5: VER-2/VER-3 的新增用例（`text_exit_code_on_warning_keeps_storage_degrade_exit_zero` 与 `text_status_unborn_stderr_unchanged` 除外，它们在修复前后都应通过）先在未修复源上实际失败（RED），再在修复后通过；RED 输出留存仓外。三个 JSON status 用例的 RED 须分别在「只改 client_storage」与「未改」两种源上记录，证明 status 预解析是必要的。
+
+**Full-suite trigger:** T-1：`src/utils/client_storage.rs` 是跨命令共享存储核心；A、C 均执行 `source .env.test && source .env.live-test && cargo nextest run --all --no-fail-fast --retries 2`。
+
+**Dependencies:** `FIX-LTR-03`（v0.30.91 发布树）、`DEP-QUAL-SOURCE`（当前 main `8abdcf7`，相对 29eaa97 只有文档，产品源与 29eaa97 相同；该行原锚定 b73，按其「变化先重审」本卡以 8abdcf7 为源）、`DEP-QUAL-PUBLISH`、`DEP-QUAL-CARGO-WINDOW`。不依赖 `DEP-QUAL-F2-GATE`。v0.30.92 将是第一个带上 29eaa97 生产改动（index 修复、`git-internal` 0.10.4，签名 NO_PUBKEY FD937770…）的发布；本卡 A/C 的完整默认套件即覆盖该整树，不另立该提交的发布卡。
+
+**Deliverables:** N/A（代码卡）。
+
+**Implementation write set:** `src/utils/client_storage.rs`、`src/command/status.rs`（仅结构化输出时在模式分发前预解析对象存储，丢弃返回值）、`tests/command/reset_test.rs`、`tests/command/output_flags_test.rs`、`docs/commands/fetch.md`、`docs/commands/zh-CN/fetch.md`、`docs/commands/cache.md`、`docs/commands/zh-CN/cache.md`、`COMPATIBILITY.md`（仅 fetch 行）、本计划、`docs/development/plan/plan-status.md` 本计划行；网站 `../libra-backend/apps/tanstack-app/content/docs/commands/fetch.en.md`、`cache.en.md`（Git 仓、`cf` 分支；现有他人未跟踪文件 `memory.en.md` 保留不动）。`docs/commands/status.md`、`docs/commands/zh-CN/status.md`（`repository_preflight` 行、「命令运行前」措辞与「配置解析本身从不告警」一句（英文约 314–315 行、中文约 160 行）改为包含结构化输出下 status 扫描前的对象存储降级；英文约 317–322 行（中文约 162 行）「与 status 警告相同的投递矩阵」和英文约 328–331 行（中文约 164 行）「a warning exits 9 … in every output mode」须注明对象存储降级在文本模式下例外：输出原始 `Warning:` 行、无提交或缓存命中时不输出、不触发退出 9（RISK-QUAL-TEXT-WARN-EXIT）；`src/command/status.rs:228` 同义注释同改）。`docs/commands/config.md` 及其中文版目前不描述这两条警告，N/A；网站 `status.en.md` 不列 warning code，N/A。
+
+**Release write set:** Inherited（`Cargo.toml`、`install.sh`、`install.ps1`、工具链刷新的 `Cargo.lock`、release artifact；以 `compat_version_surface_sync` 为准）。
+
+**Files likely touched:** 同 I/R。
+
+**Docs and compatibility impact:** 结构化输出的 stderr 内容与 `--exit-code-on-warning` 退出码变化属于外部可见行为：同卡更新上列中英文 fetch/cache/status 文档（fetch/cache 中英文均写明结构化输出的去向、`--exit-code-on-warning` 退出 9 以及文本模式仍退出 0 的不对称）、`COMPATIBILITY.md` fetch 行与网站 fetch/cache 两页；无新错误码（沿用 `LBR-WARN-001`），`docs/error-codes.md` N/A。
+
+**Rollback mode:** `immutable-release`
+
+**Migration and rollback:** 无 schema 迁移；已发布版本不可撤回，回归以新 patch 前滚。需要旧行为（原始 stderr 文字）的用户可改用文本输出或固定使用 v0.30.91；使用 `--json`/`--machine` 加 `--exit-code-on-warning` 的脚本在存储降级时会从退出 0 变为退出 9。兼容窗口：本 patch 起生效，文档写明，不保留开关。
+
+**Security and privacy:** 警告文本沿用现有内容，不新增配置值；结构化模式下不再把全局库绝对路径写进原始 stderr。
+
+**Performance budget:** 文本模式无变化；结构化输出的每次 status 多一次存储配置解析（读本仓与全局配置库，s3/r2 配置时最多约 10 次查找，可能写入 `libra.repoid`，不访问网络），`--cached` 快路径同样承担。A、C 各候选一次 10800 秒（含编译、listing、全部门、default/keyring release 构建、安装和资源后检），基于本计划旧机器暖缓存估计；本机 claim 前须以实测工具链与缓存重核并经本地 Claude 准入，不在窗口外预编译，不续窗。
+
+**Estimated scope:** `S`（2 个生产文件）
+
+**Version increment:** `patch`（候选 v0.30.92，执行时现场核 tag/Release 未占用）
+
+**Release boundary:** `independent`
+
+**C/D coverage from:** `self`
+
+**Granularity:** `type=implementation; axis=结构化输出下存储配置降级警告的输出通道; recovery=immutable-release前滚patch; complete=yes; self-contained=yes; AC=7/8; VER=5/8; landing=2; prod-files=2; scope=S; deps=FIX-LTR-03,DEP-QUAL-SOURCE,DEP-QUAL-PUBLISH,DEP-QUAL-CARGO-WINDOW; writeset=no-overlap; release=independent; split-from=DEP-QUAL-F2-ATTRIB; exception=N/A`
+
+### Task DOC-LTR-03: 来源资格交接复核登记
+
+**Task type:** `docs`
+
+**Lifecycle / Acceptance:** `in-progress` / 空
+
+**Description:** 把 2026-10-27/28 复核的事实、缺口、owner、用户决定、FIX-LTR-06 候选与待决事项写入本计划、plan-status 本计划行和 plan-20261015 的 `DEP-TR-QUAL-REPAIRS` 证据列；保留全部旧 FAIL/STOP 与历史文字。
+
+**Out of scope:** 不实现 FIX-LTR-06；不改模板、共享协议、plan-long（本计划无长期能力编号，N/A）；不消费 root 独立治理副本；不关闭任何依赖。
+
+**Acceptance criteria:**
+
+- [ ] AC-1: 五组结论、未解决项、用户决定与 owner 逐项登记，未知与未运行明确标出，新写事实均有仓外原件或注明为未留原件的观察。
+- [ ] AC-2: 只新增文字；plan-status 本计划行与 `DEP-TR-QUAL-REPAIRS` 证据列只加前缀，原行首标签保留。
+- [ ] AC-3: 提交为 signed + DCO，且以本仓 vault 公钥实际验签。
+- [ ] AC-4: 推送后该 SHA 的 base 八个 job 与 CodeQL 两个 job 实际终态逐项核验。
+
+**Verification:**
+
+- [ ] VER-1: 原生 diff 与逐文件哈希确认改动范围。
+- [ ] VER-2: 本地 Claude 审查当前差异与证据清单，明确 `VERDICT: PASS`。
+- [ ] VER-3: `cargo +nightly fmt --all --check`、`cargo clippy --all-targets --all-features -- -D warnings`、`source .env.test && source .env.live-test && cargo nextest run --test compat_agent_architecture_guard --no-fail-fast --retries 0`（须先取得 Cargo 窗口）。
+
+**Full-suite trigger:** `N/A`（no-release 计划文本）。
+
+**Dependencies:** `DEP-QUAL-SOURCE`、`DEP-QUAL-CARGO-WINDOW`（仅 VER-3）。
+
+**Deliverables:** 本计划本段与相关表行、plan-status 本计划行、plan-20261015 `DEP-TR-QUAL-REPAIRS` 证据列。
+
+**Implementation write set:** `docs/development/plan/plan-20261025-qualification.md`、`docs/development/plan/plan-status.md`（本计划行）、`docs/development/plan/plan-20261015.md`（`DEP-TR-QUAL-REPAIRS` 行）。
+
+**Release write set:** `N/A`
+
+**Rollback mode:** `immutable-release`
+
+**Estimated scope:** `S`
+
+**Version increment:** `N/A`
+
+**Release boundary:** `no-release`
+
+**C/D coverage from:** `FIX-LTR-06`（产品 C 覆盖；本卡自身文档门与 main D 另记）
+
+**Granularity:** `type=docs; axis=来源资格交接复核登记; recovery=immutable-release前滚文档; complete=yes; self-contained=yes; AC=4/20; VER=3/20; landing=0; prod-files=0; scope=S; deps=DEP-QUAL-SOURCE,DEP-QUAL-CARGO-WINDOW; writeset=本计划三处; release=no-release; split-from=用户20261027交接; exception=N/A`
+
 ## 2026-10-26 跨机器接续入口（当前要求）
 
 用户本轮明确要求：「请把 Libra 需要的前置任务写入 docs/development/plan/plan-20261025-qualification.md 这个文件中，把要求的任务写明细，然后单独提交，我会在其他的机器上启动一个 agent 完成」；随后指定「libra 的交接任务卡，请在 main 分支提交，我也会在 main 分支开发」。本次交接只提交本文件到 `main`，不携带程序候选、版本修改或原 scoped-traces 三份治理 WIP。接收 Agent 在本机定位真实目录，用原生 Libra 拉取并核验最新 main 后接续；不得复制旧机器绝对路径。
@@ -1005,10 +1148,16 @@ R1真实ER03/RECOVERY PASS、H0/VERDICT FAIL（sessionbb82411c-1e59-4e52-a7f1-93
 | DEP-QUAL-SECURITY | incoming | 跨仓前置 | Mega2 plan-20261015 FIX-MTR-11 | root | 既定安全卡完整C/D及两个告警实际fixed；不改变其不自行延期条款 | FIX11已done/complete，932731d/v0.42.70；23/24实际fixed于2026-10-24 20:16:51/52 UTC，见文首真实D收据（此前open保留为历史） | 未满足不实施本计划；只做恢复治理与审查 |
 | DEP-QUAL-PUBLISH | incoming | 发布前置 | 独立clone与实际GitHub工作流 | root | 发布branch不包含原未发布治理祖先/文件；vault签名与DCO、版本面、PR/Release权限与artifact门实际可用 | 开工逐项原生核对，不能用gh浏览器登录互代 | 分叉/缺凭据/来源变化先停止归属，不force |
 | DEP-QUAL-HANDOFF | outgoing | 来源资格 | plan-20261015 LTR-10 / LTR-01 | root | 五张实现卡独立C/D完成、FIX03 bump后C及发布后最终资格窗口全量/doc/network与本地Claude明确PASS（绑定实际merge树）、终态登记提交实际PR/main D通过并具名例行补记，再核受控整合树、原工作区受控整合/受影响门通过 | 后续真实提交/版本/远端ref/原件，当前无 | 来源资格未闭合不得解除LTR-10前置；不更改H1或替代LTR各卡门 |
+| DEP-QUAL-F2-GATE | incoming | 用户决定 | `完成判据与交接`「全部P0/P1关闭」与 `DEP-QUAL-F2-CLOSE`「未知时保持P1」对 F2 的适用 | 用户；Claude执行Agent记录 | 2026-10-28T06:03:22Z 用户决定已记录（文首 2026-10-27 段原文）：F2 历史根因永久 unknown；FIX-LTR-06 完整 C/D、F2 用例诊断与本地 Claude 关闭审查 PASS 后 F2 P1 关闭；仅限 F2；以 2026-10-28T06:03:22Z 当日接受 FIX04/02/03 已在 CLOSE=unknown 下发布的事实，这不是对 19:12:37Z 例外的历史批准。DEP-QUAL-HANDOFF 因此另需 FIX-LTR-06 C/D 与该关闭审查。关闭审查须绑定：FIX-LTR-06 发布 SHA、tag、Release 与 D 收据；发布树中 AC-5 诊断存在的源码与测试证据；`user-decisions.json` 的 SHA256；本段与 F2 分析原件。输出键 `F2_CLOSE: CLOSED|OPEN` 与 `VERDICT: PASS|FAIL` | 用户决定已取得；执行方案审查见 Claude review log 中标为 2026-10-28 的各行；关闭审查尚未进行 | 关闭审查 PASS 前 F2 P1 不关闭，DEP-QUAL-HANDOFF 不闭合；不扩大到其它 P0/P1 |
+| DEP-QUAL-SIGNING-KEY | incoming | 公钥 | `3F5F84D5E79CEF6C414339F20005024EAF59B8E4` | 用户/另一机器 | 可核来源的公钥及对 e85470a、ff30d4a、98852b7、e24c88b、e5424c5、380c262 与四个附注 tag 的实际 VALIDSIG | 本机 NO_PUBKEY；GitHub 提交 unknown_key、tag unverified_email；keys.openpgp.org 与 keyserver.ubuntu.com 404；2026-10-28T06:03:22Z 用户确认取不到 | 保持未验证（RISK-QUAL-SIGNING-UNVERIFIED），不改写历史、不移动 tag |
+| DEP-QUAL-CARGO-WINDOW | incoming | 本机共享执行环境 | `DEP-TR-ENV-DIAG-CARGO` 的 Libra 侧消费 | root | root 明确交接，前一窗口实际终态、owned 进程与资源关闭已核 | 2026-10-28T06:03:22Z 用户决定 root A3 结束后交给 Libra；root 05:59:20Z 协调收据写明尚未发放；root 于 07:49:04Z 发出授权 `coordination/root-grant-20261028T074904Z.json`（DOC-LTR-03 3600 秒、FIX-LTR-06 A/C 各 10800 秒、最终资格 10800 秒，各自先经准入；结束须由 Libra 明确归还） | 未取得不编译、不测试、不发布 |
+| DEP-QUAL-REMOTE-ORIGINALS | incoming | 原件 | 另一机器上 FIX05/04/02/03 的 C、e24c88b 最终资格窗口、bde085f1 审查 | 用户/另一机器 | 原件及 SHA256 可核 | 本机不可得；2026-10-28T06:03:22Z 用户确认取不到 | 保持缺失登记（RISK-QUAL-ORIGINALS-MISSING），以最终树新窗口作新证据，不补造旧 PASS |
 
 ## 实施顺序与发布窗口
 
 `DEP-QUAL-SECURITY + DEP-QUAL-SOURCE + DEP-QUAL-PUBLISH -> FIX-LTR-01 -> FIX-LTR-05P -> FIX-LTR-05Q -> FIX-LTR-05R -> FIX-LTR-05S -> FIX-LTR-05T -> FIX-LTR-05U -> FIX-LTR-05V -> FIX-LTR-05W -> FIX-LTR-05X -> FIX-LTR-05Y -> FIX-LTR-05Z -> FIX-LTR-05 -> FIX-LTR-04 -> FIX-LTR-02 -> FIX-LTR-03 -> DEP-QUAL-HANDOFF`；另有 `DEP-QUAL-F2-ATTRIB + DEC-QUAL-05-RELEASE-WARNING -> FIX-LTR-05`，另有 `FIX05/具名新FIX -> DEP-QUAL-F2-CLOSE -> FIX04`。`FIX-LTR-05W` 已推送 `2a80a10`，只含 `resolve_configured_storage` 与 fetch 写入前检查。`FIX-LTR-05X` 已推送 `a729384`，只含 `init` 的确认失败拒绝状态和不缓存该状态。`FIX-LTR-05Y` 已推送 `ec98926`，只含未决 TYPE 不进入对象缓存。`FIX-LTR-05Z` 只含未决 TYPE 这一次调用不再构造 `LocalStorage`。ER03 `272c8d7d` PASS，实现审查 `4a42ec63` PASS。父卡 VER-1 至 VER-5 已在 ae50414 通过。本提交占用 v0.30.88。v0.30.88 的 D 已于 2026-10-26T18:23:07Z 观察成功：base 40349034162 attempt 2、CodeQL 40349034316、release 40349204443，SHA e85470a。F2 仍是 unknown。依 2026-10-26T19:12:37Z 例外，FIX04 对 CLOSE=unknown 豁免。顺序用于共享本计划/版本面的串行发布，不表示合并发布。先修确定性全量阻断，再修共享fixture，最后完成MCP测试清理与整份修复计划的最终资格。每卡真正 C/D 闭合后才发布下一卡。`FIX-LTR-05P` 到 `FIX-LTR-05Z` 都是 family child，不占用 v0.30.88。FIX04 已发布 ff30d4a / v0.30.89，D 于 2026-10-26T20:44:43Z 观察成功：base 40391580491、CodeQL 40391580303、release 40391698253。FIX02 从该发布树接续，不把 F2 写成已修复。
+
+**2026-10-28 追加顺序（不改上一段历史）：** `FIX-LTR-03 -> FIX-LTR-06 -> DEP-QUAL-F2-CLOSE（依 DEP-QUAL-F2-GATE 的关闭审查）-> 计划最终资格（FIX-LTR-06 发布树）-> 来源资格 Claude 审查 -> 终态登记 -> DEP-QUAL-HANDOFF`；`DOC-LTR-03` 为 no-release 文档卡，产品 C 覆盖来自 FIX-LTR-06。每个本地窗口另依 `DEP-QUAL-CARGO-WINDOW`。
 
 ### 实际 D 映射与现场复核
 
@@ -1308,6 +1457,8 @@ R1真实ER03/RECOVERY PASS、H0/VERDICT FAIL（sessionbb82411c-1e59-4e52-a7f1-93
 
 五张实现卡分别实际A/B、Claude ER-05 PASS、精确signed/DCO提交、独立patch/PR/merge/tag/人工Release、实际CI与发布artifact D完成；全部P0/P1关闭，P2具名处置。FIX-LTR-03 的C④在bump后树执行完整默认套件、`cargo test --doc`及原3例network；merge树与被测树不等即STOP。五张实现卡各自实际D完成后，在与FIX03发布merge树相同的冻结来源执行上述一次10800秒计划最终资格窗口（fmt、strict Clippy、双env完整默认套件、doc、原3例network），核全部身份/退出/ignored/flake/runtime skip与owned资源；根因未知的缺口不得改成已证。最终实际本地Claude来源资格PASS后，才把五个具体发布SHA/版本及适用覆盖交给原scoped-traces计划；其H1、原merge签名政策、LTR自身A/B/C/D仍独立。
 
+当前（2026-10-28）：来源资格**未闭合**。F2 P1 未关闭（用户已于 2026-10-28T06:03:22Z 决定限定关闭条件，尚未满足）；FIX05–FIX03 的 C 与 e24c88b 最终资格窗口原件取不到；最终源树（现为 29eaa97 之上）已不同于 e24c88b，须重新执行最终资格窗口；没有来源资格 Claude 审查原件；六个提交与四个附注 tag 签名未验证；当前 main 的 D 尚未由本 Agent 提交取得。详见文首 2026-10-27 段。下一句为 2026-10-26 时点记录。
+
 当前（2026-10-26）两原计划正式23/118、0/26、23/144；本外部五实现卡 5/5（FIX01、FIX05、FIX04、FIX02、FIX03 的 D 已观察），DOC01/02另记，不增加原26卡。最终资格窗口已在 FIX03 发布树 `e24c88b` 上通过。终态文档审查 `bde085f1-c67e-439c-bdac-df02fce6b97c` VERDICT PASS。终态文档 `e5424c5114331612cb2f02206b18aafe112a2afb` 的 main D 已观察成功：base `40433225564`、CodeQL `40433225610`。这是例行补记。F2 仍 unknown。不解除 LTR10 incoming，不改 H1。联合依赖按文首ATTRIB→FIX05、FIX05/新FIX→CLOSE→FIX04→FIX02→FIX03与H0/H1/LIVE/LTR10核无环；任一卡/末端证据不足均未完成。旧17/118、1/4统计保留于下方2026-10-25快照。
 
 > 历史初稿统计：原Mega14/112、Libra0/26、联合14/138；外部0/3，保留其原时点。
@@ -1316,6 +1467,15 @@ R1真实ER03/RECOVERY PASS、H0/VERDICT FAIL（sessionbb82411c-1e59-4e52-a7f1-93
 
 | 日期 | 触发 | 变更 | 实际状态 |
 |---|---|---|---|
+| 2026-10-28 09:16:58 UTC | 本地 Claude R8 FAIL（P1×1） | plan-status 本计划行最新前缀改为当前状态并改正 main 时点；squash 推断改为「squash 或 rebase」；R7、R8 入审查日志 | DOC-LTR-03 in-progress；F2 仍 unknown/P1 |
+| 2026-10-28 09:10:06 UTC | 执行器自查与本地 Claude R7 FAIL（P1×2） | 改正 FIX-LTR-06 证据表与文档影响中「`docs/commands/zh-CN/fetch.md` 缺对应句」的错误说法（该文件第 29 行已有对应句；首次 R7 因此中止，无结论）；8abdcf7 时间改为提交时间 06:07:23Z 并引 PR merged_at 原件；授权、整合范围、FIX-LTR-06 源锚点与生命周期括注改为当前事实；两条索引前缀注明 main 时点 | DOC-LTR-03 in-progress；F2 仍 unknown/P1 |
+| 2026-10-28 08:58:36 UTC | root 授予 Cargo 窗口（`coordination/root-grant-20261028T074904Z.json`），开工条件要求刷新 upstream | 快进到 8abdcf7（PR #649，仅文档）；三份文件的新增文字按锚点重放，与受审字节逐行相同；文首段补 8abdcf7 事实一句 | DOC-LTR-03 in-progress；F2 仍 unknown/P1 |
+| 2026-10-28 07:09:02 UTC | 本地 Claude R5：PASS，P0/P1=0，P2×5 | 在 R6 前修订全部 P2：status 文本模式例外的两句文档入写集、`--cached` 用例锁定 `freshness`=`cached`、用例计数、Description 补 repoid 副作用、审查日志 R3/R4/R5 行 | DOC-LTR-03 in-progress；F2 仍 unknown/P1 |
+| 2026-10-28 06:58:22 UTC | 本地 Claude R4：DOCS PASS、ER03 FAIL（P1×1） | status 预解析改为仅结构化输出并丢弃返回值；AC-7 覆盖无提交与缓存新鲜的 `--cached` 并加文本不变量；性能说明、status 文档「配置解析从不告警」句与注释、空 bucket 措辞、VER-1 说明、命令出处与审查日志行序改正 | DOC-LTR-03 in-progress；F2 仍 unknown/P1 |
+| 2026-10-28 06:49:07 UTC | 本地 Claude R3：DOCS FAIL、ER03 FAIL（P1×2），R2 的 P1 已关闭 | FIX-LTR-06 把 status 列为无条件写集（模式分发前预解析对象存储），AC-7 改用 `LIBRA_STORAGE_TYPE=local` 并覆盖 `--cached`，全局库不可读时 status 保持 128；用例改名与 RED 分层；清单计数改为 18；补 root 副本读取命令出处；R3 入审查日志 | DOC-LTR-03 in-progress；F2 仍 unknown/P1 |
+| 2026-10-28 06:36:00 UTC | 本地 Claude R2：DOCS FAIL（P1×2）、FIX-LTR-06 ER-03 PASS、F2 门落地 PASS | 二进制对应限定到 db331cd 并说明 29eaa97；补存 GitHub 核验与 root 副本 origin/main 原件；GATE 行补当日接受发布事实与关闭审查输入/键；FIX-LTR-06 加 AC-7（status 承诺）、四个具名用例、条件写集、退出码迁移说明；新增两条 P2 | DOC-LTR-03 in-progress；F2 仍 unknown/P1 |
+| 2026-10-28 06:20:00 UTC | 本地 Claude R1 FAIL（P1×5）与用户三项决定 | 保留两处原行首标签；修正重跑时间与 12 个提交的日期；补存写者、root 副本、祖先、vault、keyserver 与 F2 场景原件；FIX-LTR-06 改写警告去向与 0→9 退出码、补齐 fetch/cache 文档写集；登记 29eaa97 上游变化与用户决定 | DOC-LTR-03 in-progress；F2 仍 unknown/P1 |
+| 2026-10-27 16:30:00 UTC | 用户指定 Claude 执行 Agent 补齐交接缺口 | 登记写者交接、五组复核结论、FIX-LTR-06 与 DOC-LTR-03、四个新依赖；FIX05 卡勾选不一致与 F2 当前可证缺陷入文；不改任何旧结论 | R1 FAIL，见上一行 |
 | 2026-10-26 19:12:37 UTC | 历史 TRY1 stderr 不可恢复 | GitHub Actions 中该 reset 测试只有 PASS。会话 c7f9fbae 不在本机。b73 上两次自然重跑通过。诱发的 libra.db 排他锁退出 128，stderr 是 LBR-IO-001 JSON，不是 TRY1 的 129 再解析失败。关闭审查 a73f768c 与 3d7f3b15 都是 CLOSE unknown、FIX04_ALLOWED no、VERDICT PASS。用户未选择提供 stderr、新卡或修订。本次修订只允许 FIX04 加两行 cfg，同时 CLOSE 保持 unknown，P1 不关闭。不把 FIX04 写成 F2 修复。审查 a929a323 VERDICT PASS。这是执行器依当前目标记录的修订，不是用户批准。若 FIX04 的 C 重现 TRY1 形状则 ER10 STOP | in-progress；F2 仍 unknown |
 | 2026-10-26 15:16:12 UTC | 父卡 VER-1 至 VER-5 与缓存/pack 审查 d9641b0d PASS | ae50414 上 VER 计数 93、62、51、58、54，均 0 failed。完整套件 df24361e：10822 passed，0 failed；fetch mirror 用例重试后通过。fmt 与 clippy 通过。default 与 keyring release 只有 from_payload 与 from_payload_with_hint_policy 两条 dead_code，外加 proc-macro-error2。确认失败不进对象缓存。fetch 在安装 pack 前拒绝。精确 local 只在 init 保持历史本地；fetch、pull、clone 仍拒绝精确 local。VER-1 没有同步屏障真锁，覆盖是把仓库库换成目录，记为 P2 缩窄。RISK-QUAL-ADD-LOOSE：操作日志用 init_local 写快照，gcs-canary 的 add 仍留下 loose blob 45b983be，index 未写；未修，不宣称所有命令零对象写入。F2 仍 unknown。本提交占用 v0.30.88。不开始 FIX04 | in-progress/本地 C 已过；tag 与 D 未观察 |
 | 2026-10-26 14:23:00 UTC | 完整套件被未决 TYPE 挡住对象读取 | 仓库库打不开仍失败关闭。全局库存在但打不开时，对象存储回到历史本地后端。解密失败仍失败关闭。审查 9e386060 与 ce4eb432 PASS。完整套件 run db0184d9：10822 passed，0 failed。不消耗 v0.30.88。不开始 FIX04 | in-progress/空；发布 D 未观察 |
@@ -1371,6 +1531,8 @@ R1真实ER03/RECOVERY PASS、H0/VERDICT FAIL（sessionbb82411c-1e59-4e52-a7f1-93
 | FIX-LTR-04 | 同步ingress测试构造器profile可用性 | ingress.rs仅两cfg、本计划、plan-status本计划行 | 4/8、5/8 | 1/1 S | FIX-LTR-05 + F2-CLOSE + SOURCE/PUBLISH；2026-10-26T19:12:37Z 起 CLOSE=unknown 豁免 | independent/self |
 | FIX-LTR-02 | reasoning fixture索引结清 | reasoning_artifact.rs、本计划、plan-status本计划行 | 4/8、3/8 | 1/0 S | FIX-LTR-01/FIX-LTR-04 | independent/self |
 | FIX-LTR-03 | MCP owned worker teardown | agent_mcp_exec_test.rs、本计划、plan-status本计划行 | 4/8、4/8 | 1/0 S | FIX-LTR-02 | independent/self |
+| FIX-LTR-06 | 结构化输出下存储配置降级警告的输出通道（ER-03 候选） | client_storage.rs、status.rs（仅结构化输出时在模式分发前预解析）、reset_test.rs、output_flags_test.rs、fetch/cache/status 中英文、COMPATIBILITY fetch 行、网站 fetch/cache、本计划、plan-status 本计划行 | 7/8、5/8 | 2/2 S | FIX-LTR-03 + SOURCE/PUBLISH + CARGO-WINDOW | independent/self；候选 v0.30.92 |
+| DOC-LTR-03 | 来源资格交接复核登记 | 本计划、plan-status 本计划行、plan-20261015 DEP-TR-QUAL-REPAIRS 行 | 4/20、3/20 | 0/0 S | SOURCE + CARGO-WINDOW（仅 VER-3） | no-release / FIX-LTR-06 |
 
 上表是开工时的粒度快照，其中「未准入候选／不得先实施」不是当前状态。当前完成状态以文首任务表为准：五张实现卡的 D 均已观察。
 
@@ -1381,6 +1543,17 @@ R1真实ER03/RECOVERY PASS、H0/VERDICT FAIL（sessionbb82411c-1e59-4e52-a7f1-93
 
 | ID | 事实/边界 | root处置/重启条件 | 状态 |
 |---|---|---|---|
+| RISK-QUAL-ORIGINALS-MISSING | FIX05/04/02/03 的 C、e24c88b 最终窗口与 bde085f1 原件在另一机器，用户确认取不到 | 不补造；以最终树新窗口与新的来源资格审查作新证据 | open，P2 具名 |
+| RISK-QUAL-SIGNING-UNVERIFIED | 3F5F84D5… 与 FD937770… 签名的提交/tag 无可得公钥 | 不改写历史、不移动 tag；取得公钥后再验 | open，P2 具名 |
+| RISK-QUAL-TAGGER-IDENTITY | v0.30.88–v0.30.91 附注 tag 的 tagger 为 `user <user@example.com>` | 不移动 tag；后续发布核对 tagger 身份 | open，P2 |
+| RISK-QUAL-GOV-PUSHED | 12 个原工作区治理提交已以新 SHA 推送到 main，早于 LTR01 承载 | root 处置 LTR01 承载关系；不 force、不回退 | open，owner root |
+| RISK-QUAL-GIT-MAINT-LOCK | `init_from_git_test` 的执行前快照可能含 Git 后台维护的 `maintenance.lock`，CI TRY1 失败、TRY2 通过 | 若阻断门则另立 FIX 卡；不放宽断言 | open，P2 |
+| RISK-QUAL-ENVELOPE-WARNINGS | 待渲染警告缓冲只由 status 与 agent import 渲染，通用成功信封与错误信封不带 | 尚未排期；FIX-LTR-06 不扩大到信封契约 | open，P2 |
+| RISK-QUAL-IGNORE-WARN | `src/utils/util.rs:3880`、`:3889` ignore 告警在结构化输出下写原始 stderr | 尚未排期 | open，P2 |
+| RISK-QUAL-TEXT-WARN-EXIT | 文本模式下存储降级警告不计入 warning 追踪，`--exit-code-on-warning` 仍退出 0，与结构化模式（FIX-LTR-06 后退出 9）不对称 | FIX-LTR-06 保持历史文本行为并写入文档；尚未排期 | open，P2 |
+| RISK-QUAL-STATUS-MODES | FIX-LTR-06 的 status 预解析位于模式分发前，`--scan`、`--check-dirty` 与已测的默认/`--cached` 共享该调用，但未单列用例 | 若后续改动分发顺序则补用例；尚未排期 | open，P2 |
+| RISK-QUAL-FIX05-VER-GAP | FIX05 卡 done，但 VER-6 未勾、VER-1 同步屏障真锁未落地；VER-4 与 AC-3 的缺口由 FIX-LTR-06 AC-5/AC-1/AC-2 承接 | 不回改历史勾选；若存储配置锁故障复现则另立 FIX 卡 | open，P2，owner Claude执行Agent |
+| RISK-QUAL-RAW-STDERR-OTHER | `refuse_rejected_presence`（纯文本加 exit 1）与 `src/cli.rs:3397` init 转换重试警告写原始 stderr | 尚未排期 | open，P2 |
 | RISK-QUAL-FUTURE | proc-macro-error2现有future-incompat提示；旧Clippy exit0不等于无诊断 | 原件保留；任何适用发布门拒绝则STOP独立归属，不allow压制 | open P2 |
 | RISK-QUAL-FLAKE | marker为什么未drain尚未证；fixture边界缺等待有源码证据 | FIX02 已在 v0.30.90 加入有界等待。历史原因仍未证明，不能宣称关闭历史 C2 | open P2 |
 | RISK-QUAL-ADD-LOOSE | 操作日志在命令前用 init_local 写快照，忽略 LIBRA_STORAGE_TYPE。gcs-canary 的 add 仍留下 loose 对象 | 不混入已发布修复。若要消除，另立卡 | open P2 |
@@ -1403,6 +1576,15 @@ R1真实ER03/RECOVERY PASS、H0/VERDICT FAIL（sessionbb82411c-1e59-4e52-a7f1-93
 | R2 | ER03/H0恢复候选 | FAIL | 原三P1已闭；新终态证据/被测树P1 | R3前滚修订，未执行产品窗口 | session e9f0e17d-07b4-40d8-9098-3f2a6e68c857；output 92b3745fc0f02790221e06d6db9f80ce56acab39d945378cfeeb23cab6e6c5ba；H0 PASS |
 | R3 | ER03/H0终止链候选 | FAIL | 终态ER05收据无落点 | R4闭合，原FAIL不改 | session 82ca0f53-d8f6-4148-af66-13721b381b95；output 8f15fea4fd997f6157f3a82d323b286a9838b91fe8ef5e960a05be1baaa9876b；H0 PASS |
 | R4 | ER03/H0最终恢复方案 | PASS | 无 | root具名逐项处置如下；最终事实字节待DOCS-ER05/H0实审 | session 67756716-0e46-4d90-bf70-fd23dff6b918；output 48f93079f925f4129fa9523b78a5cf2bae123e9aa4fab890be11b9b15dd793a2；manifest 925901de4eac79a2d4a1e12540bfff0bd24417c42158a9606875041ff7b222ed |
+| 2026-10-28 R1 | DOC-LTR-03 VER-2 与 FIX-LTR-06 ER-03 | FAIL | P1×5（旧标签被替换、两处事实不符、缺原件、结构化警告去向与 0→9 未声明、文档写集不全） | R2 逐项修订 | session 69c4e992-7764-4b7a-b5c1-b8225cb77266；output SHA256 b6383160cad0ace24af8c46285aec78d2254bc573c4eca659a43e04b3b07a8a2；仓外 review-R1/ |
+| 2026-10-28 R2 | 同上，另审用户 F2 门决定的落地 | DOCS FAIL；ER03 PASS；F2_GATE_EXECUTION PASS | P1×2（二进制对应未限定到 db331cd、三处事实缺原件） | R3 修订：补原件、限定说法；P2-1 GATE 行补当日接受发布事实、P2-2 补审查日志、P2-3 关闭审查输入与键、P2-4 status 承诺、P2-5 退出码迁移、P2-6 用例点名、P2-7 发布范围、P2-8 FIX05 缺口具名；P2-9 为审查后新增的仓外候选文件，不视为已准入 | session c4c62348-a826-406a-b8ee-a80314315035；output SHA256 ac5e78b1f0a7b9822dc88648850fe9e8ef0148946277250c990b9ae54ac01cfc；仓外 review-R2/ |
+| 2026-10-28 R3 | 同上 | DOCS FAIL；ER03 FAIL；F2_GATE_EXECUTION PASS；R2 的 P1 2/2 关闭 | P1×2（AC-7 在全局库不可读时不可达、条件写集触发不可判定；观察清单计数 16 应为 18） | R4 修订：status 改为无条件写集并在模式分发前预解析，AC-7 改用 `LIBRA_STORAGE_TYPE=local`；计数改正；P2-1 AC-3 加 status 例外、P2-3 用例改名、P2-4 日志指针泛化、P2-5 时间改为 06:36:00、P2-6 补命令出处、P2-7 审计表与文档影响同步；P2-2 模式覆盖与 VER-1 单测说明部分处置 | session 80ddb243-566b-4f3e-baec-efeb3f9ba6ea；output SHA256 e076bfa809c34959607bdf37a9c2caaeaf06cfbf326198894c100a02a54f2a3e；仓外 review-R3/ |
+| 2026-10-28 R4 | 同上 | DOCS PASS；ER03 FAIL；F2_GATE_EXECUTION PASS；R3 的 P1 2/2 关闭 | P1×1（无条件预解析改变文本模式与无提交/缓存命中路径，超出行为轴） | R5 修订：预解析只在结构化输出时进行并丢弃返回值；AC-7 覆盖无提交与缓存新鲜的 `--cached`，加文本不变量用例；性能说明改正；status「配置解析从不告警」句与注释同改；`--scan`/`--check-dirty` 具名 RISK-QUAL-STATUS-MODES；P2-3 VER-1 与 VER-3 说法统一、P2-5 命令出处改写为执行器记录、P2-6 日志行序改正、P2-7 R5 冻结清单补回 9 份原件 | session 6637130a-a4be-47d6-98ec-156a4871d7f5；output SHA256 cd1b6b19291de63383da77a53be82b4eb98b3529b04026f17541473ebb898c90；仓外 review-R4/ |
+| 2026-10-28 R5 | 同上 | PASS（DOCS、ER03、F2_GATE_EXECUTION 均 PASS）；R4 的 P1 1/1 关闭 | P0/P1=0；P2×5（status 文本模式例外的两句文档、`--cached` 未锁定新鲜缓存、用例计数、repoid 写入副作用说明、审查日志补项） | P2 全部在 R6 前修订：写集补两句 status 文档、`--cached` 断言 `freshness` 为 `cached`、计数改正、Description 补 repoid、R3/R4 行补齐 | session 35c7cfc8-df4f-446e-b006-fa2c2ce54918；output SHA256 42366a851dc936d9cabee3fda6d66406551f269db9d50845996c6ae5ebb4d6f6；仓外 review-R5/ |
+| 2026-10-28 R6 | R5→R6 的 P2 修订及全部既有结论 | PASS（DOCS、ER03_FIX_LTR_06、F2_GATE_EXECUTION 均 PASS；R5 P2 5/5 处置） | P0/P1=0；P2×2：写集新增句「无提交或缓存命中时不输出」过宽（配置了 upstream 的缓存命中仍会懒打开存储）、Description「写入该文件」应为本仓 `libra.db` 的配置键 | 具名接受，owner Claude执行Agent：两处措辞在 FIX-LTR-06 实施时于卡片与 status 文档改正，由 FIX-LTR-06 自身 ER-05 核对；本行是该审查之后唯一追加的收据，审查器未读过本行 | session 2a87b009-d469-4c56-b097-ed7e2466cfc6；output SHA256 e6249415ba74e5e386631f203c6e26f260dad41b4e2fa01573910532169c9c88；input manifest SHA256 81f8c114f03f22f0f7bd3f953b22606b0ec563e2136ef289007c889f05790de5；结束 2026-10-28T07:15:22.693280826Z；仓外 review-R6/ |
+| 2026-10-28 R7 | DOC-LTR-03 增量重审（快进到 8abdcf7、R6 收据、8abdcf7 事实句、zh-CN fetch 说法改正） | FAIL | P1×2（8abdcf7 时间写作 06:07:24Z；授权、源锚点、整合范围等当前状态未更新） | R8 修订 | session ec3937bd-ea36-4176-aa17-e8764647a513；output SHA256 8c6d8b9cc2bcc55082f3019692b37b79dbe565c365f200962cddfe9f2323a61b；input manifest SHA256 4daa424affac2b1cdd68b371d5dfcbd357dcf8b801fa82000f7a7be5d3454b80；结束 2026-10-28T09:09:05.885947370Z；仓外 review-R7/（此前一次 R7 因执行器自查中止、无结论，见 review-R7-aborted/） |
+| 2026-10-28 R8 | 同上第二轮 | FAIL；R7 的 P1 2/2 关闭 | P1×1（plan-status 索引前缀把 06:20 时的 main 写成 29eaa97，与 8abdcf7 06:07:23Z 已在远端 main 矛盾） | R9 修订：前缀改为本地 main 先后并更新为当前状态；squash 推断改为「squash 或 rebase」；R7/R8 入日志 | session 182461cc-3244-4e65-a02f-758fe23153a2；output SHA256 cee6686138de843960bf3601cadd25205cf9149b9220bdc4d081f7513fc1acfc；input manifest SHA256 fd02f371f954a2ac88338d20e8acfe1382bb60752d3b081b1c24d4edb1bec0ac；结束 2026-10-28T09:16:02.673795018Z；仓外 review-R8/ |
+| 2026-10-28 R9 | 同上第三轮 | PASS（REQUAL、DOCS 均 PASS）；R8 的 P1 1/1 关闭 | P0/P1=0；P2×3：plan-status 前缀「06:07:23Z 已在远端 main」宜用 merged_at 06:07:24Z；R9 收据行的逐字节核对须留存；plan-20261015 前缀为 06:20 快照（标时，非错误） | 具名接受，owner Claude执行Agent：第 1、3 项下次改行时处理，第 2 项已留存 `doc-ltr03/receipt-append-check.json`；本行是该审查之后唯一追加的收据，审查器未读过本行 | session 469c1dbc-c449-49fd-9bb2-f9ce548be38b；output SHA256 a4a2fd63c1f93695681de1219c2579eb426f118f45574aa39a5f08ce908db962；input manifest SHA256 ff35d342158d855a1692d245d149fa93a1303cdb5fa4325c543ec28634b520ee；结束 2026-10-28T09:20:39.062144241Z；仓外 review-R9/ |
 
 R2实际ER03 FAIL/H0 PASS，session e9f0e17d-07b4-40d8-9098-3f2a6e68c857，output SHA256 92b3745fc0f02790221e06d6db9f80ce56acab39d945378cfeeb23cab6e6c5ba；原三P1已闭，新的终态证据/被测树矛盾由本轮预登记终止链修订。**R3时点快照：** 当时R3尚待实际审查；后来R3 FAIL与R4 PASS见实际日志，不倒改原结论。P2-7已实际核GitHub上游存在旧plan-20261015（blob bfcf4e20aff8289dce9c7a0889e5ebb9ddb926f9）；不能因此认为含当前本地治理。新计划改用纯文本说明原计划；发布clone仍须自身链接核验。
 

@@ -60,6 +60,14 @@ cargo build
 # Run full test suite (L1 only by default; L2/L3 auto-skip when env vars are unset)
 cargo test --all
 
+# Local accelerated full suite. Every `cargo blaze` test command, focused or
+# full, must export both variables. ra-jit starts the test binary itself after
+# `cargo test --no-run` and does not apply `.cargo/config.toml` `[env]`.
+# 33554432 is 32 MiB. 1.99.0 is the rustc this ra-jit accelerates.
+# See docs/development/integration/integration-test-plan.md section 3.4.
+env RUST_MIN_STACK=33554432 RUSTUP_TOOLCHAIN=1.99.0 \
+  bash -c 'set -a; source .env.test; set +a; exec cargo blaze test --all'
+
 # Faster full suite via cargo-nextest (one process per test; external-resource
 # mutual exclusion comes from the generated .config/nextest.toml — regenerate
 # with `sh tests/NEXTEST_GROUPS.sh` after touching tests/SERIAL_REGISTRY.tsv).
@@ -73,9 +81,11 @@ cargo nextest run --all
 # to a directory on durable media (system /tmp is wiped on reboot). This is a
 # plan-driver convention only; nothing in-tree reads the variable.
 
-# .cargo/config.toml sets RUST_MIN_STACK=16 MiB for every cargo-launched process
-# (debug test binaries overflow the 2 MiB default); the CLI itself runs on a
-# 32 MiB thread (src/main.rs). It also sets LIBSQLITE3_FLAGS to build the
+# .cargo/config.toml sets RUST_MIN_STACK=32 MiB (33554432) for every
+# cargo-launched process (debug test binaries overflow the 2 MiB default).
+# The CLI itself runs on a 32 MiB thread (src/main.rs). `cargo blaze test`
+# must export the same value; see integration-test-plan.md section 3.4.
+# It also sets LIBSQLITE3_FLAGS to build the
 # bundled SQLite with SQLITE_DEFAULT_MEMSTATUS=0 (memory statistics take a
 # process-wide mutex in every allocation, which convoys in-process parallel
 # tests); changing it recompiles libsqlite3-sys and everything above it.

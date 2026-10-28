@@ -39,6 +39,7 @@ cargo test --features test-live-agent --test agent_live_gate_test -- --test-thre
 1. `cargo test --features A,B --test X --test Y` 的 features 是 union——不要把不需要某 feature 的测试和需要的合并到一条命令，否则前者也会被错误地带上 feature 编译。
 2. `set -a; source .env.test; set +a` 会把密钥导出到当前 shell——后续工具/日志/截图都可能泄密。优先 `env $(grep -v '^#' .env.test | xargs) cargo test ...`。
 3. 默认所有 wave 都加 `--test-threads=1`。当前仓库 64 个测试带 `#[serial_test::serial]`，并发会触发竞态。
+4. 每次 `cargo blaze test` 都必须带 `RUST_MIN_STACK=33554432`（32 MiB）和 `RUSTUP_TOOLCHAIN=1.99.0`。见 §3.4。只写 `cargo blaze test` 时，ra-jit 启动的测试进程落回 2 MiB 默认栈。
 
 **改完代码该跑哪些 wave**：见 §3.3 Path → Wave 表。
 **review/handoff 协议**：见 §9 PR / Review 协议。
@@ -178,6 +179,25 @@ env $(grep -v '^#' .env.test | xargs) cargo test ...
 
 # 备用（注意：会把密钥导入当前 shell，跑完用 `unset` 清掉）：
 set -a; source .env.test; set +a
+```
+
+### 3.4 本机 `cargo blaze test`
+
+每次用 blaze 跑测试都使用下面的前缀，全量和单个测试一样。当前安装的 `cargo blaze` 是 ra-jit：它先执行 `cargo test --no-run`，再自己启动测试二进制，不读取 `.cargo/config.toml` 的 `[env]`。栈下限必须出现在 blaze 进程自己的环境里，libtest 才会按它创建测试线程。
+
+- `RUST_MIN_STACK=33554432`：32 MiB。不设置时新线程是 2 MiB，调试版异步帧会栈溢出并中止整个测试进程。`command::ls_remote::pkt_line_boundary_tests::pkt_line_empty_discovery_http_tail_maps_net_002` 在 2 MiB 下约 3 秒中止，在 16 MiB 及以上通过。
+- `RUSTUP_TOOLCHAIN=1.99.0`：这套 ra-jit 只对 rustc 1.99.0（`b940084d7`，2026-09-28）做守护进程加速。默认工具链不是 1.99.0 时，省略它会退回普通 cargo。
+
+`.cargo/config.toml` 里的 `RUST_MIN_STACK` 同样是 `33554432`，只对 cargo 自己启动的进程生效。CI 阻断门仍是 `cargo test --all` / `cargo nextest run --all`。
+
+```bash
+# 全量 L1。L2/L3 仍由 .env.test 决定跳过还是执行。
+env RUST_MIN_STACK=33554432 RUSTUP_TOOLCHAIN=1.99.0 \
+  bash -c 'set -a; source .env.test; set +a; exec cargo blaze test --all'
+
+# 单个测试。过滤器换掉即可，两个变量不能省。
+env RUST_MIN_STACK=33554432 RUSTUP_TOOLCHAIN=1.99.0 \
+  cargo blaze test --lib <filter> -- --exact --test-threads=1
 ```
 
 ### 3.3 Path → Wave 映射

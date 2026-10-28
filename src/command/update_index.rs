@@ -244,7 +244,8 @@ pub async fn execute_safe(args: UpdateIndexArgs, output: &OutputConfig) -> CliRe
             Op::Refresh { switches } => {
                 // `--really-refresh` ≡ `--refresh`: it only re-checks git's
                 // assume-unchanged (CE_VALID) entries, which Libra does not
-                // support (DEFER-02).
+                // support (DEFER-02). Both drop a leftover CE_VALID bit from
+                // every stage-0 entry they visit (issues/637).
                 let options = refresh::RefreshOptions {
                     quiet: switches.quiet,
                     ignore_missing: switches.ignore_missing,

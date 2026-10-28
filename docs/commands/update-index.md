@@ -82,7 +82,7 @@ agent cleanup fail closed while repair remains pending. With
 | `--add --remove` | Both permissions at once: stage what exists, drop what is gone. | `libra update-index --add --remove a.txt gone.txt` |
 | `--cacheinfo <mode>,<object>,<path>` | Register an entry from an object id (repeatable). | `libra update-index --cacheinfo 100644,<oid>,dir/f.txt` |
 | `--refresh` | Re-stat the index against the working tree: stat-only drift is refreshed silently; a modified or missing file prints `<path>: needs update` and exits 1. Unmerged entries print `<path>: needs merge`. Options `-q` (suppress output and the exit code), `--ignore-missing`, and `--unmerged` must precede `--refresh`. | `libra update-index --refresh` |
-| `--really-refresh` | Same as `--refresh` (Libra has no assume-unchanged bit). | `libra update-index --really-refresh` |
+| `--really-refresh` | Same as `--refresh` (Libra has no assume-unchanged bit). Both clear a leftover assume-unchanged (`CE_VALID`) bit; see [Legacy assume-unchanged bits](#legacy-assume-unchanged-bits). | `libra update-index --really-refresh` |
 | `--chmod=(+\|-)-x` | Flip the executable bit on the positional (and `--stdin`) paths that follow it until overridden. The working-tree file is untouched. | `libra update-index --chmod=+x a.sh` |
 | `--info-only` | Record object ids without storing the blobs through the staging path. | `libra update-index --add --info-only new.txt` |
 | `--verbose` | Report each action on stdout: `add '<path>'`, `remove '<path>'`, `chmod +x '<path>'` / `chmod -x '<path>'`. | `libra update-index --add --verbose a.txt` |
@@ -154,6 +154,29 @@ libra update-index --add link-to-target
 
 Deferred (not exposed): `--assume-unchanged`/`--no-assume-unchanged`,
 `--unresolve`, `--again`, and other Git flags.
+
+### Legacy assume-unchanged bits
+
+Libra built with git-internal 0.10.3 or earlier (Libra releases before the
+issues/637 fix) wrote Git's assume-unchanged bit (`CE_VALID`, `0x8000`) on
+every index entry it created, although Libra has no assume-unchanged
+semantics. Libra itself ignores the bit, but Git reading such an index skips
+the working-tree `stat` for those entries and misses edits and deletions.
+
+Entries Libra creates now never carry the bit, and an entry that Libra
+replaces (for example by `add` of a changed file) loses it. An existing index
+keeps the bit on untouched entries after loading: reading never rewrites
+flags. To normalize a whole index, run:
+
+```bash
+libra update-index --refresh      # or --really-refresh
+```
+
+Unlike Git, whose `--refresh` keeps `CE_VALID`, Libra's refresh clears the bit
+from every stage-0 entry it examines, including entries it reports as
+`needs update`, missing or skip-worktree. Unmerged entries (stages 1–3) are
+left unchanged; resolve the conflict and refresh again. `libra add --refresh`
+applies the same clearing to the paths it refreshes.
 
 ### Index v3 and downgrade note
 

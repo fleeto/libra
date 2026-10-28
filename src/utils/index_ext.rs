@@ -107,6 +107,27 @@ pub fn set_skip_worktree(index: &mut Index, path: &str, marked: bool) -> bool {
     true
 }
 
+/// Clear a stale assume-unchanged (`CE_VALID`) bit on the entry at
+/// `(path, stage)` (issues/637). Libra has no assume-unchanged semantics
+/// (DEFER-02), and git-internal <= 0.10.3 wrote the bit on every new entry, so
+/// any `CE_VALID` in a Libra index is a leftover that would make Git skip the
+/// worktree stat. Everything else on the entry is left untouched. Returns
+/// whether the bit was set.
+pub fn clear_assume_valid(index: &mut Index, path: &str, stage: u8) -> bool {
+    if !index
+        .get(path, stage)
+        .is_some_and(|entry| entry.flags.assume_valid)
+    {
+        return false;
+    }
+    let Some(mut entry) = index.remove(path, stage) else {
+        return false;
+    };
+    entry.flags.assume_valid = false;
+    index.update(entry);
+    true
+}
+
 /// Carry the `skip_worktree` bit from `previous` onto the entries of `rebuilt`
 /// by path (ADR-SW-03's rebuild rule: `intent_to_add` is NOT carried — once a
 /// path has tree content it is no longer intent-to-add). Used by the
@@ -223,5 +244,36 @@ mod tests {
         update_preserving(&mut index, entry("new.txt", 0x33), FlagPreservation::All);
         let new_entry = index.get("new.txt", 0).expect("new entry");
         assert!(!new_entry.flags.skip_worktree && !new_entry.flags.intent_to_add);
+    }
+
+    /// issues/637: git-internal 0.10.4 no longer sets `CE_VALID` on new
+    /// entries, and `clear_assume_valid` drops a leftover bit without touching
+    /// the rest of the entry.
+    #[test]
+    fn clear_assume_valid_drops_only_that_bit() {
+        let _guard = set_hash_kind_for_test(HashKind::Sha1);
+        assert!(
+            !entry("fresh.txt", 0x10).flags.assume_valid,
+            "new entries must not carry CE_VALID"
+        );
+
+        let mut index = Index::new();
+        let mut legacy = entry("s.txt", 0x11);
+        legacy.flags.assume_valid = true;
+        legacy.flags.skip_worktree = true;
+        legacy.mode = 0o100755;
+        index.add(legacy);
+
+        assert!(!clear_assume_valid(&mut index, "missing.txt", 0));
+        assert!(clear_assume_valid(&mut index, "s.txt", 0));
+        let cleared = index.get("s.txt", 0).expect("entry");
+        assert!(!cleared.flags.assume_valid);
+        assert!(cleared.flags.skip_worktree, "other flags stay untouched");
+        assert_eq!(cleared.mode, 0o100755);
+        assert_eq!(cleared.hash, entry("s.txt", 0x11).hash);
+        assert!(
+            !clear_assume_valid(&mut index, "s.txt", 0),
+            "a clean entry reports nothing to clear"
+        );
     }
 }

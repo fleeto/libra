@@ -629,6 +629,13 @@ mod tests {
         );
         let plugin = temp.path().join("libra-hooks.js");
         fs::write(&plugin, &bytes).unwrap();
+        // umask 0002 creates this file group-writable (0664). read_observer
+        // rejects mode bits 0o022, so the success case must clear them.
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            fs::set_permissions(&plugin, fs::Permissions::from_mode(0o600)).unwrap();
+        }
         assert_eq!(read_observer(&plugin).unwrap(), bytes.as_bytes());
         fs::write(&plugin, vec![b'x'; codec::DESCRIPTOR_BYTE_CAP + 1]).unwrap();
         assert!(read_observer(&plugin).is_err());

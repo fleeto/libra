@@ -1570,7 +1570,7 @@ fn normalize_codex_contextual_rollout(
         {
             continue;
         }
-        if !matches!(
+        if !(matches!(
             payload_kind,
             Some(
                 "reasoning"
@@ -1579,7 +1579,7 @@ fn normalize_codex_contextual_rollout(
                     | "function_call_output"
                     | "custom_tool_call_output"
             )
-        ) && !(payload_kind == Some("message")
+        ) || payload_kind == Some("message")
             && payload.get("role").and_then(CanonValue::as_str) == Some("assistant"))
         {
             mark_partial(&mut buckets, current_bucket, &mut partial);

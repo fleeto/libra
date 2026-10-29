@@ -3079,9 +3079,9 @@ fn collect_codex_discovery_candidates(
                 match open_directory_beneath_pinned_directory(&root.directory, &relative) {
                     Ok(directory) => directory,
                     Err(error) => {
-                        if !error
+                        if error
                             .downcast_ref::<std::io::Error>()
-                            .is_some_and(|error| error.kind() == std::io::ErrorKind::NotFound)
+                            .is_none_or(|error| error.kind() != std::io::ErrorKind::NotFound)
                         {
                             incomplete = true;
                         }

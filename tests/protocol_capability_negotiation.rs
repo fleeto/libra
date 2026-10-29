@@ -1520,7 +1520,7 @@ async fn http_fetch_all_reuses_same_pack_and_releases_keep_after_fetch_head() {
         fs::read_dir(&pack_dir)
             .expect("inspect pack pins")
             .map(|entry| entry.expect("pack entry").path())
-            .all(|path| !path.extension().is_some_and(|ext| ext == "keep")),
+            .all(|path| path.extension().is_none_or(|ext| ext != "keep")),
         "successful fetch --all must release its .keep pin"
     );
     server.abort();

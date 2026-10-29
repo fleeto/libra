@@ -304,7 +304,7 @@ other subsystems are folded into the same list (see below):
 | `dirty_cache_stale_fallback` | `cache` | The dirty cache was missing/stale; degraded to a full status |
 | `dirty_cache_concurrent_invalidate` | `cache` | A concurrent writer invalidated the cache mid-read |
 | `dirty_cache_path_unencodable` | `cache` | A non-UTF-8 path could not be stored in the dirty cache; its row was omitted (the full status still reports it) |
-| `repository_preflight` | `config` | A repository-level advisory raised before the command ran (e.g. a pending durable object-index repair) |
+| `repository_preflight` | `config` | A repository-level advisory raised before the command ran, or under `--json`/`--machine` before the status scan (e.g. a pending durable object-index repair, or object storage degrading to local under `LIBRA_STORAGE_TYPE=local`) |
 | `upstream_counts_unavailable` | `metadata` | The upstream ahead/behind counts could not be computed (a commit in either history, or the shallow boundary list, could not be read); the counts are omitted, never guessed |
 
 The `source` column is a frozen enum: `config`, `probe`, `rename_detect`, `worktree`,
@@ -312,21 +312,26 @@ The `source` column is a frozen enum: `config`, `probe`, `rename_detect`, `workt
 warning means candidates may never have been *seen*, while `rename_detect` means they were
 seen but could not be scored. `config` covers repository-level advisories that are not tied to a scan — currently the
 `repository_preflight` row above. Config *resolution* itself never warns: an invalid value
-fails closed instead of degrading.
+fails closed instead of degrading. The one exception is the object-storage degrade, which
+structured status resolves before its scan and reports as `repository_preflight`.
 
 Repository-level preflight advisories from other subsystems (for example a pending durable
 object-index repair, emitted before any command runs) follow the SAME delivery matrix as status
 warnings: printed on stderr in text modes, and carried in `data.warnings[]` as
 `repository_preflight` / `config` under `--json` — where stderr stays clean. That keeps the rule
 exact: exit 9 always corresponds to at least one entry in the structured list, so a `--json`
-consumer never has to read stderr to learn why its exit code changed.
+consumer never has to read stderr to learn why its exit code changed. The object-storage
+degrade is the text-mode exception: there it prints its own `Warning:` line only when status
+lazily opens object storage (for example a full scan with commits, or upstream ahead/behind
+counts) and does not trip `--exit-code-on-warning`.
 
 Human/short/porcelain modes print status warnings as `warning: …` on stderr (even under
 `--quiet`); `--json` carries them in `data.warnings[]` and keeps stderr
 clean on every successful run; the single exception is a non-EPIPE stdout failure while
 emitting the JSON envelope itself, where the pending warnings are flushed to stderr rather
 than silently lost. With the global `--exit-code-on-warning`, a warning exits 9 and takes precedence
-over the `--exit-code` dirty exit 1 in every output mode; a fatal error (128/129) always
+over the `--exit-code` dirty exit 1 in every output mode (the object-storage degrade warning
+counts only under structured output); a fatal error (128/129) always
 wins over both. The full priority is **fatal ≻ 9 (on-warning) ≻ 1 (dirty, including a
 non-empty `io_blocked`) ≻ 0**, resolved by one arbitration path for every output mode.
 

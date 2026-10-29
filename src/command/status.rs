@@ -225,8 +225,10 @@ declare_status_warning_enum! {
     #[non_exhaustive]
     pub enum StatusWarningSource {
         /// Repository-level advisories not tied to a scan — currently
-        /// `repository_preflight`. Config RESOLUTION itself never warns: an
-        /// invalid value fails closed instead of degrading.
+        /// `repository_preflight`, which also carries the object-storage
+        /// degrade that structured status resolves before its scan. Config
+        /// RESOLUTION itself never warns otherwise: an invalid value fails
+        /// closed instead of degrading.
         Config,
         /// The bounded rename-destination worktree probe (§B.3.2). Distinct
         /// from `RenameDetect` on purpose: a truncated probe means "we may
@@ -565,6 +567,17 @@ pub(crate) async fn execute_safe_with_resolution(
         resolution.format.ensure_agrees_with(&args)?;
     }
     let args = args;
+
+    // Under structured output, resolve object storage once before any mode
+    // snapshots the preflight warning buffer. Storage otherwise opens lazily
+    // mid-scan, so a storage degrade warning recorded there would trip
+    // `--exit-code-on-warning` while missing from `data.warnings[]`. A
+    // resolved client lands in the process cache that the scan reuses; a
+    // rejected configuration or lookup error is left for the scan's own
+    // object access to report. Text output keeps the lazy path unchanged.
+    if crate::utils::output::structured_output_active() {
+        let _ = util::try_objects_storage();
+    }
 
     // Dirty-set cache modes (lore.md 1.1). NOTE: only this CLI entry routes
     // them — the legacy `execute_to` writer entry ignores the flags (its

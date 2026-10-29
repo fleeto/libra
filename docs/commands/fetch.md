@@ -79,7 +79,12 @@ same local path. A type other than `s3` or `r2`, including `gcs`, also fails wit
 `LBR-IO-001`. `ClientStorage::init` uses the same rule and does not build a
 writable local backend for an unread type. `LIBRA_STORAGE_TYPE=local` still
 warns and stays local for `ClientStorage::init`. Fetch, pull, and clone
-already reject that exact value.
+already reject that exact value. In text output the unreadable-global-store degrade, the `LIBRA_STORAGE_TYPE=local`
+warning and its empty-bucket warning print a `Warning:` line on stderr and do not trip
+`--exit-code-on-warning`. Under `--json`/`--machine` they never reach stderr:
+the message joins the invocation's warning buffer and `--exit-code-on-warning`
+exits 9 (`LBR-WARN-001`); `status` lists the `local` and empty-bucket warnings
+as `repository_preflight` entries.
 
 ### Prune config defaults (`fetch.prune`, `remote.<name>.prune`)
 

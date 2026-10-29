@@ -1889,9 +1889,54 @@ fn reset_pathspec_from_file_missing_path_errors() {
         &["--json", "reset", "--pathspec-from-file=paths.txt"],
         repo.path(),
     );
-    assert_eq!(out.status.code(), Some(129));
-    let report: serde_json::Value =
-        serde_json::from_slice(&out.stderr).expect("expected stderr JSON in --json mode");
+    assert_eq!(
+        out.status.code(),
+        Some(129),
+        "stdout: {}\nstderr: {}",
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let report: serde_json::Value = serde_json::from_slice(&out.stderr).unwrap_or_else(|error| {
+        panic!(
+            "expected stderr JSON in --json mode ({error}); exit: {:?}\nstdout: {}\nstderr: {}",
+            out.status.code(),
+            String::from_utf8_lossy(&out.stdout),
+            String::from_utf8_lossy(&out.stderr)
+        )
+    });
+    assert_eq!(report["error_code"], "LBR-CLI-003");
+}
+
+/// FIX-LTR-06: an existing but unreadable global config store degrades object
+/// storage to local, and under `--json` that degrade warning must not reach
+/// stderr as text ahead of the error envelope.
+#[test]
+fn reset_json_error_stays_single_document_when_global_store_is_unreadable() {
+    let repo = create_committed_repo_via_cli();
+    let global_db = repo
+        .path()
+        .join(".libra-test-home")
+        .join(".libra")
+        .join("config.db");
+    fs::create_dir_all(global_db.parent().unwrap()).unwrap();
+    fs::write(&global_db, b"not a sqlite database").unwrap();
+    fs::write(repo.path().join("paths.txt"), "nonexistent.txt\n").unwrap();
+    let out = run_libra_command(
+        &["--json", "reset", "--pathspec-from-file=paths.txt"],
+        repo.path(),
+    );
+    assert_eq!(
+        out.status.code(),
+        Some(129),
+        "stderr: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let report: serde_json::Value = serde_json::from_slice(&out.stderr).unwrap_or_else(|error| {
+        panic!(
+            "stderr must be one JSON document ({error}): {}",
+            String::from_utf8_lossy(&out.stderr)
+        )
+    });
     assert_eq!(report["error_code"], "LBR-CLI-003");
 }
 

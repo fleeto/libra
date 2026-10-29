@@ -1381,6 +1381,21 @@ impl std::fmt::Display for GlobalConfigSchemaFuture {
     }
 }
 
+/// Report a storage-configuration degrade (the backend fell back to local
+/// storage). Text output keeps the historical `Warning: ...` stderr line
+/// byte-for-byte and does not trip `--exit-code-on-warning`. A structured
+/// (`--json`/`--machine`) invocation must keep stderr a single JSON document,
+/// so the message joins the invocation's warning buffer instead, the same
+/// channel [`crate::utils::error::emit_warning`] uses for the global
+/// future-schema degrade.
+fn emit_storage_degrade_warning(message: String) {
+    if crate::utils::output::structured_output_active() {
+        crate::utils::output::record_warning_message(message);
+    } else {
+        eprintln!("Warning: {message}");
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum StorageConfigResolutionError {
     GlobalSchemaFuture(GlobalConfigSchemaFuture),
@@ -1695,15 +1710,17 @@ impl ClientStorage {
         Self::ready(storage, base_path)
     }
 
-    /// Emit a stderr warning and degrade to `LocalStorage` when a storage env
-    /// var cannot be resolved. Centralised so every fallback prints the same
-    /// message shape and ensures CLI commands keep working when remote storage
-    /// is broken — the `Warning:` prefix mirrors the recovered, non-fatal
-    /// nature of the degrade path so users do not mistake it for a fatal
-    /// command failure (e.g. a `~/.libra/config.db` whose schema is newer than
-    /// this binary supports still surfaces a chain like "Repository database
-    /// schema version ... is newer than this Libra binary supports", but the
-    /// clone/init operation itself still succeeds via `LocalStorage`).
+    /// Report a degrade warning (a `Warning:` stderr line in text output, the
+    /// invocation's warning buffer under `--json`/`--machine`) and degrade to
+    /// `LocalStorage` when a storage env var cannot be resolved. Centralised so
+    /// every fallback reports the same message shape and CLI commands keep
+    /// working when remote storage is broken; in text output the `Warning:`
+    /// prefix marks the recovered, non-fatal nature of the degrade path so
+    /// users do not mistake it for a fatal command failure (e.g. a
+    /// `~/.libra/config.db` whose schema is newer than this binary supports
+    /// still surfaces a chain like "Repository database schema version ... is
+    /// newer than this Libra binary supports", but the clone/init operation
+    /// itself still succeeds via `LocalStorage`).
     fn storage_config_resolution_fallback(
         base_path: &Path,
         name: &str,
@@ -1716,10 +1733,10 @@ impl ClientStorage {
             );
             return Arc::new(LocalStorage::new_with_alternates(base_path.to_path_buf()));
         }
-        eprintln!(
-            "Warning: failed to resolve {}: {}. Falling back to local storage.",
+        emit_storage_degrade_warning(format!(
+            "failed to resolve {}: {}. Falling back to local storage.",
             name, error
-        );
+        ));
         Arc::new(LocalStorage::new_with_alternates(base_path.to_path_buf()))
     }
 
@@ -1895,12 +1912,14 @@ impl ClientStorage {
             }
         };
         if bucket.is_empty() {
-            eprintln!(
-                "Warning: LIBRA_STORAGE_BUCKET cannot be empty. Falling back to local storage."
+            emit_storage_degrade_warning(
+                "LIBRA_STORAGE_BUCKET cannot be empty. Falling back to local storage.".to_string(),
             );
             return Self::local_configured_client(base_path);
         }
-        eprintln!("Warning: Unsupported storage type: local. Falling back to local storage.");
+        emit_storage_degrade_warning(
+            "Unsupported storage type: local. Falling back to local storage.".to_string(),
+        );
         Self::local_configured_client(base_path)
     }
 

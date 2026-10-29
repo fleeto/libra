@@ -717,8 +717,8 @@ fn try_get_paths_full_with_storage_lookup(
     loop {
         let metadata_boundary = path.file_name() == Some(OsStr::new(ROOT_DIR))
             && !is_global_libra_home(&path)
-            && (path != orig || is_valid_storage_dir(&path))
-            && !(!is_valid_storage_dir(&path) && is_valid_storage_dir(&path.join(ROOT_DIR)))
+            && (is_valid_storage_dir(&path)
+                || path != orig && !is_valid_storage_dir(&path.join(ROOT_DIR)))
             || path != orig && is_terminal_common_storage(&path);
         let managed_boundary = path.file_name() == Some(OsStr::new("worktree"))
             && path.parent().is_some_and(|parent| {

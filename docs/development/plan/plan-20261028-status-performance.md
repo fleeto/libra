@@ -68,7 +68,7 @@ Phase 0 基线：SP-00；Phase 1 正确性与 stat：SP-01..03；Phase 2 核心�
 
 | 卡 | 优先级 | 选择 | Issue | Lifecycle / Acceptance |
 |---|---|---|---|---|
-| SP-00 冻结 status 性能基线与修正审计口径 | P1 | 必选验收前置 | [#639](https://github.com/libra-tools/libra/issues/639) | done / complete |
+| SP-00 冻结 status 性能基线与修正审计口径 | P1 | 必选验收前置 | [#639](https://github.com/libra-tools/libra/issues/639) | in-progress / locally-accepted |
 | SP-01 status 递归子树加载返回错误而非 panic | P1 | 必选正确性 | [#640](https://github.com/libra-tools/libra/issues/640) | pending / 空 |
 | SP-02 restore 区分 decoded size 与对象加载内存成本 | P1 | 必选正确性 | [#641](https://github.com/libra-tools/libra/issues/641) | pending / 空 |
 | SP-03 materialization 后安全写入真实 index stat | P1 | 本轮核心提速 | [#642](https://github.com/libra-tools/libra/issues/642) | pending / 空 |
@@ -85,7 +85,7 @@ Phase 0 基线：SP-00；Phase 1 正确性与 stat：SP-01..03；Phase 2 核心�
 
 **Task type:** audit
 
-**Lifecycle / Acceptance:** done / complete
+**Lifecycle / Acceptance:** in-progress / locally-accepted
 
 **Priority / Selection:** P1；必选验收前置
 
@@ -796,7 +796,7 @@ Phase 0 基线：SP-00；Phase 1 正确性与 stat：SP-01..03；Phase 2 核心�
 
 ### 基线与实施证据汇总
 
-实现卡仍全部 not-run；没有实施 PASS、独立审查 PASS、网站/发布/CI 完成证据。SP-00 已执行 release 构建与下述基线采样，`cargo +nightly fmt --all --check` 通过；Clippy 和全量测试不在本 audit 卡当前触发范围内，本轮未运行。
+实现卡仍全部 not-run；没有实施 PASS、独立审查 PASS、网站/发布/CI 完成证据。SP-00 已执行 release 构建与下述基线采样，`cargo +nightly fmt --all --check` 通过；该历史采样轮未运行 Clippy 和全量测试。Clippy 仍是推送前必跑门；全量测试按 audit 卡的 N/A 触发条件不在本卡执行，C/D 覆盖仍登记为 SP-01。
 
 #### SP-00 冻结协议与环境
 
@@ -892,3 +892,5 @@ DEP-SP-DATA 按用户指定采用公开标准仓库 [`libra-tools/libra@d0a5c28`
 | 2026-10-28 10:19:45 UTC | 用户要求以指定 Git 与当前 Libra 直接对照；SP-00 重开并完成 16 场景、800 次调用与 640 次正式计时，双方语义、退出与索引断言全过，v2 排序差异以规范化记录集合处理 | SP-00 本地 done / complete；未提交、未推送，Issue #639 保持 open |
 
 | 2026-10-28 12:30:24 UTC | 用户指定 `libra-tools/libra@d0a5c28a6b236421c14a38339b592fe37137585e` 为标准仓库；Git/Libra 分别完整克隆并检出该提交，在 2,125 个跟踪文件的真实工作区上重跑 16 场景，最终完整矩阵 800 次调用、640 次正式计时及语义/退出/索引断言全过；两个 PowerShell 文件的 CRLF/LF 检出差异已披露，旧合成仓库数据仅保留为历史 | SP-00 本地 done / complete；未提交、未推送，Issue #639 保持 open |
+
+| 2026-10-29 | #639 收口复核：在 `codex/SP-00` 以未提交合并方式合入 main `1e5310c24ef4eaa07575256482490705181c360a`（含 PR #654），保留其全部生产/测试修复；`plan-status.md` 冲突保留本卡基线行及 main 其它最新条目。16 格唯一组合、800/640 样本数及展示精度下倍率一致性检查通过；历史采样原件未读取、基准未重跑，原采样结果按 PR #652 记录引用，非本轮独立实测。修正“audit 可免 Clippy”表述及过早 complete：本卡为 in-progress / locally-accepted，SP-01 的 C/D 覆盖仍待；本轮 fmt 与合并后 `cargo clippy --all-targets --all-features --offline -- -D warnings` 均 exit 0（Clippy 58.85s）；依赖 `block 0.1.6` 的 future-incompat 提示保留，不称零警告。首轮在合并完成前读到旧源码的 Clippy exit 101，仅作失败历史，不用于判断 #654；本轮未启动 nextest。 | PR #652 已提交/推送、仍 open；本轮修复尚未提交/推送，Issue 未关闭；不发布版本、不扩大到 SP-01 |

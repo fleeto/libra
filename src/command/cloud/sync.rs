@@ -15,6 +15,15 @@ pub(crate) const CLOUD_CAPTURE_KIND_ALLOWLIST: &[&str] = &[
 ];
 
 async fn unsupported_capture_kinds() -> CloudResult<Vec<String>> {
+    Ok(local_capture_kinds()
+        .await?
+        .into_iter()
+        .filter(|kind| !CLOUD_CAPTURE_KIND_ALLOWLIST.contains(&kind.as_str()))
+        .collect())
+}
+
+/// Distinct local `agent_session.agent_kind` values, sorted.
+async fn local_capture_kinds() -> CloudResult<Vec<String>> {
     use sea_orm::Statement;
 
     let db_conn = db::get_db_conn_instance().await;
@@ -43,21 +52,69 @@ async fn unsupported_capture_kinds() -> CloudResult<Vec<String>> {
                 "read agent_session.agent_kind before cloud sync: {error}"
             ))
         })?;
-    let mut rejected = Vec::new();
-    for row in rows {
-        let kind = row.try_get_by::<String, _>("agent_kind").map_err(|error| {
-            CloudError::Generic(format!(
-                "decode agent_session.agent_kind before cloud sync: {error}"
-            ))
-        })?;
-        if !CLOUD_CAPTURE_KIND_ALLOWLIST
-            .iter()
-            .any(|allowed| *allowed == kind)
-        {
-            rejected.push(kind);
+    rows.into_iter()
+        .map(|row| {
+            row.try_get_by::<String, _>("agent_kind").map_err(|error| {
+                CloudError::Generic(format!(
+                    "decode agent_session.agent_kind before cloud sync: {error}"
+                ))
+            })
+        })
+        .collect()
+}
+
+/// PI-18: refuse when an existing D1 capture table's `agent_kind` CHECK would
+/// reject a local kind. D1 tables are never rebuilt, so a table created before
+/// GK-01 still lacks `grok`; without this check the objects upload first and
+/// the session mirror fails afterwards, leaving a partial backup. Only
+/// read-only `sqlite_master` queries run here. Every existing table is probed
+/// even without local sessions, and a CHECK that cannot be read (including a
+/// failed probe) refuses the sync.
+pub(super) async fn refuse_kinds_rejected_by_remote_check(
+    d1_client: &D1Client,
+    local_kinds: &[String],
+) -> CloudResult<()> {
+    use crate::utils::d1_client::{REMOTE_CAPTURE_KIND_TABLES, RemoteAgentKindCheck};
+
+    for table in REMOTE_CAPTURE_KIND_TABLES {
+        let check = match d1_client.agent_kind_check(table).await {
+            Ok(check) => check,
+            Err(error) => {
+                // The D1 message may quote remote text; only the code is shown.
+                tracing::warn!(
+                    d1_operation = "read remote agent_kind CHECK",
+                    d1_error_code = error.code,
+                    "cloud D1 request failed"
+                );
+                return Err(CloudError::RemoteCaptureKindRefused(format!(
+                    "cloud sync refused before any remote write: the agent_kind CHECK of D1 table {table} could not be read (D1 code {})",
+                    error.code
+                )));
+            }
+        };
+        match check {
+            RemoteAgentKindCheck::Absent => {}
+            RemoteAgentKindCheck::Allowed(allowed) => {
+                let rejected: Vec<&str> = local_kinds
+                    .iter()
+                    .filter(|kind| !allowed.contains(kind))
+                    .map(String::as_str)
+                    .collect();
+                if !rejected.is_empty() {
+                    return Err(CloudError::RemoteCaptureKindRefused(format!(
+                        "cloud sync refused before any remote write: existing D1 table {table} does not accept agent_kind {}",
+                        rejected.join(", ")
+                    )));
+                }
+            }
+            RemoteAgentKindCheck::Unparseable => {
+                return Err(CloudError::RemoteCaptureKindRefused(format!(
+                    "cloud sync refused before any remote write: the agent_kind CHECK of existing D1 table {table} could not be read"
+                )));
+            }
         }
     }
-    Ok(rejected)
+    Ok(())
 }
 
 /// Phase 1 helper extracted from `execute_sync`.
@@ -103,6 +160,22 @@ pub(crate) async fn run_cloud_sync(
     let d1_client = D1Client::from_env()
         .await
         .map_err(|error| cloud_d1_failure("initialize cloud client", &error))?;
+
+    run_cloud_sync_with_clients(ctx, progress, d1_client, None).await
+}
+
+/// Remote phases of [`run_cloud_sync`] with an injected D1 client and, in
+/// tests, an injected R2 store (`None` builds R2 from the environment). The
+/// first remote request is the read-only `agent_kind` CHECK probe (PI-18), so
+/// a refusal happens before any remote write.
+pub(super) async fn run_cloud_sync_with_clients(
+    ctx: CloudSyncContext,
+    progress: &dyn CloudSyncProgress,
+    d1_client: D1Client,
+    r2_override: Option<RemoteStorage>,
+) -> CloudResult<CloudSyncReport> {
+    let local_kinds = local_capture_kinds().await?;
+    refuse_kinds_rejected_by_remote_check(&d1_client, &local_kinds).await?;
 
     // Ensure D1 table exists before any operations.
     d1_client
@@ -175,7 +248,10 @@ pub(crate) async fn run_cloud_sync(
         .map_err(|e| CloudError::Generic(format!("Database query failed: {}", e)))?;
 
     // Initialize R2 storage.
-    let r2_storage = create_r2_storage(&repo_id).await?;
+    let r2_storage = match r2_override {
+        Some(r2_storage) => r2_storage,
+        None => create_r2_storage(&repo_id).await?,
+    };
 
     let total_unsynced = unsynced_objects.len();
 

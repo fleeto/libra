@@ -256,6 +256,121 @@ pub struct D1Error {
     pub message: String,
 }
 
+/// Remote capture tables whose `agent_kind` CHECK `cloud sync` probes before
+/// its first remote write (PI-18).
+pub const REMOTE_CAPTURE_KIND_TABLES: &[&str] = &["agent_session", "agent_capture_session_v2"];
+
+/// What [`D1Client::agent_kind_check`] found for one remote capture table.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum RemoteAgentKindCheck {
+    /// The table does not exist yet; sync creates it with today's DDL.
+    Absent,
+    /// The values the existing table's `agent_kind` CHECK accepts.
+    Allowed(Vec<String>),
+    /// The table exists but its `agent_kind` CHECK could not be read.
+    Unparseable,
+}
+
+/// Parse the value list of the `agent_kind IN (...)` CHECK in a table's DDL.
+///
+/// Accepts only the shape today's DDL uses: the identifier `agent_kind`
+/// appears exactly twice, as the column name and as the sole operand of
+/// `CHECK(agent_kind IN (<single-quoted literals>))`, the CHECK closes right
+/// after the list, and it is the table's only CHECK. Any other CHECK (even
+/// `CHECK(0)`) or predicate on `agent_kind` could reject a listed kind, so
+/// every other shape returns `None` and fails closed.
+pub fn parse_agent_kind_check(sql: &str) -> Option<Vec<String>> {
+    let lower = sql.to_ascii_lowercase();
+    if identifier_spans(&lower, "check").len() != 1 {
+        return None;
+    }
+    let [_column, (operand_start, operand_end)] = identifier_spans(&lower, "agent_kind")[..] else {
+        return None;
+    };
+    let before = lower[..operand_start]
+        .trim_end()
+        .strip_suffix('(')?
+        .trim_end();
+    let check_start = before.strip_suffix("check")?.len();
+    if check_start > 0 && is_identifier_byte(lower.as_bytes()[check_start - 1]) {
+        return None;
+    }
+    let after_in = lower[operand_end..].trim_start().strip_prefix("in")?;
+    let list = after_in.trim_start().strip_prefix('(')?;
+    let list_start = sql.len() - list.len();
+    let (values, consumed) = parse_quoted_list(&sql[list_start..])?;
+    if values.is_empty() || !sql[list_start + consumed..].trim_start().starts_with(')') {
+        return None;
+    }
+    Some(values)
+}
+
+fn is_identifier_byte(byte: u8) -> bool {
+    byte.is_ascii_alphanumeric() || byte == b'_' || byte >= 0x80
+}
+
+/// Byte ranges of every standalone `name` word in lowercased DDL, widened
+/// over a surrounding `"..."`, `` `...` `` or `[...]` quote pair.
+fn identifier_spans(lower: &str, name: &str) -> Vec<(usize, usize)> {
+    let bytes = lower.as_bytes();
+    let mut spans = Vec::new();
+    let mut search_from = 0;
+    while let Some(offset) = lower[search_from..].find(name) {
+        let start = search_from + offset;
+        let end = start + name.len();
+        search_from = end;
+        if (start > 0 && is_identifier_byte(bytes[start - 1]))
+            || bytes.get(end).is_some_and(|byte| is_identifier_byte(*byte))
+        {
+            continue;
+        }
+        let quoted = matches!(
+            (
+                start.checked_sub(1).map(|index| bytes[index]),
+                bytes.get(end)
+            ),
+            (Some(b'"'), Some(b'"')) | (Some(b'`'), Some(b'`')) | (Some(b'['), Some(b']'))
+        );
+        spans.push(if quoted {
+            (start - 1, end + 1)
+        } else {
+            (start, end)
+        });
+    }
+    spans
+}
+
+/// Parse `'a', 'b')` (the text after an opening parenthesis) into its values
+/// and the byte length consumed up to the closing parenthesis.
+fn parse_quoted_list(text: &str) -> Option<(Vec<String>, usize)> {
+    let mut values = Vec::new();
+    let mut chars = text.char_indices().peekable();
+    loop {
+        while chars.next_if(|(_, c)| c.is_whitespace()).is_some() {}
+        if chars.next()?.1 != '\'' {
+            return None;
+        }
+        let mut value = String::new();
+        loop {
+            match chars.next()?.1 {
+                '\'' if chars.peek().map(|(_, c)| *c) == Some('\'') => {
+                    chars.next();
+                    value.push('\'');
+                }
+                '\'' => break,
+                other => value.push(other),
+            }
+        }
+        values.push(value);
+        while chars.next_if(|(_, c)| c.is_whitespace()).is_some() {}
+        match chars.next()? {
+            (_, ',') => continue,
+            (index, ')') => return Some((values, index + 1)),
+            _ => return None,
+        }
+    }
+}
+
 /// Build a redacted, human-readable message from a reqwest transport error.
 ///
 /// Deliberately avoids the reqwest `Debug` output (which is verbose and can
@@ -2228,6 +2343,52 @@ impl D1Client {
     /// table (absent on pre-PD-03 remotes; restore must stay read-only).
     pub async fn agent_import_tombstone_table_exists(&self) -> Result<bool, D1Error> {
         self.remote_table_exists("agent_import_tombstone").await
+    }
+
+    /// PI-18: read the `agent_kind` CHECK of an existing remote capture table.
+    ///
+    /// D1 tables are created with `CREATE TABLE IF NOT EXISTS` and never
+    /// rebuilt, so a table created before GK-01 keeps the seven-kind CHECK even
+    /// though today's DDL lists `grok`. This is a read-only `sqlite_master`
+    /// query; it never creates or alters a table.
+    pub async fn agent_kind_check(&self, table: &str) -> Result<RemoteAgentKindCheck, D1Error> {
+        #[derive(Deserialize)]
+        struct SqlRow {
+            sql: Option<String>,
+        }
+
+        if !REMOTE_CAPTURE_KIND_TABLES.contains(&table) {
+            return Err(D1Error {
+                code: 2012,
+                message: "invalid D1 schema identifier".to_string(),
+            });
+        }
+        let result = self
+            .execute(
+                "SELECT sql FROM sqlite_master WHERE type = 'table' AND name = ?1",
+                Some(vec![serde_json::json!(table)]),
+            )
+            .await?;
+        // A failed statement or a missing `results` payload says nothing about
+        // the table, so it must not read as "absent".
+        let rows = match result.results {
+            Some(rows) if result.success => rows,
+            _ => return Ok(RemoteAgentKindCheck::Unparseable),
+        };
+        let row = match rows.as_slice() {
+            [] => return Ok(RemoteAgentKindCheck::Absent),
+            [row] => row,
+            _ => return Ok(RemoteAgentKindCheck::Unparseable),
+        };
+        Ok(serde_json::from_value::<SqlRow>(row.clone())
+            .ok()
+            .and_then(|row| row.sql)
+            .as_deref()
+            .and_then(parse_agent_kind_check)
+            .map_or(
+                RemoteAgentKindCheck::Unparseable,
+                RemoteAgentKindCheck::Allowed,
+            ))
     }
 
     async fn agent_capture_v2_projection_is_ready(&self) -> Result<bool, D1Error> {
@@ -5002,6 +5163,143 @@ mod tests {
         assert_eq!(rebuilt[0].o_type, "commit");
         assert_eq!(rebuilt[0].o_size, 7);
         assert_eq!(rebuilt[0].object_format, None);
+    }
+
+    #[test]
+    fn d1_effective_kind_check_parser_reads_kind_lists() {
+        let pre_grok = "CREATE TABLE agent_session (
+            session_id TEXT NOT NULL,
+            agent_kind TEXT NOT NULL CHECK(agent_kind IN (
+                'claude_code', 'cursor', 'codex', 'gemini',
+                'opencode', 'copilot', 'factory_ai'
+            )),
+            provider_session_id TEXT NOT NULL)";
+        assert_eq!(
+            parse_agent_kind_check(pre_grok),
+            Some(
+                [
+                    "claude_code",
+                    "cursor",
+                    "codex",
+                    "gemini",
+                    "opencode",
+                    "copilot",
+                    "factory_ai"
+                ]
+                .map(String::from)
+                .to_vec()
+            )
+        );
+        assert_eq!(
+            parse_agent_kind_check(
+                "CREATE TABLE t (`agent_kind` TEXT CHECK (`agent_kind` in ('a''b', 'grok')))"
+            ),
+            Some(vec!["a'b".to_string(), "grok".to_string()])
+        );
+    }
+
+    #[test]
+    fn d1_effective_kind_check_parser_rejects_unexpected_shapes() {
+        for sql in [
+            "CREATE TABLE t (agent_kind TEXT NOT NULL)",
+            "CREATE TABLE t (agent_kind TEXT CHECK(agent_kind IN ()))",
+            "CREATE TABLE t (agent_kind TEXT CHECK(agent_kind IN (SELECT kind FROM k)))",
+            "CREATE TABLE t (agent_kind TEXT CHECK(agent_kind IN ('a', 'b'",
+            "CREATE TABLE t (agent_kind TEXT CHECK(agent_kind IN ('a') OR agent_kind IN ('b')))",
+            // Extra predicates can reject a listed kind, so they fail closed.
+            "CREATE TABLE t (agent_kind TEXT CHECK(agent_kind IN ('claude_code', 'grok') AND agent_kind <> 'grok'))",
+            "CREATE TABLE t (agent_kind TEXT CHECK(agent_kind IN ('a', 'grok')), CHECK(agent_kind <> 'grok'))",
+            "CREATE TABLE t (agent_kind TEXT CHECK(agent_kind IN ('a', 'grok') OR 1))",
+            "CREATE TABLE t (agent_kind TEXT CHECK(agent_kind NOT IN ('a')))",
+            "CREATE TABLE t (agent_kind TEXT CHECK(lower(agent_kind) IN ('a')))",
+            // Any second CHECK can reject every row, whatever it names.
+            "CREATE TABLE t (agent_kind TEXT CHECK(agent_kind IN ('grok')), CHECK(0))",
+            "CREATE TABLE t (agent_kind TEXT CHECK(agent_kind IN ('grok')), state TEXT CHECK(state <> 'x'))",
+        ] {
+            assert_eq!(parse_agent_kind_check(sql), None, "{sql}");
+        }
+    }
+
+    /// A D1 endpoint that answers every statement with `response`.
+    async fn canned_d1_client(response: serde_json::Value) -> D1Client {
+        use axum::{Json, Router, routing::post};
+
+        let app = Router::new().route(
+            "/client/v4/accounts/{account}/d1/database/{database}/query",
+            post(move || {
+                let response = response.clone();
+                async move { Json(response) }
+            }),
+        );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind canned D1");
+        let addr = listener.local_addr().expect("canned D1 addr");
+        tokio::spawn(async move {
+            axum::serve(listener, app).await.expect("serve canned D1");
+        });
+        D1Client::new_with_api_base_url(
+            "account".into(),
+            "token".into(),
+            "database".into(),
+            &format!("http://{addr}/client/v4"),
+        )
+        .expect("canned D1 client")
+    }
+
+    #[tokio::test]
+    async fn d1_effective_kind_check_treats_missing_or_failed_results_as_unreadable() {
+        let envelope = |statement: serde_json::Value| {
+            serde_json::json!({
+                "success": true,
+                "errors": [],
+                "messages": [],
+                "result": [statement]
+            })
+        };
+        for statement in [
+            serde_json::json!({ "success": true, "meta": null }),
+            serde_json::json!({ "results": [], "success": false, "meta": null }),
+            serde_json::json!({ "results": [{ "sql": null }], "success": true, "meta": null }),
+            serde_json::json!({
+                "results": [{ "sql": "CREATE TABLE a (x)" }, { "sql": "CREATE TABLE b (x)" }],
+                "success": true,
+                "meta": null
+            }),
+        ] {
+            let client = canned_d1_client(envelope(statement.clone())).await;
+            assert_eq!(
+                client.agent_kind_check("agent_session").await.unwrap(),
+                RemoteAgentKindCheck::Unparseable,
+                "{statement}"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn d1_effective_kind_check_reads_current_ddl_from_mock() {
+        let mock = MockD1::spawn().await;
+        let client = mock.client();
+        assert_eq!(
+            client.agent_kind_check("agent_session").await.unwrap(),
+            RemoteAgentKindCheck::Absent
+        );
+        client.ensure_agent_session_table().await.unwrap();
+        match client.agent_kind_check("agent_session").await.unwrap() {
+            RemoteAgentKindCheck::Allowed(kinds) => {
+                assert!(kinds.iter().any(|kind| kind == "grok"), "{kinds:?}");
+                assert_eq!(kinds.len(), 8, "{kinds:?}");
+            }
+            other => panic!("unexpected check: {other:?}"),
+        }
+        assert_eq!(
+            client
+                .agent_kind_check("object_index")
+                .await
+                .unwrap_err()
+                .code,
+            2012
+        );
     }
 }
 

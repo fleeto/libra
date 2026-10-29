@@ -14,7 +14,7 @@ libra cloud status [--verbose]
 
 `libra cloud` 使用 Cloudflare D1（serverless SQLite）存储对象索引和元数据，并使用 Cloudflare R2（S3 兼容对象存储）存储 git 对象，从而提供备份和恢复能力。这支持将完整仓库备份到云端，并带有增量同步能力。
 
-同步工作流通过本地 `object_index` 表中的 `is_synced` 标志跟踪已上传对象。选择工作前，sync 会把本地 `.libra/objects` 存储调和进 `object_index`，避免旧 loose 或 packed 对象被跳过。每次默认同步都会选择本地未同步或 D1 中缺失的对象，因此重复同步很高效，同时仍能在 D1 数据库变化后修复陈旧的本地同步标志。`--force` 标志允许重新同步所有已索引的本地对象，也是 R2 bucket 侧数据丢失后的恢复路径。对象同步完成后，仓库元数据（references/branches）会序列化为 JSON 并上传到 R2，并通过内容哈希检查避免不必要上传。
+同步工作流通过本地 `object_index` 表中的 `is_synced` 标志跟踪已上传对象。默认同步只选择本地标志仍为未同步（`is_synced = 0`）的已索引对象，因此重复同步很高效。默认同步不与 D1 比对，所以把 `LIBRA_D1_DATABASE_ID` 指向新建或替换的 D1 数据库后，应运行 `libra cloud sync --force`：`--force` 会重新同步所有已索引的本地对象，也是 R2 bucket 侧数据丢失后的恢复路径。对象同步完成后，仓库元数据（references/branches）会序列化为 JSON 并上传到 R2，并通过内容哈希检查避免不必要上传。
 
 每个仓库由 UUID（`libra.repoid` 配置键）标识，并可选一个人类可读项目名（`cloud.name` 配置键或目录名）。项目名注册在 D1 `repositories` 表中，用于恢复时查找。
 
@@ -30,6 +30,8 @@ libra cloud status [--verbose]
 ### 对象格式（B3-09 / B3-14）
 
 `cloud sync` 在凭据、D1 或 R2 之前读取本地 `agent_session.agent_kind`。不在当前采集允许名单里的种类（`claude_code`、`cursor`、`codex`、`gemini`、`opencode`、`copilot`、`factory_ai`、`grok`），包括 `hermes`，会以 `LBR-CONFLICT-002`（退出码 128）停止。`--force`、`--json` 和 `--progress=json` 都不能绕过，也不会打印同步成功。允许的种类仍走原来的同步顺序。
+
+D1 初始化之后、第一次远端写入之前，`cloud sync` 用只读的 `sqlite_master` 查询读取已有 D1 `agent_session` 与 `agent_capture_session_v2` 表的 `agent_kind` CHECK。D1 表从不重建，所以在支持 `grok` 之前建立的表仍只列原来的七种。即使仓库没有本地采集会话，每次同步也都会探测。已有表不接受某个本地种类，或 CHECK 无法读取（`agent_kind` 约束不是唯一一组带引号种类的 `agent_kind IN (...)` 列表，或 schema 查询失败）时，同步在上传任何内容之前以 `LBR-CONFLICT-002` 停止。提示给出唯一的恢复方式：新建 D1 数据库，把 `LIBRA_D1_DATABASE_ID` 指向它，再运行 `libra cloud sync --force` 全量回填（默认同步只上传尚未标记为已同步的对象）。不存在的表会按当前 DDL 创建，不会被拒绝。
 
 备份会把仓库的 `core.objectformat` 写入 D1 `repositories.object_format`（并标记 `object_index` 行）。恢复只以该元数据作为 sha1/sha256/blake3 权威，绝不根据 `o_id` 长度猜测。缺少元数据且存在任意 64-hex 对象 id 的快照会以 `LBR-REPO-002`（退出码 128）fail-closed，并提示在源仓重跑 `libra cloud sync`；无元数据且全部为 40-hex 的旧快照仍按 sha1 兼容。早于 REL-B3-02 的客户端不得通过宽度猜测恢复带元数据的新备份。
 
@@ -485,6 +487,7 @@ Libra 已经通过 `LIBRA_STORAGE_*` 环境变量为分层对象缓存提供通�
 | `LBR-CLI-003` | D1 中未找到给定名称的仓库 |
 | `LBR-CONFLICT-002` | 项目名已被另一个仓库占用 |
 | `LBR-CONFLICT-002` | sync 期间 agent-capture 镜像失败（`agent capture mirror failed: <reason>`） |
+| `LBR-CONFLICT-002` | 已有 D1 采集表的 `agent_kind` CHECK 拒绝某个本地种类或无法读取；在任何远端写入之前拒绝（新建 D1 数据库并运行 `libra cloud sync --force`） |
 | `LBR-NET-002` | agent-capture restore 失败（`agent capture restore failed: <reason>`） |
 | `LBR-IO-001` | D1 client 初始化失败 |
 | `LBR-IO-001` | 创建 D1 表失败 |

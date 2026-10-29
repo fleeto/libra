@@ -691,9 +691,17 @@ pub(crate) enum CloudError {
     /// Cloud catalog lacks authoritative `object_format` (or conflicts with
     /// OID widths). Maps to `LBR-REPO-002` with a re-backup hint (B3-14).
     AmbiguousObjectFormat(String),
+    /// An existing D1 capture table's `agent_kind` CHECK rejects a kind that
+    /// local capture rows use, or cannot be read (PI-18). Raised before any
+    /// remote write; maps to `LBR-CONFLICT-002` with the backfill hint.
+    RemoteCaptureKindRefused(String),
     /// Anything else — kept as the original detail string.
     Generic(String),
 }
+
+/// Recovery for [`CloudError::RemoteCaptureKindRefused`]. Default sync only
+/// uploads rows with `is_synced = 0`, so a new database needs `--force`.
+pub(super) const REMOTE_CAPTURE_KIND_RECOVERY_HINT: &str = "create a new D1 database, point LIBRA_D1_DATABASE_ID at it, and run `libra cloud sync --force` to backfill it completely";
 
 type CloudResult<T> = std::result::Result<T, CloudError>;
 
@@ -801,6 +809,7 @@ impl fmt::Display for CloudError {
             | CloudError::D1(detail)
             | CloudError::R2(detail)
             | CloudError::AmbiguousObjectFormat(detail)
+            | CloudError::RemoteCaptureKindRefused(detail)
             | CloudError::Generic(detail) => write!(f, "{detail}"),
         }
     }
@@ -845,6 +854,9 @@ impl CloudError {
             CloudError::AmbiguousObjectFormat(detail) => CliError::fatal(detail)
                 .with_stable_code(StableErrorCode::RepoCorrupt)
                 .with_hint(REBACKUP_HINT),
+            CloudError::RemoteCaptureKindRefused(detail) => CliError::conflict(detail)
+                .with_stable_code(StableErrorCode::ConflictOperationBlocked)
+                .with_hint(REMOTE_CAPTURE_KIND_RECOVERY_HINT),
             CloudError::Generic(detail) => CliError::fatal(format!("{operation} failed: {detail}")),
         }
     }
@@ -2970,6 +2982,370 @@ mod tests {
             is_synced: 1,
             object_format: None,
         }
+    }
+
+    /// Pre-GK-01 D1 `agent_kind` CHECK: the original seven kinds, no `grok`.
+    const PRE_GROK_KINDS: &str =
+        "'claude_code', 'cursor', 'codex', 'gemini', 'opencode', 'copilot', 'factory_ai'";
+
+    async fn insert_local_capture_session(kind: &str) {
+        use sea_orm::Statement;
+
+        let conn = db::get_db_conn_instance().await;
+        conn.execute_raw(Statement::from_sql_and_values(
+            conn.get_database_backend(),
+            "INSERT INTO agent_session (session_id, agent_kind, provider_session_id,
+              state, working_dir, started_at, last_event_at, metadata_json,
+              redaction_report, sync_revision, repo_id, worktree_id, scope_state)
+             VALUES (?, ?, 'provider-session', 'stopped', '/fixture', 1, 2, '{}', '{}',
+               1, 'fixture-repo', '', 'scoped')",
+            [format!("{kind}__session").into(), kind.into()],
+        ))
+        .await
+        .expect("insert local capture session");
+    }
+
+    async fn remote_table_present(
+        mock: &crate::utils::d1_client::test_support::MockD1,
+        table: &str,
+    ) -> bool {
+        #[derive(serde::Deserialize)]
+        struct Name {
+            #[allow(dead_code)]
+            name: String,
+        }
+        let rows: Vec<Name> = mock
+            .client()
+            .query(
+                "SELECT name FROM sqlite_master WHERE type = 'table' AND name = ?1",
+                Some(vec![serde_json::json!(table)]),
+            )
+            .await
+            .expect("query mock sqlite_master");
+        !rows.is_empty()
+    }
+
+    /// Index one local object as not yet synced, so a sync that got past the
+    /// probe would upload it to R2.
+    async fn insert_unsynced_local_object() {
+        use crate::internal::model::object_index;
+
+        let repo_id = ensure_repo_id().await;
+        let data = b"pi-18 unsynced object\n";
+        let hash = ObjectHash::from_type_and_data(ObjectType::Blob, data);
+        LocalStorage::new(path::objects())
+            .put(&hash, data, ObjectType::Blob)
+            .await
+            .expect("write local object");
+        object_index::ActiveModel {
+            o_id: Set(hash.to_string()),
+            o_type: Set("blob".to_string()),
+            o_size: Set(data.len() as i64),
+            repo_id: Set(repo_id),
+            created_at: Set(0),
+            is_synced: Set(0),
+            ..Default::default()
+        }
+        .insert(&db::get_db_conn_instance().await)
+        .await
+        .expect("index unsynced local object");
+    }
+
+    async fn r2_object_count(store: &InMemory) -> usize {
+        use futures::TryStreamExt;
+        use object_store::ObjectStore;
+
+        store
+            .list(None)
+            .try_collect::<Vec<_>>()
+            .await
+            .expect("list in-memory R2")
+            .len()
+    }
+
+    /// Run a sync against `mock` that must be refused by the PI-18 probe, and
+    /// assert that D1 saw exactly the `sqlite_master` probes of
+    /// `probed_tables`, in order, and that nothing reached R2.
+    async fn assert_sync_refused_before_remote_write(
+        mock: &crate::utils::d1_client::test_support::MockD1,
+        probed_tables: &[&str],
+    ) -> String {
+        let before = mock.request_bodies().await.len();
+        let r2 = Arc::new(InMemory::new());
+
+        let error = super::sync::run_cloud_sync_with_clients(
+            CloudSyncContext {
+                batch_size: 50,
+                force: false,
+            },
+            &SilentCloudSyncProgress,
+            mock.client(),
+            Some(RemoteStorage::new(r2.clone())),
+        )
+        .await
+        .expect_err("the PI-18 probe must refuse this sync");
+
+        let CloudError::RemoteCaptureKindRefused(detail) = &error else {
+            panic!("unexpected error: {error:?}");
+        };
+        let detail = detail.clone();
+        assert!(detail.contains("before any remote write"), "{detail}");
+        assert_eq!(
+            error.into_cli_error("sync").stable_code(),
+            StableErrorCode::ConflictOperationBlocked
+        );
+        let requests = mock.request_bodies().await[before..].to_vec();
+        let expected: Vec<serde_json::Value> = probed_tables
+            .iter()
+            .map(|table| {
+                serde_json::json!({
+                    "sql": "SELECT sql FROM sqlite_master WHERE type = 'table' AND name = ?1",
+                    "params": [table],
+                })
+            })
+            .collect();
+        assert_eq!(
+            requests, expected,
+            "only the read-only schema probes may precede the refusal"
+        );
+        assert_eq!(
+            r2_object_count(&r2).await,
+            0,
+            "no object may reach R2 before the refusal"
+        );
+        assert!(
+            !remote_table_present(mock, "object_index").await,
+            "the refusal must precede the first remote write"
+        );
+        detail
+    }
+
+    async fn assert_pre_grok_table_refuses_local_grok(table: &str) {
+        let _repo = enter_isolated_libra_repo().await;
+        insert_local_capture_session("grok").await;
+        insert_unsynced_local_object().await;
+        let mock = crate::utils::d1_client::test_support::MockD1::spawn().await;
+        mock.client()
+            .execute(
+                &format!(
+                    "CREATE TABLE {table} (session_id TEXT NOT NULL, agent_kind TEXT NOT NULL CHECK(agent_kind IN ({PRE_GROK_KINDS})))"
+                ),
+                None,
+            )
+            .await
+            .expect("create pre-GK-01 remote table");
+
+        let probed: &[&str] = match table {
+            "agent_session" => &["agent_session"],
+            _ => &["agent_session", table],
+        };
+        let detail = assert_sync_refused_before_remote_write(&mock, probed).await;
+        assert!(detail.contains(table), "{detail}");
+        assert!(detail.contains("grok"), "{detail}");
+    }
+
+    #[tokio::test]
+    #[serial(cwd, env)]
+    async fn d1_effective_kind_check_refuses_grok_on_pre_gk01_agent_session() {
+        assert_pre_grok_table_refuses_local_grok("agent_session").await;
+    }
+
+    #[tokio::test]
+    #[serial(cwd, env)]
+    async fn d1_effective_kind_check_refuses_grok_on_pre_gk01_capture_session_v2() {
+        assert_pre_grok_table_refuses_local_grok("agent_capture_session_v2").await;
+    }
+
+    #[test]
+    fn d1_effective_kind_check_refusal_is_conflict_with_backfill_hint() {
+        let error =
+            CloudError::RemoteCaptureKindRefused("refused".to_string()).into_cli_error("sync");
+        assert_eq!(
+            error.stable_code(),
+            StableErrorCode::ConflictOperationBlocked
+        );
+        let hints: Vec<&str> = error.hints().iter().map(|hint| hint.as_str()).collect();
+        assert_eq!(hints, [REMOTE_CAPTURE_KIND_RECOVERY_HINT]);
+        assert!(REMOTE_CAPTURE_KIND_RECOVERY_HINT.contains("new D1 database"));
+        assert!(REMOTE_CAPTURE_KIND_RECOVERY_HINT.contains("`libra cloud sync --force`"));
+    }
+
+    #[tokio::test]
+    #[serial(cwd, env)]
+    async fn d1_effective_kind_check_fails_closed_on_unparseable_check() {
+        let _repo = enter_isolated_libra_repo().await;
+        let mock = crate::utils::d1_client::test_support::MockD1::spawn().await;
+        mock.client()
+            .execute(
+                "CREATE TABLE agent_session (session_id TEXT NOT NULL, agent_kind TEXT NOT NULL)",
+                None,
+            )
+            .await
+            .expect("create remote table without a kind CHECK");
+
+        let error = super::sync::refuse_kinds_rejected_by_remote_check(
+            &mock.client(),
+            &["claude_code".to_string()],
+        )
+        .await
+        .expect_err("an unreadable CHECK must fail closed");
+        match error {
+            CloudError::RemoteCaptureKindRefused(detail) => {
+                assert!(detail.contains("could not be read"), "{detail}");
+            }
+            other => panic!("unexpected error: {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    #[serial(cwd, env)]
+    async fn d1_effective_kind_check_fails_closed_without_local_sessions() {
+        let _repo = enter_isolated_libra_repo().await;
+        insert_unsynced_local_object().await;
+        let mock = crate::utils::d1_client::test_support::MockD1::spawn().await;
+        mock.client()
+            .execute(
+                "CREATE TABLE agent_capture_session_v2 (session_id TEXT NOT NULL, agent_kind TEXT NOT NULL)",
+                None,
+            )
+            .await
+            .expect("create remote table without a kind CHECK");
+
+        let detail = assert_sync_refused_before_remote_write(
+            &mock,
+            &["agent_session", "agent_capture_session_v2"],
+        )
+        .await;
+        assert!(detail.contains("agent_capture_session_v2"), "{detail}");
+        assert!(detail.contains("could not be read"), "{detail}");
+    }
+
+    #[tokio::test]
+    #[serial(cwd, env)]
+    async fn d1_effective_kind_check_fails_closed_on_failed_check_read() {
+        const REMOTE_SENTINEL: &str = "REMOTE_D1_SCHEMA_TEXT=/private/remote/detail";
+
+        let _repo = enter_isolated_libra_repo().await;
+        insert_local_capture_session("claude_code").await;
+        insert_unsynced_local_object().await;
+        let mock = crate::utils::d1_client::test_support::MockD1::spawn().await;
+        mock.fail_once_when_sql_contains("sqlite_master", REMOTE_SENTINEL);
+
+        let detail = assert_sync_refused_before_remote_write(&mock, &["agent_session"]).await;
+        assert!(detail.contains("could not be read"), "{detail}");
+        assert!(detail.contains("D1 code 7500"), "{detail}");
+        assert!(!detail.contains(REMOTE_SENTINEL), "{detail}");
+    }
+
+    #[tokio::test]
+    #[serial(cwd, env)]
+    async fn d1_effective_kind_check_accepts_absent_tables_and_full_check() {
+        let _repo = enter_isolated_libra_repo().await;
+        let local = ["claude_code".to_string(), "grok".to_string()];
+
+        let absent = crate::utils::d1_client::test_support::MockD1::spawn().await;
+        super::sync::refuse_kinds_rejected_by_remote_check(&absent.client(), &local)
+            .await
+            .expect("absent remote tables are created with today's DDL");
+
+        let current = crate::utils::d1_client::test_support::MockD1::spawn().await;
+        current
+            .client()
+            .ensure_agent_session_table()
+            .await
+            .expect("create current remote agent_session");
+        super::sync::refuse_kinds_rejected_by_remote_check(&current.client(), &local)
+            .await
+            .expect("a CHECK that already lists every local kind must not refuse");
+    }
+
+    #[tokio::test]
+    #[serial(cwd, env)]
+    async fn d1_effective_kind_check_force_backfill_covers_local_object_index() {
+        use crate::internal::model::object_index;
+
+        let _repo = enter_isolated_libra_repo().await;
+        let repo_id = ensure_repo_id().await;
+        let local = LocalStorage::new(path::objects());
+        let conn = db::get_db_conn_instance().await;
+        let mut expected = Vec::new();
+        for data in [
+            &b"pi-18 one\n"[..],
+            &b"pi-18 two\n"[..],
+            &b"pi-18 three\n"[..],
+        ] {
+            let hash = ObjectHash::from_type_and_data(ObjectType::Blob, data);
+            local
+                .put(&hash, data, ObjectType::Blob)
+                .await
+                .expect("write local object");
+            object_index::ActiveModel {
+                o_id: Set(hash.to_string()),
+                o_type: Set("blob".to_string()),
+                o_size: Set(data.len() as i64),
+                repo_id: Set(repo_id.clone()),
+                created_at: Set(0),
+                // Already mirrored to the old database; default sync skips it.
+                is_synced: Set(1),
+                ..Default::default()
+            }
+            .insert(&conn)
+            .await
+            .expect("index local object");
+            expected.push(hash.to_string());
+        }
+        expected.sort();
+
+        let indexed = |mock: &crate::utils::d1_client::test_support::MockD1| {
+            let client = mock.client();
+            let repo_id = repo_id.clone();
+            async move {
+                let mut ids: Vec<String> = client
+                    .get_object_indexes(&repo_id)
+                    .await
+                    .expect("read new D1 object index")
+                    .into_iter()
+                    .map(|row| row.o_id)
+                    .collect();
+                ids.sort();
+                ids
+            }
+        };
+
+        let without_force = crate::utils::d1_client::test_support::MockD1::spawn().await;
+        super::sync::run_cloud_sync_with_clients(
+            CloudSyncContext {
+                batch_size: 50,
+                force: false,
+            },
+            &SilentCloudSyncProgress,
+            without_force.client(),
+            Some(RemoteStorage::new(Arc::new(InMemory::new()))),
+        )
+        .await
+        .expect("default sync against a new database");
+        assert!(
+            indexed(&without_force).await.is_empty(),
+            "default sync skips rows already marked synced"
+        );
+
+        let with_force = crate::utils::d1_client::test_support::MockD1::spawn().await;
+        let r2 = Arc::new(InMemory::new());
+        super::sync::run_cloud_sync_with_clients(
+            CloudSyncContext {
+                batch_size: 50,
+                force: true,
+            },
+            &SilentCloudSyncProgress,
+            with_force.client(),
+            Some(RemoteStorage::new(r2.clone())),
+        )
+        .await
+        .expect("--force sync against a new database");
+        assert_eq!(indexed(&with_force).await, expected);
+        // The injected store observes real uploads, so the refusal tests'
+        // zero-object assertion is meaningful.
+        assert!(r2_object_count(&r2).await >= expected.len());
     }
 
     async fn enter_isolated_libra_repo() -> (

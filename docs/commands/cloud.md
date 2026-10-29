@@ -14,7 +14,7 @@ libra cloud status [--verbose]
 
 `libra cloud` provides backup and restore capabilities using Cloudflare D1 (serverless SQLite) for object indexes and metadata, and Cloudflare R2 (S3-compatible object storage) for git objects. This enables full repository backup to the cloud with incremental sync support.
 
-The sync workflow tracks which objects have been uploaded via an `is_synced` flag in the local `object_index` table. Before selecting work, sync reconciles the local `.libra/objects` store into `object_index` so older loose or packed objects are not skipped. On each default sync, objects are selected when they are locally unsynced or missing from D1, making repeated syncs efficient while still repairing stale local sync flags after a D1 database change. A `--force` flag allows re-syncing all indexed local objects and is the recovery path for R2 bucket-side data loss. After objects are synced, repository metadata (references/branches) is serialized to JSON and uploaded to R2, with a content hash check to avoid unnecessary uploads.
+The sync workflow tracks which objects have been uploaded via an `is_synced` flag in the local `object_index` table. A default sync selects only the indexed objects whose local flag is still unsynced (`is_synced = 0`), which keeps repeated syncs efficient. It does not compare against D1, so after pointing `LIBRA_D1_DATABASE_ID` at a new or replaced D1 database, run `libra cloud sync --force`: the `--force` flag re-syncs every indexed local object and is also the recovery path for R2 bucket-side data loss. After objects are synced, repository metadata (references/branches) is serialized to JSON and uploaded to R2, with a content hash check to avoid unnecessary uploads.
 
 Each repository is identified by a UUID (`libra.repoid` config key) and optionally a human-readable project name (`cloud.name` config key or directory name). The project name is registered in a D1 `repositories` table for lookup during restore.
 
@@ -30,6 +30,8 @@ may be unavailable. A reachable commit trailer can provide a later
 reconstruction clue, subject to repository and session-scope checks.
 
 `cloud sync` reads local `agent_session.agent_kind` before credentials, D1, or R2. A kind outside the current capture allowlist (`claude_code`, `cursor`, `codex`, `gemini`, `opencode`, `copilot`, `factory_ai`, `grok`) — including `hermes` — stops the command with `LBR-CONFLICT-002` (exit 128). `--force`, `--json`, and `--progress=json` do not bypass that refusal, and the command does not print a successful sync. Kinds that are allowed keep the previous sync order.
+
+After D1 is initialized and before its first remote write, `cloud sync` reads the `agent_kind` CHECK of any existing D1 `agent_session` and `agent_capture_session_v2` tables with a read-only `sqlite_master` query. D1 tables are never rebuilt, so a table created before `grok` support still lists only the original seven kinds. The probe runs on every sync, even when the repository has no local capture sessions. If a local kind is not accepted by an existing table, or the CHECK cannot be read (an `agent_kind` constraint other than a single `agent_kind IN (...)` list of quoted kinds, or a failed schema query), sync stops with `LBR-CONFLICT-002` before uploading anything. The hint names the only recovery: create a new D1 database, point `LIBRA_D1_DATABASE_ID` at it, and run `libra cloud sync --force` to backfill it completely (a default sync only uploads objects not yet marked synced). Missing tables are created with today's DDL and are never refused.
 
 ### Object format (B3-09 / B3-14)
 
@@ -591,6 +593,7 @@ Note: Neither Git nor jj have a built-in cloud backup command. They rely on push
 | `LBR-CLI-003` | Repository with given name not found in D1 |
 | `LBR-CONFLICT-002` | Project name already taken by another repository |
 | `LBR-CONFLICT-002` | Agent-capture mirror failed during sync (`agent capture mirror failed: <reason>`) |
+| `LBR-CONFLICT-002` | An existing D1 capture table's `agent_kind` CHECK rejects a local kind or cannot be read; refused before any remote write (create a new D1 database and run `libra cloud sync --force`) |
 | `LBR-NET-002` | Agent-capture restore failed (`agent capture restore failed: <reason>`) |
 | `LBR-IO-001` | D1 client initialization failure |
 | `LBR-IO-001` | Failed to create D1 tables |

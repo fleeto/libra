@@ -697,7 +697,8 @@ fn cloud_error_text(error: CloudError) -> String {
         | CloudError::R2(detail)
         | CloudError::NameAlreadyTaken(detail)
         | CloudError::NameNotFound(detail)
-        | CloudError::AmbiguousObjectFormat(detail) => detail,
+        | CloudError::AmbiguousObjectFormat(detail)
+        | CloudError::RemoteCaptureKindRefused(detail) => detail,
         CloudError::MissingEnv { detail, .. } => detail,
     }
 }

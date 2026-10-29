@@ -51,6 +51,9 @@ use super::{
         AgentKind, CanonValue, Completeness, CoverageSchemaVersion, ExportAuthorized,
         MAX_REDACTION_MATCH_SAMPLES, NormalizedTurn, RedactedBytes, RedactionReport, Redactor,
         TRANSCRIPT_READ_HARD_CAP_BYTES, TranscriptSource,
+        builtin::hermes::{
+            HermesNormalizeStatus, HermesReadLimits, HermesScope, normalize_hermes_jsonl_until,
+        },
         codex_reasoning::{CodexRetention, CodexRetentionDto},
         coverage::{
             RedactedImportCoverageRuntimeDto, encode_redacted_import_runtime,
@@ -889,6 +892,87 @@ fn validate_persisted_import_timestamps(request: &ImportRequest, trusted_now: i6
     Ok(())
 }
 
+fn json_unix_seconds(value: Option<&serde_json::Value>) -> Option<i64> {
+    let number = value?.as_f64()?;
+    if !number.is_finite() || number < 0.0 {
+        return None;
+    }
+    let whole = number.trunc();
+    if whole > 10_000_000_000.0 {
+        Some((whole / 1000.0) as i64)
+    } else {
+        Some(whole as i64)
+    }
+}
+
+/// Official Hermes JSONL facts. A parent id is not a second session, and a
+/// non-default profile or non-cli source is refused before any turn is built.
+fn collect_hermes_facts(bytes: &[u8], facts: &mut SourceFacts) -> Result<()> {
+    let mut lines = bytes
+        .split(|byte| *byte == b'\n')
+        .filter(|line| !line.is_empty());
+    let Some(first) = lines.next() else {
+        return Err(ImportError::SourceAuthorization.into());
+    };
+    if lines.next().is_some() {
+        return Err(ImportError::SourceAuthorization.into());
+    }
+    let value: serde_json::Value =
+        serde_json::from_slice(first).map_err(|_| ImportError::SourceAuthorization)?;
+    let session = value.as_object().ok_or(ImportError::SourceAuthorization)?;
+    let source = session.get("source").and_then(serde_json::Value::as_str);
+    let created = session
+        .get("created_source")
+        .and_then(serde_json::Value::as_str);
+    if !source.is_some_and(|value| value.eq_ignore_ascii_case("cli"))
+        || created.is_some_and(|value| !value.eq_ignore_ascii_case("cli"))
+    {
+        return Err(ImportError::SourceAuthorization.into());
+    }
+    if session
+        .get("user_id")
+        .and_then(serde_json::Value::as_str)
+        .is_some_and(|user| !user.is_empty())
+    {
+        return Err(ImportError::SourceAuthorization.into());
+    }
+    let profile = session
+        .get("profile_name")
+        .and_then(serde_json::Value::as_str);
+    if profile.is_some_and(|name| !name.is_empty() && name != "default") {
+        return Err(ImportError::SourceAuthorization.into());
+    }
+    let id = session
+        .get("id")
+        .and_then(serde_json::Value::as_str)
+        .filter(|id| !id.is_empty())
+        .ok_or(ImportError::SessionIdentityConflict)?;
+    facts.provider_session_ids.insert(id.to_string());
+    let cwd = session
+        .get("cwd")
+        .and_then(serde_json::Value::as_str)
+        .ok_or(ImportError::WorkingDirMissingOrAmbiguous)?;
+    facts.working_dirs.insert(PathBuf::from(cwd));
+    if let Some(started) = json_unix_seconds(session.get("started_at")) {
+        facts.timestamps.push(started);
+    }
+    if let Some(ended) = json_unix_seconds(session.get("ended_at")) {
+        facts.timestamps.push(ended);
+        facts.terminal = true;
+    }
+    if let Some(messages) = session
+        .get("messages")
+        .and_then(serde_json::Value::as_array)
+    {
+        for message in messages {
+            if let Some(timestamp) = json_unix_seconds(message.get("timestamp")) {
+                facts.timestamps.push(timestamp);
+            }
+        }
+    }
+    Ok(())
+}
+
 fn collect_facts(kind: AgentKind, bytes: &[u8], deadline: Option<Instant>) -> Result<SourceFacts> {
     let mut facts = SourceFacts::default();
     match kind {
@@ -963,6 +1047,7 @@ fn collect_facts(kind: AgentKind, bytes: &[u8], deadline: Option<Instant>) -> Re
                 }
             }
         }
+        AgentKind::Hermes => collect_hermes_facts(bytes, &mut facts)?,
         AgentKind::OpenCode => {
             let document = parse_canon_value(bytes)
                 .context("parse OpenCode export metadata with duplicate-key rejection")?;
@@ -1701,7 +1786,7 @@ pub(crate) fn prepare_import_projection_with_reasoning(
     } else {
         return Err(ImportError::WorkingDirMissingOrAmbiguous.into());
     };
-    let storage_root = util::try_get_storage_path(Some(working_dir))
+    let storage_root = util::try_get_storage_path(Some(working_dir.clone()))
         .map_err(|_| ImportError::WorkingDirMissingOrAmbiguous)?
         .canonicalize()
         .map_err(|_| ImportError::WorkingDirMissingOrAmbiguous)?;
@@ -1729,6 +1814,7 @@ pub(crate) fn prepare_import_projection_with_reasoning(
     };
     let transcript = transcript.ok_or_else(|| snapshot_failure_for_import(&transcript_snapshot))?;
     ensure_before_deadline(deadline)?;
+    let mut hermes_handoff = None;
     let (mut turns, codex_slices, codex_unattributed_source) = if agent_kind == AgentKind::Codex {
         let normalized = normalize_codex_retained_rollout_until(transcript.bytes(), deadline)
             .ok_or(ImportError::DeadlineExceeded)?;
@@ -1737,6 +1823,28 @@ pub(crate) fn prepare_import_projection_with_reasoning(
             Some(normalized.retained),
             normalized.unattributed_source,
         )
+    } else if agent_kind == AgentKind::Hermes {
+        let scope = HermesScope {
+            session_id: provider_session_id.clone(),
+            profile: "default".to_string(),
+            repo_root: working_dir.clone(),
+        };
+        let normalized = normalize_hermes_jsonl_until(
+            transcript.bytes(),
+            &scope,
+            &HermesReadLimits::default(),
+            Some(deadline),
+        )
+        .ok_or(ImportError::DeadlineExceeded)?;
+        let HermesNormalizeStatus::Ready(normalized) = normalized else {
+            return Err(ImportError::SourceAuthorization.into());
+        };
+        if normalized.parent_associated || normalized.source_state != "unproven" {
+            return Err(ImportError::SourceAuthorization.into());
+        }
+        let turns = normalized.turns;
+        hermes_handoff = Some((normalized.retained, normalized.usage, normalized.partial));
+        (turns, None, false)
     } else {
         let turns = match agent_kind {
             AgentKind::ClaudeCode => {
@@ -1759,6 +1867,13 @@ pub(crate) fn prepare_import_projection_with_reasoning(
         return Err(ImportError::NoImportableTurns.into());
     }
     if !facts.terminal
+        && let Some(last) = turns.last_mut()
+    {
+        last.completeness = Completeness::Incomplete;
+    }
+    if hermes_handoff
+        .as_ref()
+        .is_some_and(|(_, _, source_partial)| *source_partial)
         && let Some(last) = turns.last_mut()
     {
         last.completeness = Completeness::Incomplete;
@@ -1829,6 +1944,16 @@ pub(crate) fn prepare_import_projection_with_reasoning(
     }
     if retention_unavailable {
         super::observed_agents::codex_reasoning::mark_retention_unavailable(&mut redaction_report);
+    }
+    if let Some((retained, usage, _)) = hermes_handoff.as_ref() {
+        redaction_report["hermes_source_state"] = serde_json::json!("unproven");
+        redaction_report["hermes_parent_associated"] = serde_json::json!(false);
+        redaction_report["hermes_retained"] =
+            serde_json::to_value(retained).unwrap_or_else(|_| serde_json::json!([]));
+        redaction_report["hermes_usage"] = match usage {
+            Some(usage) => serde_json::to_value(usage).unwrap_or(serde_json::Value::Null),
+            None => serde_json::Value::Null,
+        };
     }
     if agent_kind == AgentKind::Codex
         && (codex_unattributed_source
@@ -5026,7 +5151,11 @@ async fn import_prepared_with_reasoning_identity_batches_and_coverage(
         outcome.skipped_inflight,
         outcome.conflicted,
         &subagent_discovery,
-    );
+    ) || (request.agent_kind == AgentKind::Hermes
+        && request
+            .turns
+            .iter()
+            .any(|turn| turn.completeness == Completeness::Incomplete));
     partial |= codex_retention
         .as_ref()
         .is_some_and(CodexRetention::is_unavailable);

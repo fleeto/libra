@@ -517,7 +517,7 @@ Claude 审查实现 `VERDICT: PASS`。文档挂错常量之后的复核轮也是
 
 **Task type:** implementation
 
-**Lifecycle / Acceptance:** pending / 空
+**Lifecycle / Acceptance:** done / complete
 
 **Description:** 将授权source写入既有snapshot/coverage/claim store，保持local-only。
 
@@ -527,14 +527,16 @@ Claude 审查实现 `VERDICT: PASS`。文档挂错常量之后的复核轮也是
 
 **Acceptance criteria:**
 
-- [ ] 消息按已证稳定ordinal/turn排序；镜像/重试/失败usage不重复，未知usage不是0。
-- [ ] prompt/assistant/tool 沿用原规则；HM-04 不解释 thinking 但须保留 source 中的相关值交 HM-07，不能先剥离；未认证只降来源状态。
-- [ ] 同session/turn/branch重放与crash恢复不重复checkpoint，失败不false complete。
-- [ ] 跨profile/cwd/无证parent不关联，session/intent先提交再写对象/ref，导入不提升supported或launcher。
+- [x] 消息按已证稳定ordinal/turn排序；镜像/重试/失败usage不重复，未知usage不是0。
+- [x] prompt/assistant/tool 沿用原规则；HM-04 不解释 thinking 但须保留 source 中的相关值交 HM-07，不能先剥离；未认证只降来源状态。
+- [x] 同session/turn/branch重放与crash恢复不重复checkpoint，失败不false complete。
+- [x] 跨profile/cwd/无证parent不关联，session/intent先提交再写对象/ref，导入不提升supported或launcher。
 
 **Verification:**
 
-- [ ] `source .env.test && cargo test --test agent_import_test hermes_normalize_ -- --test-threads=1`（拟新增过滤名；须列出实际匹配并确认非零）
+- [x] `source .env.test && cargo test --test agent_import_test hermes_normalize_ -- --test-threads=1`（拟新增过滤名；须列出实际匹配并确认非零）
+
+实现说明：`normalize_hermes_jsonl` 按消息 `id` 排序，丢掉撤销行，重试行只留最后一条。usage 只读 session 计数；缺字段是未知，不是 0。thinking 五列原样留在 `hermes_retained`，不进入 assistant 回答，来源状态是 `unproven`。`libra agent import --path <session-id>.jsonl --agent hermes` 不扫描 Hermes home。失败 finish 使导入为 partial。重复导入不新增 checkpoint。安装、启动和 `agent list` 仍不含 hermes。`hermes_normalize_` 匹配 2 条并全部通过。Claude `VERDICT: PASS`，正文 SHA-256 `3b96431518beca3ca1db3c208ca5eb396485e5704a26a7cc66747ab068191c2d`。无 P0/P1。版本面 `0.30.95`。
 
 **Full-suite trigger:** T-1/T-4（共享采集、存储、CLI 或测试契约）；执行四 provider 契约的完整双环境 nextest 门
 

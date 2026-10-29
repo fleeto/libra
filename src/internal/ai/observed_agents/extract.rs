@@ -180,6 +180,70 @@ pub fn map_e6_token_usage(value: &Value) -> CompletionUsageSummary {
     map_e6_token_usage_full(value).summary
 }
 
+/// Session-level Hermes counters only.
+///
+/// Absent keys stay unknown. A present null or a non-integer stays unknown
+/// and is not rewritten as zero. Per-message `token_count`, retry rows, and
+/// `session_model_usage` mirrors are not added here.
+#[derive(Debug, Clone, PartialEq, Eq, Default, serde::Serialize)]
+pub struct HermesSessionUsage {
+    pub input_tokens: Option<u64>,
+    pub output_tokens: Option<u64>,
+    pub cache_read_tokens: Option<u64>,
+    pub cache_write_tokens: Option<u64>,
+    pub reasoning_tokens: Option<u64>,
+    pub api_call_count: Option<u64>,
+    pub malformed: bool,
+}
+
+const HERMES_SESSION_USAGE_KEYS: [&str; 6] = [
+    "input_tokens",
+    "output_tokens",
+    "cache_read_tokens",
+    "cache_write_tokens",
+    "reasoning_tokens",
+    "api_call_count",
+];
+
+pub fn project_hermes_session_usage(
+    session: &serde_json::Map<String, Value>,
+) -> Option<HermesSessionUsage> {
+    if HERMES_SESSION_USAGE_KEYS
+        .iter()
+        .all(|key| !session.contains_key(*key))
+    {
+        return None;
+    }
+    let mut usage = HermesSessionUsage::default();
+    usage.input_tokens = hermes_usage_count(session.get("input_tokens"), &mut usage.malformed);
+    usage.output_tokens = hermes_usage_count(session.get("output_tokens"), &mut usage.malformed);
+    usage.cache_read_tokens =
+        hermes_usage_count(session.get("cache_read_tokens"), &mut usage.malformed);
+    usage.cache_write_tokens =
+        hermes_usage_count(session.get("cache_write_tokens"), &mut usage.malformed);
+    usage.reasoning_tokens =
+        hermes_usage_count(session.get("reasoning_tokens"), &mut usage.malformed);
+    usage.api_call_count = hermes_usage_count(session.get("api_call_count"), &mut usage.malformed);
+    Some(usage)
+}
+
+fn hermes_usage_count(value: Option<&Value>, malformed: &mut bool) -> Option<u64> {
+    match value {
+        None | Some(Value::Null) => None,
+        Some(Value::Number(number)) => match number.as_u64() {
+            Some(count) => Some(count),
+            None => {
+                *malformed = true;
+                None
+            }
+        },
+        Some(_) => {
+            *malformed = true;
+            None
+        }
+    }
+}
+
 /// Best-effort extraction outcome. `partial` is set whenever any single
 /// projection failed or the transcript contained undecodable lines; the
 /// warnings are short, content-free descriptions (never raw transcript

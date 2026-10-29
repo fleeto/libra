@@ -9,16 +9,24 @@
 //! does not install hooks or launch Hermes.
 
 use std::{
+    collections::BTreeMap,
     fs::File,
     io::Read,
     path::{Component, Path, PathBuf},
-    time::SystemTime,
+    time::{Instant, SystemTime},
 };
 
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
-use super::super::adapter::{AgentKind, AgentSessionCtx, AgentStability, ObservedAgent};
+use super::super::{
+    adapter::{AgentKind, AgentSessionCtx, AgentStability, ObservedAgent},
+    coverage::{
+        CanonValue, Completeness, NormalizedTurn, SemanticRecord, parse_canon_value,
+        valid_provider_turn_id,
+    },
+    extract::{HermesSessionUsage, project_hermes_session_usage},
+};
 use crate::utils::object::{open_directory_tree_no_follow, open_regular_file_at_no_follow};
 
 /// Hard cap for one Hermes source. Larger inputs are refused, not truncated
@@ -151,6 +159,22 @@ pub fn read_hermes_jsonl(
         return HermesSourceStatus::Unavailable;
     };
     project_messages(messages, limits)
+}
+
+/// Read one explicit export after the scope check. The bytes are the original
+/// JSONL, not the thinking-only projection. A symlink or a scope miss returns
+/// nothing. This does not scan a Hermes home.
+pub fn authorized_hermes_jsonl_bytes(
+    path: &Path,
+    scope: &HermesScope,
+    limits: &HermesReadLimits,
+) -> Option<Vec<u8>> {
+    let root = path.parent().filter(|root| !root.as_os_str().is_empty())?;
+    let bytes = read_regular_under_root(root, path, limits.max_bytes)?;
+    match read_hermes_jsonl(&bytes, scope, limits) {
+        HermesSourceStatus::Read(_) => Some(bytes),
+        HermesSourceStatus::Unavailable => None,
+    }
 }
 
 /// Open one regular file under `authorized_root` without following a symlink,
@@ -613,11 +637,9 @@ async fn read_sqlite_snapshot(
         }));
     }
     let status = project_messages(&values, limits);
-    if overflow {
-        if let HermesSourceStatus::Read(mut transcript) = status {
-            transcript.partial = true;
-            return HermesSourceStatus::Read(transcript);
-        }
+    if overflow && let HermesSourceStatus::Read(mut transcript) = status {
+        transcript.partial = true;
+        return HermesSourceStatus::Read(transcript);
     }
     status
 }
@@ -637,5 +659,469 @@ fn integer_column(row: &sea_orm::sqlx::sqlite::SqliteRow, index: usize) -> Value
     match row.try_get::<i64, _>(index) {
         Ok(value) => Value::from(value),
         Err(_) => Value::Null,
+    }
+}
+
+/// One kept message's thinking fields, unchanged and not interpreted.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+pub struct HermesRetainedThinking {
+    pub message_id: Option<i64>,
+    pub turn_key: String,
+    pub reasoning: Option<String>,
+    pub reasoning_content: Option<String>,
+    pub reasoning_details: Option<String>,
+    pub codex_reasoning_items: Option<String>,
+    pub codex_message_items: Option<String>,
+}
+
+/// Ordinary turns plus the source values HM-07 still has to store.
+///
+/// Thinking is not a coverage reasoning record and is not copied into the
+/// assistant answer. `parent_associated` stays false: an unproven parent is
+/// not linked. `source_state` stays `unproven` until a later card has a
+/// native issuer.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct HermesNormalized {
+    pub turns: Vec<NormalizedTurn>,
+    pub retained: Vec<HermesRetainedThinking>,
+    pub usage: Option<HermesSessionUsage>,
+    pub partial: bool,
+    pub parent_associated: bool,
+    pub source_state: &'static str,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum HermesNormalizeStatus {
+    Ready(HermesNormalized),
+    Unavailable,
+}
+
+impl std::fmt::Display for HermesNormalizeStatus {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Ready(normalized) if normalized.partial => {
+                formatter.write_str("hermes normalize is partial")
+            }
+            Self::Ready(_) => formatter.write_str("hermes normalize is ready"),
+            Self::Unavailable => formatter.write_str("hermes normalize is unavailable"),
+        }
+    }
+}
+
+/// Normalize one official JSONL export. No path, process, or repository write.
+pub fn normalize_hermes_jsonl(
+    bytes: &[u8],
+    scope: &HermesScope,
+    limits: &HermesReadLimits,
+) -> HermesNormalizeStatus {
+    normalize_hermes_jsonl_until(bytes, scope, limits, None)
+        .unwrap_or(HermesNormalizeStatus::Unavailable)
+}
+
+/// `None` means the deadline elapsed. Unavailable is a status, not a timeout.
+pub fn normalize_hermes_jsonl_until(
+    bytes: &[u8],
+    scope: &HermesScope,
+    limits: &HermesReadLimits,
+    deadline: Option<Instant>,
+) -> Option<HermesNormalizeStatus> {
+    if deadline_elapsed(deadline) {
+        return None;
+    }
+    if bytes.len() as u64 > limits.max_bytes || limits.max_sessions == 0 || limits.max_rows == 0 {
+        return Some(HermesNormalizeStatus::Unavailable);
+    }
+    let mut lines = bytes
+        .split(|byte| *byte == b'\n')
+        .filter(|line| !line.is_empty());
+    let Some(first) = lines.next() else {
+        return Some(HermesNormalizeStatus::Unavailable);
+    };
+    if lines.take(limits.max_sessions).next().is_some() {
+        return Some(HermesNormalizeStatus::Unavailable);
+    }
+    let value: Value = match serde_json::from_slice(first) {
+        Ok(value) => value,
+        Err(_) => return Some(HermesNormalizeStatus::Unavailable),
+    };
+    let Some(session) = value.as_object() else {
+        return Some(HermesNormalizeStatus::Unavailable);
+    };
+    if !session_scope_matches(session, scope) {
+        return Some(HermesNormalizeStatus::Unavailable);
+    }
+    let Some(messages) = session.get("messages").and_then(Value::as_array) else {
+        return Some(HermesNormalizeStatus::Unavailable);
+    };
+    Some(HermesNormalizeStatus::Ready(normalize_kept_messages(
+        session, messages, limits, deadline,
+    )?))
+}
+
+fn deadline_elapsed(deadline: Option<Instant>) -> bool {
+    deadline.is_some_and(|deadline| Instant::now() >= deadline)
+}
+
+struct DraftMessage {
+    id: Option<i64>,
+    message_uid: Option<String>,
+    platform_message_id: Option<String>,
+    role: String,
+    content: String,
+    content_partial: bool,
+    tool_call_id: Option<String>,
+    tool_name: Option<String>,
+    tool_calls: Vec<(Option<String>, String, CanonValue)>,
+    tool_partial: bool,
+    failed: bool,
+    timestamp: Option<i64>,
+    retained: HermesRetainedThinking,
+}
+
+fn normalize_kept_messages(
+    session: &serde_json::Map<String, Value>,
+    messages: &[Value],
+    limits: &HermesReadLimits,
+    deadline: Option<Instant>,
+) -> Option<HermesNormalized> {
+    let usage = project_hermes_session_usage(session);
+    let mut partial = usage.as_ref().is_some_and(|usage| usage.malformed);
+    let mut drafts = Vec::new();
+    for message in messages {
+        if deadline_elapsed(deadline) {
+            return None;
+        }
+        let Some(object) = message.as_object() else {
+            partial = true;
+            continue;
+        };
+        if !flag(object.get("active")) && !flag(object.get("compacted")) {
+            continue;
+        }
+        if drafts.len() >= limits.max_rows {
+            partial = true;
+            break;
+        }
+        drafts.push(draft_message(object, &mut partial));
+    }
+    if drafts.iter().any(|draft| draft.id.is_none()) {
+        partial = true;
+    } else {
+        drafts.sort_by_key(|draft| draft.id);
+    }
+    drafts = dedupe_drafts(drafts);
+    let mut turns: Vec<NormalizedTurn> = Vec::new();
+    let mut retained = Vec::new();
+    let mut current: Option<usize> = None;
+    for draft in drafts {
+        if deadline_elapsed(deadline) {
+            return None;
+        }
+        let opens_turn = draft.role == "user" && !draft.content.is_empty();
+        if opens_turn || current.is_none() {
+            let ordinal = turns.len();
+            let logical_turn_key = draft
+                .id
+                .map(|id| id.to_string())
+                .filter(|id| valid_provider_turn_id(id))
+                .unwrap_or_else(|| format!("ordinal:{ordinal}"));
+            turns.push(NormalizedTurn {
+                logical_turn_key,
+                ordinal,
+                completeness: Completeness::Complete,
+                started_at: None,
+                ended_at: None,
+                records: Vec::new(),
+            });
+            current = Some(turns.len() - 1);
+        }
+        // INVARIANT: the branch above pushes a turn whenever `current` is empty.
+        let index = current?;
+        let turn = turns.get_mut(index)?;
+        if draft.content_partial || draft.tool_partial || draft.failed || draft.role.is_empty() {
+            turn.completeness = Completeness::Incomplete;
+            partial = true;
+        }
+        match draft.role.as_str() {
+            "user" if !draft.content.is_empty() => turn.records.push(SemanticRecord::User {
+                text: draft.content,
+            }),
+            "assistant" => {
+                if !draft.content.is_empty() {
+                    turn.records.push(SemanticRecord::Assistant {
+                        text: draft.content,
+                    });
+                }
+                for (call_id, name, input) in draft.tool_calls {
+                    turn.records.push(SemanticRecord::ToolCall {
+                        call_id,
+                        input,
+                        name,
+                    });
+                }
+            }
+            "tool" => turn.records.push(SemanticRecord::ToolResult {
+                call_id: draft.tool_call_id.clone(),
+                content: draft.content,
+                is_error: draft.failed || draft.tool_name.as_deref() == Some("error"),
+            }),
+            _ => {
+                turn.completeness = Completeness::Incomplete;
+                partial = true;
+            }
+        }
+        if let Some(timestamp) = draft.timestamp {
+            turn.started_at = Some(
+                turn.started_at
+                    .map_or(timestamp, |current| current.min(timestamp)),
+            );
+            turn.ended_at = Some(
+                turn.ended_at
+                    .map_or(timestamp, |current| current.max(timestamp)),
+            );
+        }
+        let mut kept = draft.retained;
+        kept.turn_key = turn.logical_turn_key.clone();
+        if kept.reasoning.is_some()
+            || kept.reasoning_content.is_some()
+            || kept.reasoning_details.is_some()
+            || kept.codex_reasoning_items.is_some()
+            || kept.codex_message_items.is_some()
+        {
+            retained.push(kept);
+        }
+    }
+    turns.retain(|turn| !turn.records.is_empty() || turn.completeness == Completeness::Incomplete);
+    for (ordinal, turn) in turns.iter_mut().enumerate() {
+        if turn.logical_turn_key == format!("ordinal:{}", turn.ordinal) {
+            turn.logical_turn_key = format!("ordinal:{ordinal}");
+        }
+        turn.ordinal = ordinal;
+    }
+    if partial && let Some(last) = turns.last_mut() {
+        last.completeness = Completeness::Incomplete;
+    }
+    Some(HermesNormalized {
+        turns,
+        retained,
+        usage,
+        partial,
+        parent_associated: false,
+        source_state: "unproven",
+    })
+}
+
+fn draft_message(object: &serde_json::Map<String, Value>, partial: &mut bool) -> DraftMessage {
+    let mut content_partial = false;
+    let mut tool_partial = false;
+    let (reasoning_details, details_partial) = raw_json_string(object.get("reasoning_details"));
+    let (codex_reasoning_items, items_partial) =
+        raw_json_string(object.get("codex_reasoning_items"));
+    let (codex_message_items, message_partial) = raw_json_string(object.get("codex_message_items"));
+    *partial |= details_partial || items_partial || message_partial;
+    DraftMessage {
+        id: object
+            .get("id")
+            .and_then(Value::as_i64)
+            .filter(|id| *id >= 0),
+        message_uid: optional_nonempty(object.get("message_uid")),
+        platform_message_id: optional_nonempty(object.get("platform_message_id")),
+        role: object
+            .get("role")
+            .and_then(Value::as_str)
+            .unwrap_or("")
+            .to_string(),
+        content: ordinary_text(object.get("content"), &mut content_partial),
+        content_partial,
+        tool_call_id: optional_nonempty(object.get("tool_call_id")),
+        tool_name: optional_nonempty(object.get("tool_name")),
+        tool_calls: tool_calls_from(object.get("tool_calls"), &mut tool_partial),
+        tool_partial,
+        failed: failed_finish(object.get("finish_reason"))
+            || matches!(
+                object.get("effect_disposition").and_then(Value::as_str),
+                Some("error" | "failed")
+            ),
+        timestamp: message_timestamp(object.get("timestamp")),
+        retained: HermesRetainedThinking {
+            message_id: object
+                .get("id")
+                .and_then(Value::as_i64)
+                .filter(|id| *id >= 0),
+            turn_key: String::new(),
+            reasoning: optional_text(object.get("reasoning")),
+            reasoning_content: optional_text(object.get("reasoning_content")),
+            reasoning_details,
+            codex_reasoning_items,
+            codex_message_items,
+        },
+    }
+}
+
+fn dedupe_drafts(drafts: Vec<DraftMessage>) -> Vec<DraftMessage> {
+    fn keep_last(
+        drafts: Vec<DraftMessage>,
+        key: impl Fn(&DraftMessage) -> Option<&str>,
+    ) -> Vec<DraftMessage> {
+        let mut last_for_key = BTreeMap::<String, usize>::new();
+        for (index, draft) in drafts.iter().enumerate() {
+            if let Some(value) = key(draft) {
+                last_for_key.insert(value.to_string(), index);
+            }
+        }
+        drafts
+            .into_iter()
+            .enumerate()
+            .filter(|(index, draft)| match key(draft) {
+                Some(value) => last_for_key.get(value).copied() == Some(*index),
+                None => true,
+            })
+            .map(|(_, draft)| draft)
+            .collect()
+    }
+    let drafts = keep_last(drafts, |draft| draft.message_uid.as_deref());
+    keep_last(drafts, |draft| draft.platform_message_id.as_deref())
+}
+
+fn ordinary_text(value: Option<&Value>, partial: &mut bool) -> String {
+    match value {
+        None | Some(Value::Null) => String::new(),
+        Some(Value::String(text)) => text.clone(),
+        Some(Value::Array(items)) => {
+            let mut text = String::new();
+            for item in items {
+                if let Some(text_item) = item.as_str() {
+                    text.push_str(text_item);
+                    continue;
+                }
+                let Some(object) = item.as_object() else {
+                    *partial = true;
+                    continue;
+                };
+                let kind = object.get("type").and_then(Value::as_str).unwrap_or("");
+                if kind == "reasoning" || kind == "thinking" {
+                    continue;
+                }
+                if let Some(part) = object.get("text").and_then(Value::as_str) {
+                    text.push_str(part);
+                } else {
+                    *partial = true;
+                }
+            }
+            text
+        }
+        Some(_) => {
+            *partial = true;
+            String::new()
+        }
+    }
+}
+
+fn tool_calls_from(
+    value: Option<&Value>,
+    partial: &mut bool,
+) -> Vec<(Option<String>, String, CanonValue)> {
+    let Some(Value::Array(items)) = value else {
+        if value.is_some_and(|value| !value.is_null()) {
+            *partial = true;
+        }
+        return Vec::new();
+    };
+    let mut calls = Vec::new();
+    for item in items {
+        let Some(object) = item.as_object() else {
+            *partial = true;
+            continue;
+        };
+        let call_id = optional_nonempty(object.get("id"));
+        let (name, arguments) =
+            if let Some(function) = object.get("function").and_then(Value::as_object) {
+                (
+                    optional_nonempty(function.get("name")).unwrap_or_default(),
+                    function.get("arguments"),
+                )
+            } else {
+                (
+                    optional_nonempty(object.get("name")).unwrap_or_default(),
+                    object.get("arguments").or_else(|| object.get("input")),
+                )
+            };
+        if name.is_empty() {
+            *partial = true;
+        }
+        calls.push((call_id, name, arguments_value(arguments, partial)));
+    }
+    calls
+}
+
+fn arguments_value(value: Option<&Value>, partial: &mut bool) -> CanonValue {
+    match value {
+        None | Some(Value::Null) => CanonValue::Null,
+        Some(Value::String(text)) => match parse_canon_value(text.as_bytes()) {
+            Ok(parsed) => parsed,
+            Err(_) => {
+                *partial = true;
+                CanonValue::Null
+            }
+        },
+        Some(other) => json_to_canon(other, partial),
+    }
+}
+
+fn json_to_canon(value: &Value, partial: &mut bool) -> CanonValue {
+    match value {
+        Value::Null => CanonValue::Null,
+        Value::Bool(bit) => CanonValue::Bool(*bit),
+        Value::Number(number) => match number.as_i64() {
+            Some(integer) => CanonValue::Int(integer),
+            None => {
+                *partial = true;
+                CanonValue::Null
+            }
+        },
+        Value::String(text) => CanonValue::Str(text.clone()),
+        Value::Array(items) => CanonValue::Array(
+            items
+                .iter()
+                .map(|item| json_to_canon(item, partial))
+                .collect(),
+        ),
+        Value::Object(map) => CanonValue::Object(
+            map.iter()
+                .map(|(key, value)| (key.clone(), json_to_canon(value, partial)))
+                .collect(),
+        ),
+    }
+}
+
+fn optional_nonempty(value: Option<&Value>) -> Option<String> {
+    value
+        .and_then(Value::as_str)
+        .filter(|text| !text.is_empty())
+        .map(str::to_string)
+}
+
+fn failed_finish(value: Option<&Value>) -> bool {
+    matches!(
+        value
+            .and_then(Value::as_str)
+            .map(|text| text.to_ascii_lowercase())
+            .as_deref(),
+        Some(
+            "error" | "length" | "failed" | "failure" | "content_filter" | "cancelled" | "canceled"
+        )
+    )
+}
+
+fn message_timestamp(value: Option<&Value>) -> Option<i64> {
+    let number = value?.as_f64()?;
+    if !number.is_finite() || number < 0.0 {
+        return None;
+    }
+    let whole = number.trunc();
+    if whole > 10_000_000_000.0 {
+        Some((whole / 1000.0) as i64)
+    } else {
+        Some(whole as i64)
     }
 }

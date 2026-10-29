@@ -1263,7 +1263,7 @@ MEM-03 → MEM-04；LR-09（plan-20260913 `FL-04/05` 收口）；LR-10；MEM-05 
 | [`plan-20260907.md`](plan-20260907.md) | 横切（BLAKE3 object format） | 已完成 | B3-00..B3-17 全部 `done`/`complete`（`v0.23.68`→`v0.29.0`）；最终 Codex/Claude R40 双 PASS；`DEP-B3-05` 已满足 |
 | [`plan-20260910.md`](plan-20260910.md) | 横切（数据库迁移作用域） | 已排期 | 设计计划，任务卡尚未执行 |
 | [`plan-20260911.md`](plan-20260911.md) | B（Pi hook/capture boundary） | 已排期 | DATA-CAP-20261019：11卡 pending；PI-00 先核系统版本/模型；PI-08 保留 thinking/thoughtSignature；云围栏与 identity/schema 顺序不变，旧 R5 为历史；本次修订实际审查见计划 |
-| [`plan-20261018-hermes-capture.md`](plan-20261018-hermes-capture.md) | B（Hermes capture） | 实施中 | HM-00、HM-02 `done/complete` 且无版本。HM-01 已发布 v0.30.93。HM-03 `done/complete`：官方 JSONL reader 与只读 SQLite 后备，安装/启动仍关闭，云同步仍拒绝。下一张 HM-04 |
+| [`plan-20261018-hermes-capture.md`](plan-20261018-hermes-capture.md) | B（Hermes capture） | 实施中 | HM-00、HM-02 `done/complete` 且无版本。HM-01 已发布 v0.30.93。HM-03 `done/complete`。HM-04 `done/complete`：显式导入官方 JSONL，thinking 仍为 unproven，安装/启动仍关闭，云同步仍拒绝。下一张 HM-07 |
 | [`plan-20261018-grok-capture.md`](plan-20261018-grok-capture.md) | B（Grok capture） | GK-01 可开工 | 2026-10-19：用户取消上游 commit SHA 检查。GK-01..05 按本机 1.0.62 字段矩阵 GO。GK-00 locally-accepted，Acceptance 空。 |
 | [`plan-20260912.md`](plan-20260912.md) | B（memory boundary） | 已排期 | 设计计划，任务卡尚未执行 |
 | [`plan-20260913.md`](plan-20260913.md) | A（LR-09 FastCDC Media） | 实施中 | FL-00/01/07/02/06/03 `done`/`complete`、FL-04 `in-progress`/`locally-accepted`、FL-05 待效果门；v0.30.0 家族发布（原「设计计划、FL-00 可开工」表述已过时，按计划头部状态更新） |

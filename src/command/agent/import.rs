@@ -58,8 +58,8 @@ use crate::{
                 authorize_final_capture_commit,
             },
             observed_agents::{
-                AgentKind, AgentSessionCtx, CodexRolloutScanLimit, TRANSCRIPT_READ_HARD_CAP_BYTES,
-                TranscriptSource, agent_for, claude_session_dir,
+                AgentKind, AgentSessionCtx, CodexRolloutScanLimit, ExportAuthorized,
+                TRANSCRIPT_READ_HARD_CAP_BYTES, TranscriptSource, agent_for, claude_session_dir,
                 claude_session_id_is_safe_path_component,
                 codex_index::{self, ImportIndexOutcome, ImportSourceState, RecentScopeStatus},
                 compliance::{MAX_TRANSCRIPT_READ_BYTES_KEY, max_transcript_read_bytes_setting},
@@ -102,7 +102,8 @@ EXAMPLES:
     libra agent import --session <id> --agent opencode --yes
     libra agent import --path ~/.claude/projects/<project>/<id>.jsonl --agent claude-code --yes
     libra agent import --since 2026-07-01T00:00:00Z --agent codex --limit 20 --yes
-    libra agent import --all --agent claude-code --limit 20 --yes\n    libra agent import --codex-index-backup ./closed-index.sqlite --limit 20 --yes";
+    libra agent import --all --agent claude-code --limit 20 --yes
+    libra agent import --path <session-id>.jsonl --agent hermes --yes\n    libra agent import --codex-index-backup ./closed-index.sqlite --limit 20 --yes";
 
 const DEFAULT_IMPORT_LIMIT: usize = 20;
 const MAX_IMPORT_LIMIT: usize = 100;
@@ -361,7 +362,7 @@ pub struct ImportArgs {
     /// Backfill absent Codex sessions from an explicit closed full-history index backup.
     #[arg(long, value_name = "PATH")]
     pub codex_index_backup: Option<PathBuf>,
-    /// Provider filter (`claude-code`, `codex`, or `opencode`).
+    /// Provider filter (`claude-code`, `codex`, `opencode`, or `hermes`).
     #[arg(long, value_name = "NAME")]
     pub agent: Option<String>,
     /// Maximum discovered sessions to process (default 20, maximum 100).
@@ -942,7 +943,12 @@ struct BatchFailure {
 
 fn importable_kind_from_slug(slug: &str) -> Option<AgentKind> {
     match AgentKind::from_cli_slug(slug) {
-        Some(kind @ (AgentKind::ClaudeCode | AgentKind::Codex | AgentKind::OpenCode)) => Some(kind),
+        Some(
+            kind @ (AgentKind::ClaudeCode
+            | AgentKind::Codex
+            | AgentKind::OpenCode
+            | AgentKind::Hermes),
+        ) => Some(kind),
         _ => None,
     }
 }
@@ -952,7 +958,7 @@ fn importable_kind_from_slug(slug: &str) -> Option<AgentKind> {
 fn importable_kind(slug: &str) -> CliResult<AgentKind> {
     importable_kind_from_slug(slug).ok_or_else(|| {
         CliError::command_usage(format!(
-            "agent import supports claude-code, codex, or opencode; got '{}'",
+            "agent import supports claude-code, codex, opencode, or hermes; got '{}'",
             bounded_argv_echo(slug)
         ))
         .with_stable_code(StableErrorCode::CliInvalidArguments)
@@ -1017,7 +1023,9 @@ fn codex_session_id_is_safe_path_component(value: &str) -> bool {
 
 fn session_id_is_valid_for_kind(value: &str, kind: AgentKind) -> bool {
     match kind {
-        AgentKind::Codex | AgentKind::OpenCode => codex_session_id_is_safe_path_component(value),
+        AgentKind::Codex | AgentKind::OpenCode | AgentKind::Hermes => {
+            codex_session_id_is_safe_path_component(value)
+        }
         AgentKind::ClaudeCode => claude_session_id_is_safe_path_component(value),
         _ => false,
     }
@@ -1028,7 +1036,7 @@ fn validate_session_id_for_kind(value: &str, kind: AgentKind) -> CliResult<()> {
         Ok(())
     } else {
         let expected = match kind {
-            AgentKind::Codex | AgentKind::OpenCode => {
+            AgentKind::Codex | AgentKind::OpenCode | AgentKind::Hermes => {
                 "alphanumeric/dash/underscore, at most 64 characters"
             }
             AgentKind::ClaudeCode => "alphanumeric/dot/dash/underscore, at most 128 characters",
@@ -1046,6 +1054,11 @@ fn codex_session_id_from_filename(path: &Path) -> Option<String> {
     let stem = path.file_stem()?.to_string_lossy();
     let suffix = stem.get(stem.len().checked_sub(36)?..)?;
     uuid::Uuid::parse_str(suffix).ok().map(|id| id.to_string())
+}
+
+fn hermes_session_id_from_filename(path: &Path) -> Option<String> {
+    let stem = path.file_stem()?.to_str()?;
+    session_id_is_valid_for_kind(stem, AgentKind::Hermes).then(|| stem.to_string())
 }
 
 fn claude_session_id_from_filename(path: &Path) -> Option<String> {
@@ -1074,6 +1087,7 @@ fn path_candidate(path: PathBuf, kind: AgentKind) -> CliResult<Candidate> {
     let provider_session_id = match kind {
         AgentKind::ClaudeCode => claude_session_id_from_filename(&absolute),
         AgentKind::Codex => codex_session_id_from_filename(&absolute),
+        AgentKind::Hermes => hermes_session_id_from_filename(&absolute),
         _ => None,
     }
     .ok_or_else(|| {
@@ -1989,6 +2003,12 @@ fn validate_discovery_selector(args: &ImportArgs) -> CliResult<DiscoverySelector
         })?;
         return Ok(DiscoverySelector::Path(path_candidate(path, kind)?));
     }
+    if filter == Some(AgentKind::Hermes) && args.path.is_none() {
+        return Err(CliError::command_usage(
+            "Hermes import requires --path to one <session-id>.jsonl export and does not scan a Hermes home",
+        )
+        .with_stable_code(StableErrorCode::CliInvalidArguments));
+    }
     if let Some(session_id) = args.session.as_deref() {
         if let Some(kind) = filter {
             validate_session_id_for_kind(session_id, kind)?;
@@ -2399,6 +2419,34 @@ async fn resolve_candidate_source(
     let _ = INDEX_SOURCE_READS.try_with(|count| {
         count.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
     });
+    if candidate.kind == AgentKind::Hermes {
+        let path = candidate
+            .path
+            .as_ref()
+            .context("Hermes import requires one explicit JSONL path")?;
+        let scope = crate::internal::ai::observed_agents::builtin::hermes::HermesScope {
+            session_id: candidate.provider_session_id.clone(),
+            profile: "default".to_string(),
+            repo_root: repo_root.to_path_buf(),
+        };
+        let bytes =
+            crate::internal::ai::observed_agents::builtin::hermes::authorized_hermes_jsonl_bytes(
+                path,
+                &scope,
+                &crate::internal::ai::observed_agents::HermesReadLimits::default(),
+            )
+            .ok_or(ImportError::SourceAuthorization)?;
+        let session_id = crate::internal::ai::hooks::runtime::build_ai_session_id(
+            "hermes",
+            &candidate.provider_session_id,
+        );
+        let auth = ExportAuthorized::issue("hermes", &session_id, &bytes);
+        return Ok((
+            TranscriptSource::Bytes { bytes, auth },
+            "file".to_string(),
+            candidate.provider_session_id.clone(),
+        ));
+    }
     if candidate.kind == AgentKind::OpenCode {
         let session_id = crate::internal::ai::hooks::runtime::build_ai_session_id(
             "opencode",
@@ -2500,7 +2548,7 @@ fn descriptor_preparation_control_from_environment() -> Result<PreparationDescri
         || AgentKind::from_cli_slug(&control.agent_kind).is_none_or(|kind| {
             !matches!(
                 kind,
-                AgentKind::ClaudeCode | AgentKind::Codex | AgentKind::OpenCode
+                AgentKind::ClaudeCode | AgentKind::Codex | AgentKind::OpenCode | AgentKind::Hermes
             )
         })
     {
@@ -6404,7 +6452,7 @@ mod tests {
             ),
             (
                 selector_args(|args| args.agent = Some("gemini".to_string())),
-                "agent import supports claude-code, codex, or opencode; got 'gemini'",
+                "agent import supports claude-code, codex, opencode, or hermes; got 'gemini'",
             ),
             (
                 selector_args(|args| {
@@ -6456,7 +6504,7 @@ mod tests {
         assert_eq!(
             error.message(),
             format!(
-                "agent import supports claude-code, codex, or opencode; got 'x{}…'",
+                "agent import supports claude-code, codex, opencode, or hermes; got 'x{}…'",
                 "y".repeat(63)
             )
         );
@@ -6466,7 +6514,7 @@ mod tests {
         .expect_err("unsupported agent");
         assert_eq!(
             error.message(),
-            "agent import supports claude-code, codex, or opencode; got 'bad?[2Jslug'"
+            "agent import supports claude-code, codex, opencode, or hermes; got 'bad?[2Jslug'"
         );
     }
 

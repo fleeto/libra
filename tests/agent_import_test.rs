@@ -3901,7 +3901,7 @@ fn agent_import_discovery_errors_keep_actionable_messages() {
         ),
         (
             &["--all", "--agent", "gemini", "--yes"][..],
-            "agent import supports claude-code, codex, or opencode; got 'gemini'",
+            "agent import supports claude-code, codex, opencode, or hermes; got 'gemini'",
             "LBR-CLI-002",
             129,
         ),
@@ -4866,8 +4866,10 @@ fn hermes_source_jsonl_keeps_thinking_and_drops_revoked_rows() {
     );
     assert!(!status_text_leaks(&transcript.messages[1]));
 
-    let mut limits = libra::internal::ai::observed_agents::HermesReadLimits::default();
-    limits.max_rows = 1;
+    let limits = libra::internal::ai::observed_agents::HermesReadLimits {
+        max_rows: 1,
+        ..libra::internal::ai::observed_agents::HermesReadLimits::default()
+    };
     let status = libra::internal::ai::observed_agents::read_hermes_jsonl(
         bytes.as_bytes(),
         &hermes_source_scope(&repo),
@@ -5007,8 +5009,10 @@ conn.commit()
         transcript.messages[1].readable_thinking(),
         Some("kept-thought")
     );
-    let mut tight = libra::internal::ai::observed_agents::HermesReadLimits::default();
-    tight.max_rows = 1;
+    let tight = libra::internal::ai::observed_agents::HermesReadLimits {
+        max_rows: 1,
+        ..libra::internal::ai::observed_agents::HermesReadLimits::default()
+    };
     let tight_status = libra::internal::ai::observed_agents::read_hermes_sqlite(
         &db,
         &root,
@@ -5080,4 +5084,251 @@ conn.commit()
 fn status_text_leaks(message: &libra::internal::ai::observed_agents::HermesMessage) -> bool {
     let rendered = format!("{message:?}");
     rendered.contains("/secret")
+}
+
+fn hermes_normalize_session(repo: &std::path::Path, messages: serde_json::Value) -> String {
+    json!({
+        "id": "0123456789abcdef0123456789abcdef",
+        "source": "cli",
+        "cwd": repo,
+        "started_at": 1_700_000_000,
+        "ended_at": 1_700_000_100,
+        "parent_session_id": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "input_tokens": 5,
+        "output_tokens": 7,
+        "session_model_usage": [{"input_tokens": 50, "output_tokens": 70}],
+        "messages": messages,
+    })
+    .to_string()
+}
+
+fn hermes_normalize_scope(
+    repo: &std::path::Path,
+) -> libra::internal::ai::observed_agents::builtin::hermes::HermesScope {
+    libra::internal::ai::observed_agents::builtin::hermes::HermesScope {
+        session_id: "0123456789abcdef0123456789abcdef".to_string(),
+        profile: "default".to_string(),
+        repo_root: repo.to_path_buf(),
+    }
+}
+
+#[test]
+fn hermes_normalize_sorts_by_id_keeps_thinking_and_ignores_mirrored_usage() {
+    use libra::internal::ai::observed_agents::{
+        Completeness, HermesReadLimits, SemanticRecord,
+        builtin::hermes::{HermesNormalizeStatus, normalize_hermes_jsonl},
+    };
+
+    let repo = std::env::temp_dir().join("hermes-normalize-scope");
+    let bytes = hermes_normalize_session(
+        &repo,
+        json!([
+            {"id": 3, "role": "assistant", "content": "answer", "active": 1, "compacted": 0,
+             "timestamp": 10, "reasoning": "kept-thinking", "reasoning_content": "",
+             "reasoning_details": "{\"raw\":true}", "token_count": 99, "finish_reason": "stop",
+             "tool_calls": [{"id": "call-1", "function": {"name": "read", "arguments": "{\"path\":\"a\"}"}}]},
+            {"id": 1, "role": "user", "content": "prompt", "active": 1, "compacted": 0,
+             "timestamp": 99, "reasoning": null},
+            {"id": 2, "role": "user", "content": "revoked", "active": 0, "compacted": 0,
+             "timestamp": 1, "token_count": 99},
+            {"id": 4, "role": "tool", "content": "tool-out", "tool_call_id": "call-1",
+             "active": 1, "compacted": 0, "timestamp": 11, "token_count": 5},
+            {"id": 5, "role": "assistant", "content": "failed-copy", "active": 1, "compacted": 0,
+             "timestamp": 12, "finish_reason": "error", "token_count": 40, "message_uid": "dup"},
+            {"id": 6, "role": "assistant", "content": "retried-answer", "active": 1, "compacted": 0,
+             "timestamp": 13, "finish_reason": "stop", "token_count": 40, "message_uid": "dup"},
+            {"id": 7, "role": "assistant", "content": "truncated", "active": 1, "compacted": 0,
+             "timestamp": 14, "finish_reason": "length", "token_count": 3}
+        ]),
+    );
+    let status = normalize_hermes_jsonl(
+        bytes.as_bytes(),
+        &hermes_normalize_scope(&repo),
+        &HermesReadLimits::default(),
+    );
+    let HermesNormalizeStatus::Ready(normalized) = status else {
+        panic!("normalize unavailable");
+    };
+    assert!(!normalized.parent_associated);
+    assert_eq!(normalized.source_state, "unproven");
+    let usage = normalized.usage.expect("known session usage");
+    assert_eq!(usage.input_tokens, Some(5));
+    assert_eq!(usage.output_tokens, Some(7));
+    assert_eq!(usage.cache_read_tokens, None);
+    assert!(!usage.malformed);
+    assert_eq!(normalized.turns.len(), 1);
+    let turn = &normalized.turns[0];
+    assert_eq!(turn.logical_turn_key, "1");
+    assert_eq!(turn.ordinal, 0);
+    assert_eq!(turn.completeness, Completeness::Incomplete);
+    assert!(matches!(turn.records[0], SemanticRecord::User { ref text } if text == "prompt"));
+    assert!(matches!(turn.records[1], SemanticRecord::Assistant { ref text } if text == "answer"));
+    assert!(
+        turn.records.iter().any(
+            |record| matches!(record, SemanticRecord::ToolCall { name, .. } if name == "read")
+        )
+    );
+    assert!(turn.records.iter().any(|record| matches!(record, SemanticRecord::ToolResult { content, .. } if content == "tool-out")));
+    assert!(turn.records.iter().any(
+        |record| matches!(record, SemanticRecord::Assistant { text } if text == "retried-answer")
+    ));
+    assert!(!format!("{turn:?}").contains("kept-thinking"));
+    assert!(!format!("{turn:?}").contains("failed-copy"));
+    assert!(!format!("{turn:?}").contains("revoked"));
+    let retained = normalized
+        .retained
+        .iter()
+        .find(|item| item.message_id == Some(3))
+        .expect("retained thinking");
+    assert_eq!(retained.reasoning.as_deref(), Some("kept-thinking"));
+    assert_eq!(retained.reasoning_content.as_deref(), Some(""));
+    assert_eq!(
+        retained.reasoning_details.as_deref(),
+        Some("{\"raw\":true}")
+    );
+    assert_eq!(retained.turn_key, "1");
+
+    let unknown = hermes_normalize_session(
+        &repo,
+        json!([
+            {"id": 1, "role": "user", "content": "prompt", "active": 1, "compacted": 0, "timestamp": 10}
+        ]),
+    );
+    let unknown = unknown
+        .replace("\"input_tokens\":5,", "")
+        .replace("\"output_tokens\":7,", "");
+    let status = normalize_hermes_jsonl(
+        unknown.as_bytes(),
+        &hermes_normalize_scope(&repo),
+        &HermesReadLimits::default(),
+    );
+    let HermesNormalizeStatus::Ready(normalized) = status else {
+        panic!("unknown usage unavailable");
+    };
+    assert!(normalized.usage.is_none());
+}
+
+#[test]
+fn hermes_normalize_import_replays_one_checkpoint_without_enabling_hermes() {
+    use libra::internal::ai::observed_agents::registration_for;
+
+    let fixture = ImportRepo::init();
+    let session_id = "0123456789abcdef0123456789abcdef";
+    let path = fixture.repo.join(format!("{session_id}.jsonl"));
+    std::fs::write(
+        &path,
+        hermes_normalize_session(
+            &fixture.repo,
+            json!([
+                {"id": 1, "role": "user", "content": "prompt", "active": 1, "compacted": 0, "timestamp": 1700000001},
+                {"id": 2, "role": "assistant", "content": "answer", "active": 1, "compacted": 0,
+                 "timestamp": 1700000002, "reasoning": "kept-thinking", "finish_reason": "stop"}
+            ]),
+        ),
+    )
+    .expect("write export");
+    let scanned = fixture.run(&["agent", "import", "--agent", "hermes", "--all", "--yes"]);
+    assert!(!scanned.status.success(), "{}", describe(&scanned));
+    assert_eq!(checkpoint_count(&fixture), 0);
+    let first = fixture.run(&[
+        "agent",
+        "import",
+        "--agent",
+        "hermes",
+        "--path",
+        path.to_str().expect("utf8 path"),
+        "--yes",
+    ]);
+    assert!(first.status.success(), "{}", describe(&first));
+    let shown = format!(
+        "{}{}",
+        String::from_utf8_lossy(&first.stdout),
+        String::from_utf8_lossy(&first.stderr)
+    );
+    assert!(!shown.contains("kept-thinking"), "{shown}");
+    assert!(!shown.contains("prompt"), "{shown}");
+    assert_eq!(checkpoint_count(&fixture), 1);
+    let state = identity_state(&fixture);
+    assert_eq!(state, "committed");
+    let second = fixture.run(&[
+        "agent",
+        "import",
+        "--agent",
+        "hermes",
+        "--path",
+        path.to_str().expect("utf8 path"),
+        "--yes",
+    ]);
+    assert!(second.status.success(), "{}", describe(&second));
+    assert_eq!(
+        checkpoint_count(&fixture),
+        1,
+        "replay wrote another checkpoint"
+    );
+    let registration = registration_for(AgentKind::Hermes);
+    assert!(!registration.supported);
+    assert!(!registration.hook_installable);
+    assert!(!registration.launchable_review);
+    assert!(!registration.launchable_investigate);
+    assert!(!registration.transcript_readable);
+    let listed = fixture.run(&["agent", "list", "--json"]);
+    assert!(listed.status.success(), "{}", describe(&listed));
+    assert!(!String::from_utf8_lossy(&listed.stdout).contains("\"slug\":\"hermes\""));
+
+    let wrong = fixture.repo.join("fedcba9876543210fedcba9876543210.jsonl");
+    let mut body = hermes_normalize_session(
+        &fixture.repo,
+        json!([
+            {"id": 1, "role": "user", "content": "other", "active": 1, "compacted": 0, "timestamp": 1700000001}
+        ]),
+    );
+    body = body.replace(
+        "\"id\":\"0123456789abcdef0123456789abcdef\"",
+        "\"id\":\"fedcba9876543210fedcba9876543210\"",
+    );
+    body = body.replace(
+        "\"source\":\"cli\"",
+        "\"source\":\"cli\",\"profile_name\":\"other\"",
+    );
+    std::fs::write(&wrong, body).expect("write other profile");
+    let rejected = fixture.run(&[
+        "agent",
+        "import",
+        "--agent",
+        "hermes",
+        "--path",
+        wrong.to_str().expect("utf8 path"),
+        "--yes",
+    ]);
+    assert!(!rejected.status.success(), "{}", describe(&rejected));
+    assert_eq!(checkpoint_count(&fixture), 1);
+}
+
+fn checkpoint_count(fixture: &ImportRepo) -> i64 {
+    scalar(fixture, "SELECT COUNT(*) FROM agent_checkpoint")
+}
+
+fn identity_state(fixture: &ImportRepo) -> String {
+    scalar_text(fixture, "SELECT state FROM agent_import_identity")
+}
+
+fn scalar(fixture: &ImportRepo, sql: &str) -> i64 {
+    let text = scalar_text(fixture, sql);
+    text.trim()
+        .parse()
+        .unwrap_or_else(|_| panic!("scalar {sql}: {text}"))
+}
+
+fn scalar_text(fixture: &ImportRepo, sql: &str) -> String {
+    let db = fixture.repo.join(".libra/libra.db");
+    let mut command = std::process::Command::new("python3");
+    let output = command
+        .arg("-c")
+        .arg("import sqlite3,sys; print(sqlite3.connect(sys.argv[1]).execute(sys.argv[2]).fetchone()[0])")
+        .arg(&db)
+        .arg(sql)
+        .output()
+        .expect("query sqlite");
+    assert!(output.status.success(), "{}", describe(&output));
+    String::from_utf8_lossy(&output.stdout).trim().to_string()
 }

@@ -1,6 +1,6 @@
 # Hermes Agent 本地会话采集计划（2026-10-18）
 
-> **本机版本冻结：2026-10-29 16:42:17 UTC。** 本机 Hermes Agent v0.22.5（CLI 原文 `Hermes Agent v0.22.5 (2026.9.24) · stable · local bf0203a794a0`，并打印 `Up to date`）。安装目录 `/Users/eli/.hermes/hermes-agent`，方法 git，detached HEAD，完整提交 `bf0203a794a07aac3ff764972ab9087baa4e4f4e`。本地 tag `v0.22.5` 与 `rc.3-v0.22.5` 指向该提交。GitHub latest release 同为 `v0.22.5`，发布时间 2026-10-23T05:28:45Z，发布说明引用提交前缀 `bf0203a794a`。二进制 `/Users/eli/.local/bin/hermes`（同目录另有 `hermes-agent`）。Python 3.14.9。旧 pin `ccc6956` 只保留为 2026-10-18 历史，不再作为当前 source。本轮未读 `~/.hermes/state.db`、会话目录、`config.yaml` 或 `.env`，未启动模型。10 张卡仍 `pending`，不勾验收，不增加完成数。Thinking 主源、哈希与 GO/HOLD 见「HM-00 版本冻结」。
+> **本机版本冻结：2026-10-29 16:42:17 UTC。** 本机 Hermes Agent v0.22.5（CLI 原文 `Hermes Agent v0.22.5 (2026.9.24) · stable · local bf0203a794a0`，并打印 `Up to date`）。安装目录 `/Users/eli/.hermes/hermes-agent`，方法 git，detached HEAD，完整提交 `bf0203a794a07aac3ff764972ab9087baa4e4f4e`。本地 tag `v0.22.5` 与 `rc.3-v0.22.5` 指向该提交。GitHub latest release 同为 `v0.22.5`，发布时间 2026-10-23T05:28:45Z，发布说明引用提交前缀 `bf0203a794a`。二进制 `/Users/eli/.local/bin/hermes`（同目录另有 `hermes-agent`）。Python 3.14.9。旧 pin `ccc6956` 只保留为 2026-10-18 历史，不再作为当前 source。本轮未读 `~/.hermes/state.db`、会话目录、`config.yaml` 或 `.env`，未启动模型。冻结当时 10 张卡仍 `pending`。HM-00 的审计收口在后文，不把真实数据算成已取得。Thinking 主源、哈希与 GO/HOLD 见「HM-00 版本冻结」。
 
 > **数据获取优先修订：2026-10-18 16:23:55 UTC（用户本次明确授权）。** 采用 [DATA-CAP-20261019](plan-20260904.md#thinking-data-baseline-20261019)：按 OpenCode 实测保留 thinking 正文及其未证明附带数据，不再以 native 来源认证或隐私剥离阻止普通 checkpoint 保存。下方旧日期 PASS/FAIL、版本与 source pin 仅作原时点证据；本次未运行这四种 provider 的模型，不增加已完成卡数。
 
@@ -204,14 +204,20 @@ HM-03 的 reader 只保留 `active` 或 `compacted` 至少一个为真的行。�
 hermes sessions export --format jsonl --session-id <id> <output-file>
 ```
 
-不附加 `--redact`、`--only`、`--delete-after-verified`、`--upload`。`--redact` 会走 `session_export_md.py:169`，对 messages 里每个字符串做替换，包括 thinking。`<id>` 必须是 HM-09 已准入的当前本地 CLI 会话。超限时 Hermes 自己的 `sessions.max_export_messages` 会拒绝（`sessions_cmd.py` 的 `_too_large`）；拒绝、以及上面的 schema migration 退出，都是 unavailable，不是空 thinking。
+不附加 `--redact`、`--only`、`--delete-after-verified`、`--upload`。`--redact` 会走 `session_export_md.py:169`，对 messages 里每个字符串做替换，包括 thinking。`<id>` 必须是 HM-09 已准入的当前本地 CLI 会话。`export_session`（`hermes_state_portability.py:347`）经 `_with_messages`（`:344`）调用 `get_messages` 时不传 `include_ancestors`，默认是假（`hermes_state_messages.py:1361` 只取这一个 session id）。压缩轮换后的父段 thinking 不在这份 JSONL 里。HM-03 与 HM-09 只覆盖该 id 这一段，不把父段并进来。
+
+不可用不能只看退出码。缺列是 `:1334` 到 `:1341` 返回 1。打开失败是 `:1315` 起，`:1318` 返回 1。session id 在打开后解析失败时，`:356` 判定，`:357` 执行 `return _not_found`。`_not_found`（`:49`）打印 `No session '<id>'` 并返回 1。收集阶段的 `:399` 也调用 `_not_found`，但 `:400` 丢掉这个返回值，改返回空，外层因此可能是退出码 0。`_too_large` 在 `:395` 命中后 `:396` 返回空。`_export_flat` 的 `:461` 是 `sessions is not None` 才写，不是“列表非空”这个词；带 `--session-id` 时收集结果只是空或恰好一条。库不存在时 `:1313` 走 `:1279` 的 “No sessions found.”，不写文件。
+
+HM-08 的输出路径必须是还不存在的普通文件。`:79` 的 `_output_file_in_dir` 在 `:84` 判定目录或尾随分隔符，`:85` 创建目录，`:86` 拼出默认文件名。已存在的旧文件不能当成这次导出。下面每一项都是 unavailable，不是空 thinking：退出码 1、stdout 里的 migration、打开失败、`No session`、`No sessions found.`、输出路径在调用前已存在、调用后文件仍不存在、文件为空。退出码 0 不能单独证明数据已取得。
+
+`session_export.py:225` 的 `drop_undone_rows` 用 `m["active"] or m["compacted"]` 留下行。JSONL export 自己不调用它。HM-03 的 reader 必须套用同一谓词。
 
 | 候选 | 结论 | 依据 |
 |---|---|---|
 | JSONL export | GO，主源 | 只读打开；`dict(row)` 保留全部列。reader 按上一节丢掉撤销行 |
 | Markdown / QMD | NO-GO | `session_export_md.py:66` 的 `_render_messages` 只写 `content` 与 `tool_calls`；`:195` 的 `write_session_markdown` 是 md 与 qmd 的写入函数 |
 | `--only user-prompts` | NO-GO | `session_export.py:87` 只留用户文本 |
-| HTML | NO-GO | `session_export_html.py:723` 会渲染 `reasoning` 或 `reasoning_content` 里先出现的一个。这是有损展示，不是字段合同 |
+| HTML | NO-GO | `session_export_html.py:723` 用真值取 `reasoning` 或 `reasoning_content`，只渲染其中一个。HTML 走 transcript 投影（`include_compacted`），和 JSONL 的 `include_inactive` 不是同一组行。有损展示，不是字段合同 |
 | `--format trace` | NO-GO | `agent/trace_upload.py:123` 的 assistant 块只有 text 与 tool_use；默认还会 redact |
 | `HERMES_HOME/sessions/<id>.jsonl` | HOLD，非主源 | `hermes_state.py:433` 只在 state.db 被替换时追加 |
 | Libra 自己打开 SQLite | 后备 | 列在 schema 里。export 不可用时才用 ADR-HM-03 的一致只读视图。Libra 不构造 `SessionDB` |
@@ -238,13 +244,42 @@ hermes sessions export --format jsonl --session-id <id> <output-file>
 
 `hooks.md:397`：observer 忽略返回值，transform 取第一个有效字符串，directive/control 消费规定的返回形状。`pre_llm_call` 在 `:456`，是 directive/control，会把返回值注入用户消息。`pre_tool_call` 仍是 control。两者继续不注册，沿用 ADR-HM-01。
 
-Shell hook 的首次同意写在 `hermes_cli/config_defaults.py:1756`：默认 `hooks: {}`、`hooks_auto_accept: False`，同意记录在 `~/.hermes/shell-hooks-allowlist.json`。`hermes hooks` 的 help 同样指向该文件。Libra 只写自己拥有的 asset，不改这个 allowlist。
+Shell hook 的首次同意从 `hermes_cli/config_defaults.py:1756` 的注释写起。默认值是 `:1760` 的 `"hooks": {}` 和 `:1764` 的 `"hooks_auto_accept": False`。同意记录在 `~/.hermes/shell-hooks-allowlist.json`。`hermes hooks` 的 help 同样指向该文件。Libra 只写自己拥有的 asset，不改这个 allowlist。
 
 用户 plugin 目录是 `get_hermes_home()/plugins`。`hermes_cli/plugins_cmd.py:255` 的 `_plugins_dir()` 会 `mkdir`。Libra 不调用它。`plugins_dispatch.py` 只调度已注册回调，observer 返回值不改变 tool、context 或 message。
 
+### 观察协议 callsite
+
+这些行都在 `website/docs/user-guide/features/hooks.md`。observer 的返回值被忽略。control 与 transform 不注册。
+
+| 事件 | 行 | 类别 | 正文 | 后继怎么用 |
+|---|---|---|---|---|
+| `post_llm_call` | 457 | observer，仅成功且未中断 | 含完整 history | 不是失败或中断的证据，不把 history 当 hook envelope |
+| `on_session_end` | 471 | observer，每个 turn | 无消息正文；带 `completed` / `failed` / `interrupted` | 映射 turn 结果，不因此关闭 session |
+| `on_session_finalize` | 472 | observer，teardown | 只有标识 | 会话拆除，不是 turn 结束 |
+| `on_session_reset` | 473 | observer | 只有标识 | 与 new/resume 分开 |
+| `agent_loop_stopped` | 476 | observer，打断 | 无正文 | 中断事实，partial |
+| `subagent_start` | 478 | observer | `child_goal` 可能含用户内容 | 不把子代理当成当前仓库会话 |
+| `subagent_stop` | 479 | observer | 摘要与工具历史 | 不采集 |
+| `pre_tool_call` | 451 | control | 原始参数 | 不注册 |
+| `pre_llm_call` | 456 | control | 可注入用户消息 | 不注册 |
+| `pre_gateway_dispatch` | 480 | control | 网关对象 | 本计划不采集 gateway |
+
+### 合成 fixture 矩阵
+
+HM-03 落地。分类只描述 JSONL 主源，不描述 HTML。
+
+| 输入 | 分类 | reader |
+|---|---|---|
+| 保留行上非空 `reasoning` 或非空 `reasoning_content` | ordinary，可读 | 保留字符串，不写成 assistant 回答 |
+| 这两列是 `null` 或空串 | 未取得 | 与缺键分开；不算通过 |
+| `reasoning_details`、`codex_reasoning_items`、`codex_message_items` 的原始字符串 | unknown，附带 | 不解码也保留；解码失败只标 partial |
+| `active` 与 `compacted` 都为假 | 撤销行 | 不进入普通 transcript |
+| md、qmd、trace、`--only user-prompts`、HTML | unsupported 作为字段源 | 不把它们的成功当成 thinking 已取得 |
+
 ### 仍 HOLD 的事项
 
-具体模型 ID、用户配置里的 effort、以及任何一条真实非空 thinking，都没有本机会话证据。supported、capture enable 与「数据已取得」仍等 HM-06。本节约定 pin 和主源，不把 HM-00 标成 done。
+具体模型 ID、用户配置里的 effort、以及任何一条真实非空 thinking，都没有本机会话证据。supported、capture enable 与「数据已取得」仍等 HM-06。本节只关闭审计，不证明数据已经取得。
 
 ## 当前任务卡
 
@@ -252,9 +287,9 @@ Shell hook 的首次同意写在 `hermes_cli/config_defaults.py:1756`：默认 `
 
 **Task type:** audit
 
-**Lifecycle / Acceptance:** pending / 空
+**Lifecycle / Acceptance:** done / complete
 
-**Description:** 冻结官方source与可安装release对应，给每项能力GO/HOLD；不安装Hermes、不读真实会话。 本卡同时核定系统版本支持的 model/effort/thinking 显示设置与具体 source 位置；不猜参数。审计不启动真实模型；真实数据 smoke 由后续实现/收口卡执行。
+**Description:** 冻结官方source与可安装release对应，给每项能力GO/HOLD；不安装Hermes、不读真实会话。 本卡同时核定系统版本支持的 model/effort/thinking 显示设置与具体 source 位置；不猜参数。审计不启动真实模型；真实数据 smoke 由后续实现/收口卡执行。2026-10-29 的 v0.22.5 冻结加上本卡收口时补入的 P2 边界，就是后继要消费的矩阵。
 
 **Current evidence:** `adapter.rs:30` 的 `AgentKind` 无 Hermes；`registry.rs:134` 的 8 行注册表无 hermes；`capture/extraction.rs:438` 对其余 kind 返回 partial；`migration.rs:572` 的 CHECK 扩展只到 grok。v0.22.5 的 callsite 与哈希见「HM-00 版本冻结」。
 
@@ -262,18 +297,18 @@ Shell hook 的首次同意写在 `hermes_cli/config_defaults.py:1756`：默认 `
 
 **Acceptance criteria:**
 
-- [ ] 完整 source/release/package 映射或 HOLD 记录。2026-10-18 的未安装事实只保留为历史；当前 pin 以「HM-00 版本冻结」的 v0.22.5 为准，且仍未读用户会话。
-- [ ] 逐callsite区分turn结束/真实session teardown/失败/中断/重置/子agent，核对identity和observer返回语义。
-- [ ] 逐 callsite 比较 export/session 文件/SQLite 实际字段，选一条含 thinking 的只读 source；给出 schema/session/一致性及所需 argv，HM-08 负责 lease/预算接线，HM-06 负责真实数据实测。
-- [ ] plugin发现/配置/consent/owner-only路径有精确source证据，observer注册不会更改tool/context/message。
-- [ ] source字段分ordinary/unknown opaque/unsupported并给合成fixture矩阵；缺证能力HOLD，后继不得凭名字实现。
+- [x] 完整 source/release/package 映射或 HOLD 记录。2026-10-18 的未安装事实只保留为历史；当前 pin 以「HM-00 版本冻结」的 v0.22.5 为准，且仍未读用户会话。
+- [x] 逐callsite区分turn结束/真实session teardown/失败/中断/重置/子agent，核对identity和observer返回语义。见「观察协议 callsite」。
+- [x] 逐 callsite 比较 export/session 文件/SQLite 实际字段，选一条含 thinking 的只读 source；给出 schema/session/一致性及所需 argv，HM-08 负责 lease/预算接线，HM-06 负责真实数据实测。主源是只读 JSONL；不可用判定不单看退出码。
+- [x] plugin发现/配置/consent/owner-only路径有精确source证据，observer注册不会更改tool/context/message。默认值在 `config_defaults.py:1760` 与 `:1764`。
+- [x] source字段分ordinary/unknown opaque/unsupported并给合成fixture矩阵；缺证能力HOLD，后继不得凭名字实现。见「合成 fixture 矩阵」。
 
-- [ ] 记录系统 Hermes 的模型/thinking 设置和启用方式；所选 source 必须能说明 thinking 字段是否存在，真实模型验证由 HM-06 完成。
+- [x] 记录系统 Hermes 的模型/thinking 设置和启用方式；所选 source 必须能说明 thinking 字段是否存在，真实模型验证由 HM-06 完成。
 
 **Verification:**
 
-- [ ] 人工核读固定commit的`hermes_state*.py`、`hermes_cli/plugins*.py`及官方hooks文档；版本、callsite、GO矩阵写本计划。
-- [ ] `libra status --short --branch`与`libra diff --name-only`逐项对照开工基线，证明仅审计增量且未覆盖既有改动
+- [x] 人工核读固定commit的`hermes_state*.py`、`hermes_cli/plugins*.py`及官方hooks文档；版本、callsite、GO矩阵写本计划。
+- [x] `libra status --short --branch`与`libra diff --name-only`逐项对照开工基线 `8e8b8afdbb2a328a3ce20d1a6f4b5efa58f1dc4e`，仅本计划、`plan-status.md` 与 `plan-long.md`。收口提交前复核对这三项。
 
 **Full-suite trigger:** N/A（只读审计，无代码变更）
 
@@ -283,7 +318,7 @@ Shell hook 的首次同意写在 `hermes_cli/config_defaults.py:1756`：默认 `
 
 **Deliverables:** source/GO-HOLD审计矩阵和结论仅写本计划，不创建独立证据文件或fixture。
 
-**Implementation write set:** `docs/development/plan/plan-20261018-hermes-capture.md`；`docs/development/plan/plan-status.md`仅本卡状态；测试仅运行，不授权修改代码、fixture或Cargo配置。
+**Implementation write set:** `docs/development/plan/plan-20261018-hermes-capture.md`；`docs/development/plan/plan-status.md`仅本卡状态；`docs/development/plan/plan-long.md`仅 Hermes 索引行。测试仅运行，不授权修改代码、fixture或Cargo配置。
 
 **Release write set:** N/A
 
@@ -860,6 +895,18 @@ P2：HTML 会被读成「没有 thinking」；只读缺列的 migration 退出�
 
 留下的 P2 不改本轮被审正文，以免覆盖这次 PASS：`config_defaults.py:1756` 是注释块起点，默认值在 `:1760` 与 `:1764`；unavailable 不能只看退出码，缺文件或空文件也要核对 stdout；JSONL 只含该 session id 一段，压缩轮换的父段不在其中；HTML 的 `:723` 是按真值取 `reasoning` 或 `reasoning_content`，并且走 transcript 投影；`session_export.py:225` 的 `drop_undone_rows` 与保留行规则相同，本轮未引用。这些留给 HM-03/HM-08 实现时处理，不增加完成数。
 
+### HM-00 收口审查（2026-10-29）
+
+收口把上一节留下的 P2 写进「HM-00 版本冻结」。冻结轮 R1 FAIL 与 R2 PASS 不改写。三轮都是 Claude Code `claude -p`，permission mode `plan`，工具只有 Read、Grep、Glob。
+
+| 轮 | 结论 | 正文 SHA-256 | 处置 |
+|---|---|---|---|
+| 收口 R1 | `VERDICT: PASS` | `a9ccb586bce1559e67c679e744f875b8c269c87ad05848473cc9c76eee240183` | P0/P1 为 0。P2 包括 `:356` 把条件与 return 并成一行、`:84` 不是 join |
+| 收口 R2 | `VERDICT: FAIL` | `3b0700c7c5ba1a2f55f55824e4f8d96ef4052e4e733f32d345e66d049bbd2c94` | P1：`return _not_found` 在 `:357`，不是 `:356` |
+| 收口 R3 | `VERDICT: PASS` | `7c5a28bcbb8cb17a89056bf8ebf38d9c10c1d54e23846aaee2618eb9ecd795e8` | `:356` 判定、`:357` return，以及 `:84`/`:85`/`:86` 已与源码一致。P0/P1 为 0 |
+
+无版本变化。三处版本面仍是 `0.30.92`。本卡不打 tag。
+
 ### DATA-CAP-20261019 本次复审（2026-10-18 16:33:03 UTC）
 
 Claude Code 只读单审 session `c03a81c0-c8e3-43c7-b633-091279513515`，R1 实际 `VERDICT: FAIL`，raw SHA256 `e8b79091373ac5b54563205edfb050227cb5f58a8cf5b7a305e3de94f48ad9df`，report SHA256 `869943e0822aed7174bd7e2cc0c46db7f9408303b5c7f6bbbaec6e40b99b958f`。B1 旧 CC-06 隔离描述、B2 CX/CC 缺真实 smoke 卡 owner、B3 PI-03 前向依赖 carrier、B4 与 OpenCode 凭据扫描矛盾均已在计划正文修订；模型设置 AC、Pi pending、Hermes reader 测试/SHM 与 mirror 说明一并补齐。R1 原结论保持 FAIL；R2 最终结论和实际验证见下。此前 R4/R5 仅属历史修订。
@@ -900,7 +947,8 @@ R5输入manifest SHA256 `1fdd95bebb3fea118db887ed81c9c85f3742ff4fb8e39fd4b839371
 
 | UTC 时间 | 本次规范性调整 | 状态 |
 |---|---|---|
-| 2026-10-29 16:42:17 UTC | 按本机已安装且与 GitHub latest release 相同的 Hermes v0.22.5 / `bf0203a794a07aac3ff764972ab9087baa4e4f4e` 刷新 pin、文件哈希、thinking 字段与主源。主源定为只读 `hermes sessions export --format jsonl`。旧 `ccc6956` 与「未安装」改为历史。10 卡仍 pending | 计划事实已写；未读用户会话，未勾 HM-00 验收，无版本发布 |
+| 2026-10-29 16:42:17 UTC | 按本机已安装且与 GitHub latest release 相同的 Hermes v0.22.5 / `bf0203a794a07aac3ff764972ab9087baa4e4f4e` 刷新 pin、文件哈希、thinking 字段与主源。主源定为只读 `hermes sessions export --format jsonl`。旧 `ccc6956` 与「未安装」改为历史。冻结当时 10 卡仍 pending | 计划事实已写；未读用户会话，无版本发布。该行不描述后来的 HM-00 收口 |
+| 2026-10-29 HM-00 收口 | 把冻结轮留下的 P2 写成后继边界：consent 默认值行号、unavailable 不单看退出码、父段不在 JSONL、HTML 为真值或、`drop_undone_rows` 谓词由 reader 套用。HM-00 标 done/complete，无版本 | 审计收口；真实非空 thinking 仍 HOLD |
 | 2026-10-18 16:23:55 UTC | 用户要求以 OpenCode 获取 thinking 数据为底线；修订 ordinary 保留、未证明字段、legacy、source 路径和真实数据验收；native 认证退出本轮成功前置 | 仅规划；原卡号、依赖顺序与 pending 数保留，未取得四 provider 新模型实测 |
 
 | 时间 | 触发 | 拆分 | 协调范围 |

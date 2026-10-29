@@ -1076,13 +1076,14 @@ mod tests {
         let conn = crate::internal::db::create_database(database_str)
             .await
             .expect("create stale probe database");
-        // The two newest receipts are intentionally irreversible. Construct a
+        // The irreversible receipts above the grok CHECK, plus the hermes
+        // CHECK receipt, are removed so the probe reapplies them. Construct a
         // disposable pre-receipt fixture directly instead of asking the
         // production rollback API to remove them.
         conn.execute_unprepared(
             "DROP TABLE agent_session_commit; \
              DELETE FROM worktree_registry_capability WHERE version = 4; \
-             DELETE FROM schema_versions WHERE version IN (2026101902, 2026102201)",
+             DELETE FROM schema_versions WHERE version IN (2026101902, 2026102201, 2026103001)",
         )
         .await
         .expect("seed a pre-capability repository fixture");

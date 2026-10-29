@@ -6,6 +6,8 @@ Manage external-agent capture for Claude Code, Codex, OpenCode, and Grok.
 
 Grok is supported and hook-installable with `support_wave=grok`, not `first_batch`, and is not a `review` or `investigate` launcher. **Automatic Thinking capture is paused.** Hook lifecycle events are recorded through the shared pipeline; decoding does not read session logs or write `GROK_HOME/libra-capture`. Existing readers for local `updates.jsonl` and `chat_history.jsonl` are not yet connected to the authorized snapshot/checkpoint writer. Offline observer JSON is scratch state, not a Libra checkpoint. The intended transcript retains Thinking text and unproven `encrypted_content`; Libra does not decrypt it. Current synthetic reader tests do not prove that live checkpoints contain it. Default `checkpoint show` does not print Thinking plaintext; an explicit transcript path returns only content actually stored.
 
+Hermes is a registered repository identity and stays unsupported. Migration `2026103001` accepts `agent_kind=hermes` and keeps every previously accepted kind, including `grok` and `opencode`. `pi` stays rejected. Capture, hook install, and review or investigate launch stay disabled, so `libra agent list` omits `hermes` and `add` / `enable` returns an unsupported error. `cloud sync` still refuses `hermes` before any remote write.
+
 ## Codex parent/child usage snapshots (CX-26 development)
 
 Unreleased source builds may add `usage_attribution` to checkpoint metadata
@@ -1250,10 +1252,10 @@ on them:
   closed.
 - **The non-first-batch roster is unsupported.** Only `claude-code`, `codex` and
   `opencode` are supported, hook-installable and launchable for
-  review/investigate. `gemini` (uninstall-only, see the Description above),
-  `cursor`, `copilot` and `factory-ai` are `supported=false`, are omitted from
+  review/investigate, plus `grok` as described above. `gemini` (uninstall-only, see the Description above),
+  `cursor`, `copilot`, `factory-ai`, and `hermes` are `supported=false`, are omitted from
   `agent list`, and `add`/`enable` returns an actionable unsupported error;
-  they are not launchable.
+  they are not launchable. `hermes` can be stored by the repository CHECK; `pi` cannot.
 
 ## Notes
 

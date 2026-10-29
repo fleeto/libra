@@ -2,6 +2,8 @@
 
 Grok 的 `support_wave` 是 `grok`，不是 `first_batch`，可安装生命周期 hook，不是 `review` 或 `investigate` 启动器。**自动 Thinking 采集当前暂停。** 生命周期由共享管线记录；hook 解析不读取会话日志，也不写 `GROK_HOME/libra-capture`。已有 `updates.jsonl` 与 `chat_history.jsonl` 读取器尚未接入授权 snapshot/checkpoint writer；离线 observer JSON 是临时状态，不是 Libra checkpoint。后续目标是 transcript 保留 Thinking 正文和未证明的 `encrypted_content`，不解密；当前合成读取器测试不证明真实 checkpoint 已含这些数据。默认 `checkpoint show` 不打印 Thinking 明文；显式 transcript 路径只能返回实际已保存的内容。
 
+Hermes 只是已注册的仓库身份，仍然 unsupported。迁移 `2026103001` 接受 `agent_kind=hermes`，并保留此前已接受的全部 kind，包括 `grok` 与 `opencode`。`pi` 继续被拒绝。采集、hook 安装、review 与 investigate 启动都保持关闭，因此 `libra agent list` 不列出 `hermes`，`add` / `enable` 返回 unsupported。`cloud sync` 仍在任何远程写入之前拒绝 `hermes`。
+
 > **coverage-v2 源码版本：** 下文 coverage-v2 说明对应 Libra 0.30.50 源码线及后续兼容版本，不宣告稳定版已发布；可用性以[官方发布](https://github.com/libra-tools/libra/releases)及 `libra --version` 为准。其它章节保留各自的版本要求；coverage-v2 不证明 native 来源，也不准入原生 reasoning artifact。
 
 管理 Claude Code、Codex 与 OpenCode 的外部代理捕获。
@@ -877,7 +879,7 @@ libra agent --json status
 - **Provider 专属 transcript compaction / reassemble trait** 是未来 parity 项。writer 已把大 transcript 存为 manifest 相对 chunk，但尚无 provider 专属 compactor/reassembler。
 - **可选 capability trait**（`ProtectedFilesProvider`、`TranscriptCompactor`、`HookResponseWriter`、`RestoredSessionPathResolver` 等）在已落地的 `DeclaredAgentCaps` 矩阵之外尚无公开行为。
 - **v2 `info` / capability gate 之外的 external-RPC method family** 未实现；未声明某项 capability 的代理继续 fail-closed。
-- **非首批 roster 不受支持。** 仅 `claude-code`、`codex` 与 `opencode` 为 supported、hook-installable 且可用于 review/investigate 启动。`gemini`（仅 uninstall，见上文说明）、`cursor`、`copilot` 与 `factory-ai` 均为 `supported=false`，不出现在 `agent list`，`add`/`enable` 返回可操作的 unsupported 错误；它们不可启动。
+- **非首批 roster 不受支持。** 仅 `claude-code`、`codex` 与 `opencode` 为 supported、hook-installable 且可用于 review/investigate 启动，另加上文的 `grok`。`gemini`（仅 uninstall，见上文说明）、`cursor`、`copilot`、`factory-ai` 与 `hermes` 均为 `supported=false`，不出现在 `agent list`，`add`/`enable` 返回可操作的 unsupported 错误；它们不可启动。仓库 CHECK 可以保存 `hermes`，不能保存 `pi`。
 
 ## 说明
 

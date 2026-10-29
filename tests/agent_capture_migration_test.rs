@@ -512,3 +512,537 @@ async fn agent_capture_session_state_check_constraint_rejects_invalid() {
         "CHECK constraint on agent_session.state must reject 'bogus'"
     );
 }
+
+const HERMES_KIND_VERSION: i64 = 2026103001;
+const SESSION_COMMIT_VERSION: i64 = 2026102201;
+
+fn hermes_runner() -> MigrationRunner {
+    let mut runner = MigrationRunner::new();
+    runner
+        .extend(builtin_migrations())
+        .expect("builtin migrations register");
+    runner
+}
+
+async fn hermes_exec(conn: &DatabaseConnection, sql: &str) {
+    conn.execute_raw(Statement::from_string(conn.get_database_backend(), sql))
+        .await
+        .unwrap_or_else(|error| panic!("exec {sql}: {error}"));
+}
+
+async fn hermes_count(conn: &DatabaseConnection, sql: &str) -> i64 {
+    let row = conn
+        .query_one_raw(Statement::from_string(conn.get_database_backend(), sql))
+        .await
+        .expect("count")
+        .expect("count row");
+    row.try_get_by_index(0).expect("count value")
+}
+
+async fn hermes_text_column(conn: &DatabaseConnection, sql: &str) -> Vec<String> {
+    let rows = conn
+        .query_all_raw(Statement::from_string(conn.get_database_backend(), sql))
+        .await
+        .expect("text query");
+    rows.into_iter()
+        .map(|row| row.try_get_by_index::<String>(0).expect("text"))
+        .collect()
+}
+
+async fn hermes_insert_session(conn: &DatabaseConnection, session_id: &str, kind: &str) {
+    conn.execute_raw(Statement::from_sql_and_values(
+        conn.get_database_backend(),
+        "INSERT INTO agent_session (session_id, agent_kind, provider_session_id, state, working_dir, metadata_json, redaction_report, started_at, last_event_at) VALUES (?, ?, ?, 'stopped', '/work', '{}', '{}', 1, 1)",
+        [
+            session_id.into(),
+            kind.into(),
+            format!("provider-{session_id}").into(),
+        ],
+    ))
+    .await
+    .unwrap_or_else(|error| panic!("insert {kind}: {error}"));
+}
+
+fn hermes_seed_side_db(path: &std::path::Path, marker: &str) {
+    std::fs::File::create(path).expect("create side db");
+    // The repository migration must not open these files. A marker row makes
+    // a later byte compare detect any write, including a receipt.
+    let raw = format!("marker-{marker}-{}", marker.len());
+    std::fs::write(path, raw.as_bytes()).expect("seed side bytes");
+}
+
+/// HM-01: repository CHECK gains hermes, keeps the previous kinds, and does
+/// not write Global, System, or Derived databases.
+#[tokio::test]
+async fn hermes_role_repository_check_preserves_children_and_blocks_down() {
+    let root = tempfile::tempdir().expect("temp root");
+    let global = root.path().join("global.db");
+    let system = root.path().join("system.db");
+    let derived = root.path().join("derived.db");
+    hermes_seed_side_db(&global, "global");
+    hermes_seed_side_db(&system, "system");
+    hermes_seed_side_db(&derived, "derived");
+    let global_bytes = std::fs::read(&global).expect("read global");
+    let system_bytes = std::fs::read(&system).expect("read system");
+    let derived_bytes = std::fs::read(&derived).expect("read derived");
+
+    let repo = root.path().join("repo.db");
+    std::fs::File::create(&repo).expect("create repo db");
+    let conn = connect(&format!("sqlite://{}", repo.display())).await;
+    let runner = hermes_runner();
+    runner
+        .run_pending_up_to(&conn, SESSION_COMMIT_VERSION)
+        .await
+        .expect("migrate to the pre-hermes tip");
+    hermes_exec(
+        &conn,
+        "CREATE TABLE IF NOT EXISTS ai_thread (thread_id TEXT PRIMARY KEY)",
+    )
+    .await;
+    for kind in [
+        "claude_code",
+        "cursor",
+        "codex",
+        "gemini",
+        "opencode",
+        "copilot",
+        "factory_ai",
+        "grok",
+    ] {
+        hermes_insert_session(&conn, &format!("sess-{kind}"), kind).await;
+    }
+    hermes_exec(
+        &conn,
+        "INSERT INTO agent_checkpoint (checkpoint_id, session_id, scope, parent_commit, tree_oid, metadata_blob_oid, traces_commit, created_at) VALUES ('cp-1', 'sess-claude_code', 'temporary', 'parent', 'tree', 'meta', 'traces', 1)",
+    )
+    .await;
+    hermes_exec(
+        &conn,
+        "INSERT INTO agent_session_commit (session_id, hash_kind, commit_oid) VALUES ('sess-claude_code', 'sha1', 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa')",
+    )
+    .await;
+    hermes_exec(
+        &conn,
+        "INSERT INTO agent_coverage_claim (session_id, logical_turn_key, coverage_schema_version, coverage_digest, completeness, revision, state, source_channel, created_at, updated_at) VALUES ('sess-claude_code', 'turn-1', 1, 'digest', 'incomplete', 0, 'reserved_live', 'live', 1, 1)",
+    )
+    .await;
+    hermes_exec(
+        &conn,
+        "INSERT INTO agent_coverage_revision (session_id, logical_turn_key, coverage_schema_version, revision, checkpoint_id, coverage_digest, completeness, source_channel, created_at) VALUES ('sess-claude_code', 'turn-1', 1, 1, 'cp-1', 'digest', 'incomplete', 'live', 1)",
+    )
+    .await;
+    hermes_exec(
+        &conn,
+        "INSERT INTO agent_coverage_conflict (session_id, logical_turn_key, coverage_schema_version, incumbent_revision, incumbent_digest, incumbent_checkpoint_id, incoming_digest, incoming_source_channel, incoming_observed_at, incoming_canonical_json, incoming_redaction_report_json) VALUES ('sess-claude_code', 'turn-1', 1, 0, 'digest', 'cp-1', 'incoming', 'live', 1, '{}', '{}')",
+    )
+    .await;
+    hermes_exec(
+        &conn,
+        "INSERT INTO agent_subagent_content_claim (parent_session_id, provider_kind, source_key, content_schema_version, current_revision, state, fence_token, created_at, updated_at) VALUES ('sess-claude_code', 'claude_code', 'key', 1, 0, 'idle', 0, 1, 1)",
+    )
+    .await;
+    hermes_exec(
+        &conn,
+        "INSERT INTO agent_subagent_content_revision (parent_session_id, provider_kind, source_key, content_schema_version, revision, checkpoint_id, content_digest, source_channel, partial, created_at) VALUES ('sess-claude_code', 'claude_code', 'key', 1, 1, 'cp-1', 'digest', 'live', 0, 1)",
+    )
+    .await;
+    hermes_exec(
+        &conn,
+        "INSERT INTO agent_subagent_link (content_checkpoint_id, parent_session_id, link_state, boundary_checkpoint_id, stable_subagent_id, created_at, updated_at) VALUES ('cp-1', 'sess-claude_code', 'resolved', 'cp-1', 'sub-1', 1, 1)",
+    )
+    .await;
+    hermes_exec(
+        &conn,
+        "INSERT INTO agent_import_tombstone (tombstone_id, agent_kind, provider_session_id, erased_session_id, erased_at) VALUES ('tomb-1', 'codex', 'erased-provider', 'codex__erased', 1)",
+    )
+    .await;
+
+    let child_tables = hermes_text_column(
+        &conn,
+        "SELECT name FROM sqlite_master WHERE type = 'table' AND name != 'agent_session' AND LOWER(sql) LIKE '%references%agent_session%' ORDER BY name",
+    )
+    .await;
+    let mut child_tables = child_tables;
+    if !child_tables
+        .iter()
+        .any(|name| name == "agent_import_tombstone")
+    {
+        child_tables.push("agent_import_tombstone".to_string());
+    }
+    assert!(
+        child_tables.len() >= 8,
+        "expected the cascaded agent_session children, got {child_tables:?}"
+    );
+    let mut child_counts = Vec::new();
+    for name in &child_tables {
+        let count = hermes_count(&conn, &format!("SELECT COUNT(*) FROM `{name}`")).await;
+        assert!(count >= 1, "child {name} was not pre-seeded");
+        child_counts.push((name.clone(), count));
+    }
+    let dependents_before = hermes_text_column(
+        &conn,
+        "SELECT type || '|' || name || '|' || COALESCE(sql, '') FROM sqlite_master WHERE tbl_name = 'agent_session' AND type IN ('index', 'trigger') ORDER BY type, name",
+    )
+    .await;
+    assert!(
+        !dependents_before.is_empty(),
+        "agent_session indexes/triggers"
+    );
+    let fk_before = hermes_count(&conn, "PRAGMA foreign_keys").await;
+    let sessions_before = hermes_count(&conn, "SELECT COUNT(*) FROM agent_session").await;
+    assert_eq!(sessions_before, 8);
+
+    let raw = builtin_migrations()
+        .into_iter()
+        .find(|migration| migration.version == HERMES_KIND_VERSION)
+        .expect("hermes migration");
+    assert!(raw.up.contains("RAISE(ABORT"));
+    assert!(raw.down.expect("down sql").contains("RAISE(ABORT"));
+    let raw_failure = conn
+        .execute_raw(Statement::from_string(
+            conn.get_database_backend(),
+            raw.up.to_string(),
+        ))
+        .await;
+    assert!(
+        raw_failure.is_err(),
+        "executing the SQL body directly must abort"
+    );
+    assert_eq!(
+        hermes_count(&conn, "SELECT COUNT(*) FROM agent_session").await,
+        sessions_before,
+        "a failed raw expansion must keep the preimage"
+    );
+    assert_eq!(
+        hermes_count(
+            &conn,
+            "SELECT COUNT(*) FROM schema_versions WHERE version = 2026103001"
+        )
+        .await,
+        0
+    );
+
+    let applied = runner
+        .run_pending(&conn)
+        .await
+        .expect("apply hermes CHECK through the dedicated connection");
+    assert!(
+        applied.contains(&HERMES_KIND_VERSION),
+        "hermes migration did not apply: {applied:?}"
+    );
+    assert_eq!(hermes_count(&conn, "PRAGMA foreign_keys").await, fk_before);
+    assert_eq!(
+        hermes_count(&conn, "SELECT COUNT(*) FROM agent_session").await,
+        sessions_before
+    );
+    for (name, before) in &child_counts {
+        assert_eq!(
+            hermes_count(&conn, &format!("SELECT COUNT(*) FROM `{name}`")).await,
+            *before,
+            "child {name} changed"
+        );
+    }
+    assert_eq!(
+        hermes_text_column(
+            &conn,
+            "SELECT type || '|' || name || '|' || COALESCE(sql, '') FROM sqlite_master WHERE tbl_name = 'agent_session' AND type IN ('index', 'trigger') ORDER BY type, name",
+        )
+        .await,
+        dependents_before
+    );
+    assert_eq!(
+        hermes_count(&conn, "SELECT COUNT(*) FROM pragma_foreign_key_check").await,
+        0
+    );
+    let integrity = hermes_text_column(&conn, "PRAGMA integrity_check").await;
+    assert_eq!(integrity, vec!["ok".to_string()]);
+    let check_sql = hermes_text_column(
+        &conn,
+        "SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'agent_session'",
+    )
+    .await
+    .join(" ");
+    for kind in [
+        "claude_code",
+        "cursor",
+        "codex",
+        "gemini",
+        "opencode",
+        "copilot",
+        "factory_ai",
+        "grok",
+        "hermes",
+    ] {
+        assert!(
+            check_sql.contains(&format!("'{kind}'")),
+            "CHECK lost {kind}: {check_sql}"
+        );
+    }
+    assert!(
+        !check_sql.contains("'pi'"),
+        "pi is not part of the then-complete set"
+    );
+    assert_eq!(std::fs::read(&global).expect("reread global"), global_bytes);
+    assert_eq!(std::fs::read(&system).expect("reread system"), system_bytes);
+    assert_eq!(
+        std::fs::read(&derived).expect("reread derived"),
+        derived_bytes
+    );
+
+    let again = runner.run_pending(&conn).await.expect("repeat up");
+    assert!(again.is_empty(), "repeat up must be a no-op: {again:?}");
+    assert_eq!(
+        hermes_count(
+            &conn,
+            "SELECT COUNT(*) FROM schema_versions WHERE version = 2026103001 AND name = 'agent_kind_hermes'"
+        )
+        .await,
+        1
+    );
+
+    hermes_insert_session(&conn, "sess-hermes", "hermes").await;
+    let rejected_pi = conn
+        .execute_raw(Statement::from_sql_and_values(
+            conn.get_database_backend(),
+            "INSERT INTO agent_session (session_id, agent_kind, provider_session_id, state, working_dir, metadata_json, redaction_report, started_at, last_event_at) VALUES ('sess-pi', 'pi', 'p-pi', 'stopped', '/work', '{}', '{}', 1, 1)",
+            [],
+        ))
+        .await;
+    assert!(rejected_pi.is_err(), "unknown kind pi must stay rejected");
+    let refused = runner.rollback_to(&conn, SESSION_COMMIT_VERSION).await;
+    let message = refused.expect_err("down must refuse while a hermes row exists");
+    assert!(
+        message.to_string().contains("were kept"),
+        "down error should keep the hermes rows: {message}"
+    );
+    assert_eq!(
+        hermes_count(
+            &conn,
+            "SELECT COUNT(*) FROM agent_session WHERE agent_kind = 'hermes'"
+        )
+        .await,
+        1
+    );
+    assert_eq!(
+        runner.current_version(&conn).await.expect("version"),
+        Some(HERMES_KIND_VERSION)
+    );
+    for (name, before) in &child_counts {
+        assert_eq!(
+            hermes_count(&conn, &format!("SELECT COUNT(*) FROM `{name}`")).await,
+            *before,
+            "refused down changed child {name}"
+        );
+    }
+
+    hermes_exec(
+        &conn,
+        "DELETE FROM agent_session WHERE agent_kind = 'hermes'",
+    )
+    .await;
+    let rolled = runner
+        .rollback_to(&conn, SESSION_COMMIT_VERSION)
+        .await
+        .expect("down with zero hermes rows");
+    assert_eq!(rolled, vec![HERMES_KIND_VERSION]);
+    let rejected_again = conn
+        .execute_raw(Statement::from_sql_and_values(
+            conn.get_database_backend(),
+            "INSERT INTO agent_session (session_id, agent_kind, provider_session_id, state, working_dir, metadata_json, redaction_report, started_at, last_event_at) VALUES ('sess-hermes-again', 'hermes', 'p-hermes', 'stopped', '/work', '{}', '{}', 1, 1)",
+            [],
+        ))
+        .await;
+    assert!(
+        rejected_again.is_err(),
+        "old CHECK must reject hermes after rollback"
+    );
+    hermes_insert_session(&conn, "sess-grok-kept", "grok").await;
+    assert_eq!(
+        hermes_count(
+            &conn,
+            "SELECT COUNT(*) FROM agent_session WHERE session_id = 'sess-claude_code'"
+        )
+        .await,
+        1
+    );
+
+    runner
+        .run_pending(&conn)
+        .await
+        .expect("re-apply hermes migration");
+    hermes_insert_session(&conn, "sess-hermes", "hermes").await;
+    let sessions_digest = hermes_text_column(
+        &conn,
+        "SELECT session_id || '|' || agent_kind FROM agent_session ORDER BY session_id",
+    )
+    .await;
+    hermes_exec(
+        &conn,
+        "INSERT INTO schema_versions (version, name, applied_at) VALUES (2099010101, 'future-reader', '2000-01-01T00:00:00Z')",
+    )
+    .await;
+    drop(conn);
+    let refused_open = libra::internal::db::schema::upgrade_database_schema_for_role(
+        &repo,
+        libra::internal::db::DatabaseRole::Repository,
+    )
+    .await;
+    let open_error = refused_open.expect_err("a reader older than the file must refuse");
+    assert!(open_error.to_string().contains("newer"), "{open_error}");
+    let conn = connect(&format!("sqlite://{}", repo.display())).await;
+    assert_eq!(
+        hermes_text_column(
+            &conn,
+            "SELECT session_id || '|' || agent_kind FROM agent_session ORDER BY session_id",
+        )
+        .await,
+        sessions_digest
+    );
+    assert_eq!(
+        hermes_count(
+            &conn,
+            "SELECT COUNT(*) FROM schema_versions WHERE version = 2099010101 AND name = 'future-reader'"
+        )
+        .await,
+        1,
+        "the refused open must leave the future receipt untouched"
+    );
+    assert_eq!(
+        std::fs::read(&global).expect("global still untouched"),
+        global_bytes
+    );
+    assert_eq!(
+        std::fs::read(&system).expect("system still untouched"),
+        system_bytes
+    );
+    assert_eq!(
+        std::fs::read(&derived).expect("derived still untouched"),
+        derived_bytes
+    );
+
+    for role in [
+        libra::internal::db::DatabaseRole::GlobalConfig,
+        libra::internal::db::DatabaseRole::SystemConfig,
+        libra::internal::db::DatabaseRole::Derived,
+    ] {
+        assert!(
+            libra::internal::db::schema::migrations_for_role(role)
+                .iter()
+                .all(|migration| migration.version != HERMES_KIND_VERSION),
+            "{role:?} must not register the hermes receipt"
+        );
+    }
+    let derived_error = libra::internal::db::schema::upgrade_database_schema_for_role(
+        &derived,
+        libra::internal::db::DatabaseRole::Derived,
+    )
+    .await;
+    assert!(
+        derived_error.is_err(),
+        "derived role must not take a migration"
+    );
+    assert_eq!(
+        std::fs::read(&derived).expect("derived after refusal"),
+        derived_bytes
+    );
+}
+
+/// HM-01 stub: hermes resolves, but capture, install, and launch stay off.
+#[tokio::test]
+async fn hermes_role_stub_disables_capture_install_and_launch() {
+    use libra::{
+        command::agent::{AgentArgs, AgentSubcommand, EnableArgs, execute_safe},
+        internal::ai::{
+            capture::deadline_provider_extraction_summary,
+            observed_agents::{
+                AgentKind, AgentSessionCtx, SlugLookup, agent_for, extract::skill_registry_for,
+                is_preview, live_capture_matches_hook_installable, lookup_cli_slug,
+                registration_for, supported_slugs,
+            },
+        },
+        utils::output::{ColorChoice, OutputConfig, ProgressMode, ProgressPreference},
+    };
+
+    assert_eq!(AgentKind::Hermes.as_db_str(), "hermes");
+    assert_eq!(AgentKind::Hermes.as_cli_slug(), "hermes");
+    assert_eq!(AgentKind::from_db_str("hermes"), Some(AgentKind::Hermes));
+    assert_eq!(AgentKind::from_cli_slug("hermes"), Some(AgentKind::Hermes));
+    assert_eq!(AgentKind::from_db_str("pi"), None);
+    assert_eq!(AgentKind::from_cli_slug("pi"), None);
+    assert!(matches!(
+        lookup_cli_slug("pi"),
+        SlugLookup::UnknownQuarantined
+    ));
+    assert!(!is_preview(AgentKind::Hermes));
+    let row = registration_for(AgentKind::Hermes);
+    assert!(!row.supported);
+    assert!(!row.hook_installable);
+    assert!(!row.launchable_review);
+    assert!(!row.launchable_investigate);
+    assert!(!row.transcript_readable);
+    assert!(row.support_wave.is_none());
+    assert!(!supported_slugs().contains(&"hermes"));
+    assert!(live_capture_matches_hook_installable(AgentKind::Hermes));
+    assert!(skill_registry_for(AgentKind::Hermes).is_empty());
+    let agent = agent_for(AgentKind::Hermes);
+    assert!(agent.as_hooks().is_none());
+    assert_eq!(agent.protected_dirs(), &[".hermes"]);
+    let transcript_error = agent
+        .read_transcript(&AgentSessionCtx {
+            session_id: "s".to_string(),
+            provider_session_id: "p".to_string(),
+            working_dir: std::path::PathBuf::from("/work"),
+            transcript_path: None,
+        })
+        .expect_err("capture stays disabled");
+    assert!(
+        transcript_error.to_string().contains("not available"),
+        "{transcript_error}"
+    );
+    let summary = deadline_provider_extraction_summary(AgentKind::Hermes, b"thought-canary");
+    assert!(summary.partial);
+    assert!(summary.prompts.is_empty());
+    assert!(
+        summary
+            .warnings
+            .iter()
+            .all(|warning| !warning.contains("thought-canary"))
+    );
+
+    let cloud = include_str!("../src/command/cloud/sync.rs");
+    let allowlist_at = cloud
+        .find("CLOUD_CAPTURE_KIND_ALLOWLIST")
+        .expect("cloud allowlist");
+    let window = &cloud[allowlist_at..allowlist_at + 400];
+    assert!(
+        !window.contains("\"hermes\""),
+        "HM-01 must not add hermes to the cloud allowlist: {window}"
+    );
+
+    let output = OutputConfig {
+        json_format: None,
+        color: ColorChoice::Never,
+        pager: false,
+        quiet: true,
+        exit_code_on_warning: false,
+        progress: ProgressMode::None,
+        progress_preference: ProgressPreference::None,
+    };
+    let enable = execute_safe(
+        AgentArgs {
+            command: AgentSubcommand::Enable(EnableArgs {
+                agents: vec!["hermes".to_string()],
+            }),
+        },
+        &output,
+        None,
+    )
+    .await;
+    let enable_error = enable.expect_err("enable must refuse the unsupported stub");
+    assert!(
+        enable_error
+            .to_string()
+            .contains("not in the supported roster"),
+        "{enable_error}"
+    );
+}

@@ -131,7 +131,7 @@ const CODEX_ROLLOUT_CAPS: DeclaredAgentCaps = DeclaredAgentCaps {
 
 /// The frozen static matrix, one row per [`AgentKind`] variant, in
 /// registration order. Guarded by `compat_agent_capability_matrix_pin`.
-static REGISTRY: [AgentRegistration; 8] = [
+static REGISTRY: [AgentRegistration; 9] = [
     AgentRegistration {
         slug: "claude-code",
         agent_kind: "claude_code",
@@ -278,6 +278,24 @@ static REGISTRY: [AgentRegistration; 8] = [
         external_binary: false,
         config_paths: &[],
         capabilities: HOOKS_ONLY,
+    },
+    AgentRegistration {
+        slug: "hermes",
+        agent_kind: "hermes",
+        db_value: "hermes",
+        // HM-01: repository identity only. Capture, hook install, and
+        // review/investigate launch stay closed until a later card.
+        supported: false,
+        support_wave: None,
+        registered: true,
+        transcript_readable: false,
+        hook_installable: false,
+        installed: false,
+        launchable_review: false,
+        launchable_investigate: false,
+        external_binary: false,
+        config_paths: &[],
+        capabilities: NO_CAPS,
     },
 ];
 

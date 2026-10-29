@@ -1391,7 +1391,7 @@ mod tests {
         for kind in AgentKind::all() {
             let is_dedicated_stable = matches!(
                 kind,
-                AgentKind::ClaudeCode | AgentKind::Gemini | AgentKind::Grok
+                AgentKind::ClaudeCode | AgentKind::Gemini | AgentKind::Grok | AgentKind::Hermes
             );
             assert_eq!(
                 stable_promoted_spec_for(*kind).is_some(),

@@ -120,7 +120,8 @@ pub fn skill_registry_for(kind: super::adapter::AgentKind) -> &'static [&'static
         | AgentKind::Cursor
         | AgentKind::Copilot
         | AgentKind::FactoryAi
-        | AgentKind::Grok => &[],
+        | AgentKind::Grok
+        | AgentKind::Hermes => &[],
     }
 }
 

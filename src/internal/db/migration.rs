@@ -336,9 +336,9 @@ impl MigrationRunner {
             // would be a TOCTOU race with concurrent processes (Codex r1
             // P1#2). `apply_one_migration` uses `INSERT OR IGNORE` and
             // reports whether this call actually wrote the row.
-            let inserted = if migration.version == AGENT_KIND_GROK_VERSION {
+            let inserted = if let Some(spec) = agent_kind_check_spec(migration.version) {
                 // ADR-CAP-CHECK: rebuild the CHECK outside the caller's pool.
-                apply_agent_kind_grok_dedicated(conn, true).await?
+                apply_agent_kind_check_dedicated(conn, spec, true).await?
             } else if HISTORY_GUARDED_VERSIONS.contains(&migration.version) {
                 // §C.4.1.1/§C.4.3 fail-closed: the scope migrations' SQL guards
                 // see only a LIVE non-main `reference` row, and removing a
@@ -391,8 +391,8 @@ impl MigrationRunner {
             {
                 continue;
             }
-            let inserted = if migration.version == AGENT_KIND_GROK_VERSION {
-                apply_agent_kind_grok_dedicated(conn, true).await?
+            let inserted = if let Some(spec) = agent_kind_check_spec(migration.version) {
+                apply_agent_kind_check_dedicated(conn, spec, true).await?
             } else {
                 apply_one_migration(conn, migration).await?
             };
@@ -492,8 +492,8 @@ impl MigrationRunner {
         // semantics.
         let mut rolled_back = Vec::new();
         for (migration, down) in plan {
-            let owned = if migration.version == AGENT_KIND_GROK_VERSION {
-                apply_agent_kind_grok_dedicated(conn, false).await?
+            let owned = if let Some(spec) = agent_kind_check_spec(migration.version) {
+                apply_agent_kind_check_dedicated(conn, spec, false).await?
             } else {
                 apply_down_migration(conn, migration.version, down).await?
             };
@@ -591,24 +591,80 @@ const AGENT_KIND_WITHOUT_GROK: &[&str] = &[
     "factory_ai",
 ];
 
+/// HM-01: Repository `agent_session.agent_kind` CHECK gains `hermes`.
+/// The previous complete set, including `grok` and `opencode`, stays. `pi`
+/// is not part of that set.
+const AGENT_KIND_HERMES_VERSION: i64 = 2026103001;
+const AGENT_KIND_WITH_HERMES: &[&str] = &[
+    "claude_code",
+    "cursor",
+    "codex",
+    "gemini",
+    "opencode",
+    "copilot",
+    "factory_ai",
+    "grok",
+    "hermes",
+];
+
+#[derive(Clone, Copy)]
+struct AgentKindCheckSpec {
+    version: i64,
+    receipt_name: &'static str,
+    /// Db tag this migration adds. Down refuses while rows use it.
+    marker: &'static str,
+    with_values: &'static [&'static str],
+    without_values: &'static [&'static str],
+    staging: &'static str,
+}
+
+const GROK_KIND_CHECK: AgentKindCheckSpec = AgentKindCheckSpec {
+    version: AGENT_KIND_GROK_VERSION,
+    receipt_name: "agent_kind_grok",
+    marker: "grok",
+    with_values: AGENT_KIND_WITH_GROK,
+    without_values: AGENT_KIND_WITHOUT_GROK,
+    staging: "agent_session__gk_new",
+};
+
+const HERMES_KIND_CHECK: AgentKindCheckSpec = AgentKindCheckSpec {
+    version: AGENT_KIND_HERMES_VERSION,
+    receipt_name: "agent_kind_hermes",
+    marker: "hermes",
+    with_values: AGENT_KIND_WITH_HERMES,
+    without_values: AGENT_KIND_WITH_GROK,
+    staging: "agent_session__hm_new",
+};
+
+fn agent_kind_check_spec(version: i64) -> Option<&'static AgentKindCheckSpec> {
+    if version == AGENT_KIND_GROK_VERSION {
+        Some(&GROK_KIND_CHECK)
+    } else if version == AGENT_KIND_HERMES_VERSION {
+        Some(&HERMES_KIND_CHECK)
+    } else {
+        None
+    }
+}
+
 /// Rebuild `agent_session`'s CHECK on a connection that is not returned to
 /// the caller's pool while `foreign_keys` is off.
 ///
-/// `expand` records the GK-01 receipt and adds `grok`. The reverse refuses
-/// while any `grok` row exists, keeps those rows, and otherwise restores the
-/// previous CHECK. File databases use a dedicated connection that is always
-/// closed here. In-memory databases have no second file to open, so the
-/// caller's single connection is used and `foreign_keys` is restored before
-/// return; a failed restore closes that connection.
-async fn apply_agent_kind_grok_dedicated(
+/// `expand` records the receipt and adds `spec.marker`. The reverse refuses
+/// while any row uses that marker, keeps those rows, and otherwise restores
+/// the previous CHECK. File databases use a dedicated connection that is
+/// always closed here. In-memory databases have no second file to open, so
+/// the caller's single connection is used and `foreign_keys` is restored
+/// before return; a failed restore closes that connection.
+async fn apply_agent_kind_check_dedicated(
     caller: &DatabaseConnection,
+    spec: &AgentKindCheckSpec,
     expand: bool,
 ) -> Result<bool, MigrationError> {
     let Some(path) = sqlite_database_file(caller).await else {
-        return apply_agent_kind_grok_on(caller, expand).await;
+        return apply_agent_kind_check_on(caller, spec, expand).await;
     };
     let dedicated = open_dedicated_check_connection(&path).await?;
-    let result = apply_agent_kind_grok_on(&dedicated, expand).await;
+    let result = apply_agent_kind_check_on(&dedicated, spec, expand).await;
     let close_error = dedicated.close().await.err();
     match (result, close_error) {
         (Ok(applied), None) => Ok(applied),
@@ -617,7 +673,8 @@ async fn apply_agent_kind_grok_dedicated(
             // dedicated pool failed after that; the caller's pool never saw
             // foreign_keys=OFF. Report the close so the operator can reopen.
             Err(MigrationError::Other(anyhow::anyhow!(
-                "agent_kind grok CHECK migration committed on '{}', but closing the dedicated connection failed: {error}. Reopen the repository and run 'libra doctor'; do not retry by editing schema_versions",
+                "agent_kind {} CHECK migration committed on '{}', but closing the dedicated connection failed: {error}. Reopen the repository and run 'libra doctor'; do not retry by editing schema_versions",
+                spec.marker,
                 path.display()
             )))
         }
@@ -660,10 +717,18 @@ async fn open_dedicated_check_connection(
     })
 }
 
-async fn apply_agent_kind_grok_on(
+async fn apply_agent_kind_check_on(
     conn: &DatabaseConnection,
+    spec: &AgentKindCheckSpec,
     expand: bool,
 ) -> Result<bool, MigrationError> {
+    if !safe_sql_ident(spec.marker) || !safe_sql_ident(spec.staging) {
+        return Err(MigrationError::Other(anyhow::anyhow!(
+            "agent_kind CHECK migration refused: marker '{}' or staging table '{}' is not a plain identifier",
+            spec.marker,
+            spec.staging
+        )));
+    }
     let previous = pragma_foreign_keys(conn).await?;
     set_foreign_keys(conn, false).await?;
     let disabled = pragma_foreign_keys(conn).await?;
@@ -673,6 +738,10 @@ async fn apply_agent_kind_grok_on(
             "could not turn foreign_keys off before rebuilding agent_session; the CHECK was not changed"
         )));
     }
+    let spec = *spec;
+    let marker = spec.marker;
+    let version = spec.version;
+    let receipt_name = spec.receipt_name;
     let result = conn
         .transaction::<_, _, DbErr>(|txn| {
             Box::pin(async move {
@@ -682,8 +751,8 @@ async fn apply_agent_kind_grok_on(
                         backend,
                         "INSERT OR IGNORE INTO schema_versions (version, name, applied_at) VALUES (?, ?, ?)",
                         [
-                            AGENT_KIND_GROK_VERSION.into(),
-                            "agent_kind_grok".into(),
+                            version.into(),
+                            receipt_name.into(),
                             Utc::now().to_rfc3339().into(),
                         ],
                     ))
@@ -691,29 +760,31 @@ async fn apply_agent_kind_grok_on(
                     if changes(txn).await? == 0 {
                         return Ok::<bool, DbErr>(false);
                     }
-                    rebuild_agent_kind_check(txn, true).await?;
+                    rebuild_agent_kind_check(txn, spec, true).await?;
                     Ok(true)
                 } else {
-                    let grok_rows = count_matching(
+                    let marker_rows = count_matching(
                         txn,
-                        "SELECT COUNT(*) FROM agent_session WHERE agent_kind = 'grok'",
+                        &format!(
+                            "SELECT COUNT(*) FROM agent_session WHERE agent_kind = '{marker}'"
+                        ),
                     )
                     .await?;
-                    if grok_rows > 0 {
+                    if marker_rows > 0 {
                         return Err(DbErr::Custom(format!(
-                            "cannot roll back agent_kind grok: {grok_rows} agent_session row(s) use agent_kind 'grok' and were kept. Delete or migrate those rows before rolling back"
+                            "cannot roll back agent_kind {marker}: {marker_rows} agent_session row(s) use agent_kind '{marker}' and were kept. Delete or migrate those rows before rolling back"
                         )));
                     }
                     txn.execute_raw(Statement::from_sql_and_values(
                         backend,
                         "DELETE FROM schema_versions WHERE version = ?",
-                        [AGENT_KIND_GROK_VERSION.into()],
+                        [version.into()],
                     ))
                     .await?;
                     if changes(txn).await? == 0 {
                         return Ok::<bool, DbErr>(false);
                     }
-                    rebuild_agent_kind_check(txn, false).await?;
+                    rebuild_agent_kind_check(txn, spec, false).await?;
                     Ok(true)
                 }
             })
@@ -730,14 +801,14 @@ async fn apply_agent_kind_grok_on(
         (Ok(_), _, _) => {
             let _ = conn.clone().close().await;
             Err(MigrationError::Other(anyhow::anyhow!(
-                "agent_kind grok CHECK migration committed, but foreign_keys could not be restored on this connection. The connection was closed; reopen the database and verify with PRAGMA foreign_key_check and PRAGMA integrity_check"
+                "agent_kind {marker} CHECK migration committed, but foreign_keys could not be restored on this connection. The connection was closed; reopen the database and verify with PRAGMA foreign_key_check and PRAGMA integrity_check"
             )))
         }
         (Err(error), Ok(()), Ok(value)) if value == previous => Err(error),
         (Err(error), _, _) => {
             let _ = conn.clone().close().await;
             Err(MigrationError::Other(anyhow::anyhow!(
-                "agent_kind grok CHECK migration failed ({error}) and foreign_keys could not be restored. The connection was closed and was not returned to the pool"
+                "agent_kind {marker} CHECK migration failed ({error}) and foreign_keys could not be restored. The connection was closed and was not returned to the pool"
             )))
         }
     }
@@ -745,7 +816,8 @@ async fn apply_agent_kind_grok_on(
 
 async fn rebuild_agent_kind_check(
     txn: &sea_orm::DatabaseTransaction,
-    include_grok: bool,
+    spec: AgentKindCheckSpec,
+    expand: bool,
 ) -> Result<(), DbErr> {
     let backend = txn.get_database_backend();
     let create = query_optional_text(
@@ -759,16 +831,17 @@ async fn rebuild_agent_kind_check(
                 .to_string(),
         ));
     };
-    let values = if include_grok {
-        AGENT_KIND_WITH_GROK
+    let values = if expand {
+        spec.with_values
     } else {
-        AGENT_KIND_WITHOUT_GROK
+        spec.without_values
     };
-    let already = create.contains("'grok'");
-    if include_grok && already {
+    let marker_token = format!("'{}'", spec.marker);
+    let already = create.contains(&marker_token);
+    if expand && already {
         return Ok(());
     }
-    if !include_grok && !already {
+    if !expand && !already {
         return Ok(());
     }
     let session_count = count_matching(txn, "SELECT COUNT(*) FROM agent_session").await?;
@@ -805,18 +878,18 @@ async fn rebuild_agent_kind_check(
         .collect::<Vec<_>>()
         .join(", ");
     let rewritten = replace_agent_kind_check_list(&create, values).map_err(DbErr::Custom)?;
-    let staging =
-        rename_create_table(&rewritten, "agent_session__gk_new").map_err(DbErr::Custom)?;
+    let staging = rename_create_table(&rewritten, spec.staging).map_err(DbErr::Custom)?;
     txn.execute_raw(Statement::from_string(backend, staging))
         .await?;
     txn.execute_raw(Statement::from_string(
         backend,
         format!(
-            "INSERT INTO `agent_session__gk_new` ({column_list}) SELECT {column_list} FROM `agent_session`"
+            "INSERT INTO `{}` ({column_list}) SELECT {column_list} FROM `agent_session`",
+            spec.staging
         ),
     ))
     .await?;
-    let copied = count_matching(txn, "SELECT COUNT(*) FROM `agent_session__gk_new`").await?;
+    let copied = count_matching(txn, &format!("SELECT COUNT(*) FROM `{}`", spec.staging)).await?;
     if copied != session_count {
         return Err(DbErr::Custom(format!(
             "agent_session rebuild copied {copied} rows but the original table has {session_count}; the transaction will roll back"
@@ -829,7 +902,7 @@ async fn rebuild_agent_kind_check(
     .await?;
     txn.execute_raw(Statement::from_string(
         backend,
-        "ALTER TABLE `agent_session__gk_new` RENAME TO `agent_session`".to_string(),
+        format!("ALTER TABLE `{}` RENAME TO `agent_session`", spec.staging),
     ))
     .await?;
     for sql in dependents {
@@ -2445,6 +2518,16 @@ pub(crate) fn repository_migrations() -> Vec<Migration> {
             up: include_str!("../../../sql/migrations/2026102201_agent_session_commit.sql"),
             down: None,
         },
+        // HM-01: Repository agent_session.agent_kind CHECK gains 'hermes'.
+        // The SQL body aborts if executed raw; the runner rebuilds the table
+        // on a dedicated connection (ADR-CAP-CHECK). Down refuses while any
+        // hermes row exists and keeps those rows. Capture stays unsupported.
+        sql_migration(
+            AGENT_KIND_HERMES_VERSION,
+            "agent_kind_hermes",
+            include_str!("../../../sql/migrations/2026103001_agent_kind_hermes.sql"),
+            include_str!("../../../sql/migrations/2026103001_agent_kind_hermes_down.sql"),
+        ),
     ]
 }
 
@@ -2908,7 +2991,7 @@ mod tests {
         let runner = builtin_runner().expect("CEX-12.5 builtin registry must build clean");
         assert_eq!(runner.len(), 71);
         assert!(!runner.is_empty());
-        assert_eq!(runner.max_registered_version(), Some(2026102201));
+        assert_eq!(runner.max_registered_version(), Some(2026103001));
     }
 
     #[test]

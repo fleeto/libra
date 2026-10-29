@@ -361,7 +361,7 @@ async fn worktree_layout_capability_upgrade_is_metadata_only_and_idempotent() {
             .unwrap(),
         SchemaCompatibility::UpgradeRequired {
             current_version: Some(2026101902),
-            latest_version: 2026102201,
+            latest_version: 2026103001,
         }
     ));
 }
@@ -417,7 +417,7 @@ async fn worktree_layout_capability_is_present_in_a_fresh_repository() {
         db::schema::current_schema_version_for_role(&conn, DatabaseRole::Repository)
             .await
             .unwrap(),
-        Some(2026102201)
+        Some(2026103001)
     );
     conn.close().await.unwrap();
     let reopened =
@@ -432,14 +432,15 @@ async fn worktree_layout_capability_is_present_in_a_fresh_repository() {
 async fn agent_session_commit_schema_is_repository_only_and_forward_only() {
     let version = 2026102201;
     let repository = db::schema::migrations_for_role(DatabaseRole::Repository);
+    let commit = repository
+        .iter()
+        .find(|migration| migration.version == version)
+        .expect("agent_session_commit stays registered");
+    assert!(commit.down.is_none(), "CX-11 stays forward-only");
     assert_eq!(
         repository.last().map(|migration| migration.version),
-        Some(version)
-    );
-    assert!(
-        repository
-            .last()
-            .is_some_and(|migration| migration.down.is_none())
+        Some(2026103001),
+        "HM-01 is the repository tip after the session-commit barrier"
     );
     for role in [
         DatabaseRole::GlobalConfig,
@@ -473,7 +474,7 @@ async fn agent_session_commit_schema_is_repository_only_and_forward_only() {
         db::schema::current_schema_version_for_role(&conn, DatabaseRole::Repository)
             .await
             .unwrap(),
-        Some(version)
+        Some(2026103001)
     );
     let error = all_builtin_runner()
         .unwrap()

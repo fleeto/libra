@@ -167,6 +167,7 @@ fn known_agent_capability_matrix_matches_current_roster() {
         AgentKind::Cursor,
         AgentKind::Copilot,
         AgentKind::FactoryAi,
+        AgentKind::Hermes,
     ] {
         let row = registration_for(kind);
         assert!(!row.supported, "{}", row.slug);
@@ -241,6 +242,7 @@ fn skill_discovery_registry_matches_roster() {
         AgentKind::Copilot,
         AgentKind::FactoryAi,
         AgentKind::Grok,
+        AgentKind::Hermes,
     ] {
         assert!(
             discover_skills(kind).is_empty(),

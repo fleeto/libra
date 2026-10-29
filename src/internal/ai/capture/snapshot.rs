@@ -134,6 +134,8 @@ pub enum CaptureSnapshotPartialReason {
     SourceReadError,
     SourceEmpty,
     DeadlineExceeded,
+    /// Hermes ordinary thinking is retained without a native issuer.
+    UnprovenOrdinary,
 }
 
 /// Safe source classification retained with a snapshot.
@@ -712,6 +714,27 @@ impl CaptureSnapshot {
     /// [`Self::transcript`]. It contains only rule identifiers and offsets.
     pub fn redaction_report(&self) -> &RedactionReport {
         &self.redaction_report
+    }
+
+    /// Readable Hermes thinking stored in this snapshot, in source order.
+    /// Empty when the retained body is not a usable Hermes frame.
+    pub fn hermes_readable_thinking(&self) -> Vec<String> {
+        let Some(transcript) = self.transcript_redacted.as_ref() else {
+            return Vec::new();
+        };
+        let Ok(frame) =
+            crate::internal::ai::observed_agents::builtin::hermes::hermes_worker_frame_authorized(
+                transcript.bytes(),
+                None,
+            )
+        else {
+            return Vec::new();
+        };
+        frame
+            .thinking
+            .iter()
+            .filter_map(|item| item.readable_thinking().map(str::to_string))
+            .collect()
     }
 
     /// Redacted-only metadata whose transient source checksum must be bound
@@ -1529,6 +1552,11 @@ impl CaptureSnapshotService {
         {
             snapshot.ordinary_partial_permit = ordinary_partial_permit;
         }
+        if context.provider == "hermes"
+            && snapshot.completeness == CaptureSnapshotCompleteness::Complete
+        {
+            apply_hermes_worker_frame(&mut snapshot, policy.deadline());
+        }
         snapshot
     }
 
@@ -1565,6 +1593,51 @@ impl CaptureSnapshotService {
         }
         CaptureSnapshot::complete(source_projection, transcript_redacted, redaction_report)
     }
+}
+
+fn apply_hermes_worker_frame(snapshot: &mut CaptureSnapshot, deadline: Option<Instant>) {
+    use crate::internal::ai::observed_agents::builtin::hermes::{
+        HermesWorkerError, hermes_worker_frame_authorized,
+    };
+    let bytes = snapshot
+        .transcript_redacted
+        .as_ref()
+        .map(|transcript| transcript.bytes())
+        .unwrap_or(b"");
+    match hermes_worker_frame_authorized(bytes, deadline) {
+        Ok(_) => {
+            snapshot.completeness = CaptureSnapshotCompleteness::Partial;
+            snapshot.partial_reason = Some(CaptureSnapshotPartialReason::UnprovenOrdinary);
+        }
+        Err(error) => {
+            // A refused frame must not remain a readable transcript. Keep the
+            // transient source digest so the import parent can still name the
+            // failure; the bytes and redaction counts stay absent.
+            let reason = match error {
+                HermesWorkerError::Budget { .. } => CaptureSnapshotPartialReason::SourceOversize,
+                HermesWorkerError::Cancelled => CaptureSnapshotPartialReason::DeadlineExceeded,
+                HermesWorkerError::BadFrame => CaptureSnapshotPartialReason::SourceReadError,
+            };
+            snapshot.completeness = CaptureSnapshotCompleteness::Partial;
+            snapshot.partial_reason = Some(reason);
+            snapshot.transcript_redacted = None;
+            snapshot.redaction_report = RedactionReport::default();
+            snapshot.source_scan_bytes = None;
+            snapshot.coverage_runtime.turns = None;
+        }
+    }
+}
+
+/// Capture one already-read Hermes export through the ordinary snapshot owner.
+pub fn capture_authorized_hermes_bytes(bytes: Vec<u8>, session_id: &str) -> CaptureSnapshot {
+    let auth =
+        crate::internal::ai::observed_agents::ExportAuthorized::issue("hermes", session_id, &bytes);
+    CaptureSnapshotService::capture_authorized(
+        crate::internal::ai::observed_agents::TranscriptSource::Bytes { bytes, auth },
+        "hermes",
+        session_id,
+        CaptureSnapshotPolicy::default(),
+    )
 }
 
 fn deadline_elapsed(policy: CaptureSnapshotPolicy) -> bool {

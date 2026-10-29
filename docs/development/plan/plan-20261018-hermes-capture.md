@@ -574,7 +574,7 @@ Claude 审查实现 `VERDICT: PASS`。文档挂错常量之后的复核轮也是
 
 **Task type:** implementation
 
-**Lifecycle / Acceptance:** pending / 空
+**Lifecycle / Acceptance:** done / complete
 
 **Description:** 自HM-04/05拆出snapshot/worker与readable接线；实际live source仍受DEP-HM-LIVE约束。
 
@@ -584,14 +584,16 @@ Claude 审查实现 `VERDICT: PASS`。文档挂错常量之后的复核轮也是
 
 **Acceptance criteria:**
 
-- [ ] 注册Hermes readable tag/normalizer/worker封闭映射，旧provider wire不变，无opaque/decrypt能力。
-- [ ] snapshot 接 HM-03 已选 source，保留 thinking 与附带数据并标 Unproven/Partial，thinking 不冒充 assistant answer。
-- [ ] worker 的有界 Hermes frame 显式携带授权 thinking；预算/取消/坏 frame 安全，ingress/snapshot/coordinator/store 保持单 owner，普通 export 与源值一致。
-- [ ] 同 source 的 import/live 路径一致；缺真实 thinking 数据时获取门未通过，不用 export 命令成功或合成 fixture 替代真实数据。
+- [x] 注册Hermes readable tag/normalizer/worker封闭映射，旧provider wire不变，无opaque/decrypt能力。
+- [x] snapshot 接 HM-03 已选 source，保留 thinking 与附带数据并标 Unproven/Partial，thinking 不冒充 assistant answer。
+- [x] worker 的有界 Hermes frame 显式携带授权 thinking；预算/取消/坏 frame 安全，ingress/snapshot/coordinator/store 保持单 owner，普通 export 与源值一致。
+- [x] 同 source 的 import/live 路径一致；缺真实 thinking 数据时获取门未通过，不用 export 命令成功或合成 fixture 替代真实数据。
 
 **Verification:**
 
-- [ ] `source .env.test && cargo test --test agent_transcript_intelligence_test hermes_bounded_capture_ -- --test-threads=1`（拟新增过滤名；须列出实际匹配并确认非零）
+- [x] `source .env.test && cargo test --test agent_transcript_intelligence_test hermes_bounded_capture_ -- --test-threads=1`（拟新增过滤名；须列出实际匹配并确认非零）
+
+实现说明：`ReasoningProvider::Hermes` 的 wire tag 是 `hermes`，旧 tag 不变，没有 opaque locator，也没有 decryptor。有界 worker frame 保留非空 thinking 与原始附带字段，来源状态是 `unproven`，snapshot 完整度是 `Partial` / `unproven_ordinary`。thinking 不进入 assistant 回答。保留文本超过 8 MiB、超过 deadline 或坏 frame 时清空 transcript。合成导出的获取门保持未通过。`live_capture_for(Hermes)` 仍是 `None`，`transcript_readable` 仍是 false，云同步仍拒绝 hermes。`hermes_bounded_capture_` 匹配 2 条并全部通过。既有 `hermes_normalize_import_replays_one_checkpoint_without_enabling_hermes` 仍通过。Claude `VERDICT: PASS`，正文 SHA-256 `715c7073eed592ffd46ef4ac14b5d10f31fb67e269dd1a363a264feb4a185784`。无 P0/P1。发布窗口 `v0.30.98`。上游已占用 `v0.30.97`。
 
 **Full-suite trigger:** T-1/T-4（共享采集、存储、CLI 或测试契约）；执行四 provider 契约的完整双环境 nextest 门
 

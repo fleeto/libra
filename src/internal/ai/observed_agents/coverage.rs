@@ -40,6 +40,7 @@ fn reasoning_provider_tag(provider: reasoning::ReasoningProvider) -> &'static st
         reasoning::ReasoningProvider::ClaudeCode => "claude_code",
         reasoning::ReasoningProvider::Codex => "codex",
         reasoning::ReasoningProvider::OpenCode => "opencode",
+        reasoning::ReasoningProvider::Hermes => "hermes",
     }
 }
 

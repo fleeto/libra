@@ -431,15 +431,33 @@ fn extract_deadline_provider_once(
                 transcript, limits,
             )
         }
+        AgentKind::Hermes => hermes_bounded_extraction(transcript),
         // `decode_extraction_request` accepts only the first-batch provider
         // codes, so this arm is defensive and cannot carry an error string.
         // Formats without a registered extractor stay explicitly partial.
-        // Hermes identity does not add provider policy to this layer; it stays
-        // in this partial arm with the other unsupported kinds.
         _ => crate::internal::ai::observed_agents::extract::ExtractionSummary {
             partial: true,
             ..Default::default()
         },
+    }
+}
+
+/// Hermes worker projection. Thinking stays out of prompts. Missing usage
+/// stays absent. A synthetic or failed frame never looks complete.
+fn hermes_bounded_extraction(
+    transcript: &[u8],
+) -> crate::internal::ai::observed_agents::extract::ExtractionSummary {
+    use crate::internal::ai::observed_agents::builtin::hermes::hermes_worker_frame_authorized;
+    let Ok(frame) = hermes_worker_frame_authorized(transcript, None) else {
+        return crate::internal::ai::observed_agents::extract::ExtractionSummary {
+            partial: true,
+            ..Default::default()
+        };
+    };
+    crate::internal::ai::observed_agents::extract::ExtractionSummary {
+        partial: true,
+        prompts: frame.ordinary_prompts(),
+        ..Default::default()
     }
 }
 

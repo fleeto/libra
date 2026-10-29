@@ -1326,7 +1326,8 @@ fn snapshot_failure_for_import(snapshot: &CaptureSnapshotProjection) -> ImportEr
             | CaptureSnapshotPartialReason::SourceAuthorizationMismatch
             | CaptureSnapshotPartialReason::SourceCommitmentUnavailable
             | CaptureSnapshotPartialReason::SourceReadError
-            | CaptureSnapshotPartialReason::SourceEmpty,
+            | CaptureSnapshotPartialReason::SourceEmpty
+            | CaptureSnapshotPartialReason::UnprovenOrdinary,
         )
         | None => ImportError::SourceAuthorization,
     }

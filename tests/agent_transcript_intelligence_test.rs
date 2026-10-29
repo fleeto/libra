@@ -1082,3 +1082,177 @@ fn opencode_legacy_apply_patch_and_location_aliases_are_project_relative() {
         .remove("previous");
     assert!(opencode_summary(&missing).partial);
 }
+
+fn hermes_bounded_export(repo: &std::path::Path, thinking: &str, finish: &str) -> Vec<u8> {
+    serde_json::to_vec(&serde_json::json!({
+        "id": "0123456789abcdef0123456789abcdef",
+        "source": "cli",
+        "cwd": repo,
+        "started_at": 1_700_000_000,
+        "ended_at": 1_700_000_100,
+        "input_tokens": 5,
+        "messages": [
+            {"id": 2, "role": "assistant", "content": "answer", "active": 1, "compacted": 0,
+             "timestamp": 10, "reasoning": thinking, "reasoning_content": "",
+             "reasoning_details": "{\"raw\":1}", "finish_reason": finish, "token_count": 99},
+            {"id": 1, "role": "user", "content": "prompt", "active": 1, "compacted": 0,
+             "timestamp": 99, "reasoning": null}
+        ]
+    }))
+    .expect("encode hermes export")
+}
+
+#[test]
+fn hermes_bounded_capture_keeps_thinking_unproven_and_out_of_the_answer() {
+    use libra::internal::ai::{
+        capture::snapshot::{
+            CaptureSnapshotCompleteness, CaptureSnapshotPartialReason,
+            capture_authorized_hermes_bytes,
+        },
+        observed_agents::{
+            HermesScope, SemanticRecord,
+            builtin::hermes::{
+                hermes_readable_tag, hermes_worker_frame, hermes_worker_frame_authorized,
+            },
+            reasoning::ReasoningProvider,
+        },
+    };
+
+    let repo = std::env::temp_dir().join("hermes-bounded-scope");
+    let bytes = hermes_bounded_export(&repo, "kept-thinking", "stop");
+    let scope = HermesScope {
+        session_id: "0123456789abcdef0123456789abcdef".to_string(),
+        profile: "default".to_string(),
+        repo_root: repo,
+    };
+    let scoped = hermes_worker_frame(&bytes, &scope, None).expect("scoped frame");
+    let authorized = hermes_worker_frame_authorized(&bytes, None).expect("authorized frame");
+    assert_eq!(scoped.tag, hermes_readable_tag());
+    assert_eq!(scoped.tag, "hermes");
+    assert_eq!(authorized.thinking, scoped.thinking);
+    assert_eq!(authorized.source_state, "unproven");
+    assert!(authorized.partial);
+    assert!(!authorized.acquisition_gate_passed);
+    assert!(!scoped.acquisition_gate_passed);
+    assert_eq!(
+        authorized.thinking[0].readable_thinking(),
+        Some("kept-thinking")
+    );
+    assert_eq!(
+        authorized.thinking[0].reasoning_details.as_deref(),
+        Some("{\"raw\":1}")
+    );
+    let answer = authorized.ordinary[0]
+        .records
+        .iter()
+        .find_map(|record| match record {
+            SemanticRecord::Assistant { text } => Some(text.as_str()),
+            _ => None,
+        })
+        .expect("assistant");
+    assert_eq!(answer, "answer");
+    assert_ne!(answer, "kept-thinking");
+    assert_eq!(
+        serde_json::to_value(ReasoningProvider::ClaudeCode).unwrap(),
+        serde_json::json!("claude_code")
+    );
+    assert_eq!(
+        serde_json::to_value(ReasoningProvider::Codex).unwrap(),
+        serde_json::json!("codex")
+    );
+    assert_eq!(
+        serde_json::to_value(ReasoningProvider::OpenCode).unwrap(),
+        serde_json::json!("opencode")
+    );
+    assert_eq!(
+        serde_json::to_value(ReasoningProvider::Hermes).unwrap(),
+        serde_json::json!("hermes")
+    );
+    assert!(
+        libra::internal::ai::observed_agents::reasoning::reasoning_decryptor(
+            ReasoningProvider::Hermes
+        )
+        .is_none()
+    );
+
+    let snapshot = capture_authorized_hermes_bytes(bytes.clone(), "hermes-session");
+    let projection = snapshot.safe_projection();
+    assert_eq!(
+        projection.completeness,
+        CaptureSnapshotCompleteness::Partial
+    );
+    assert_eq!(
+        projection.partial_reason,
+        Some(CaptureSnapshotPartialReason::UnprovenOrdinary)
+    );
+    assert_eq!(
+        snapshot.hermes_readable_thinking(),
+        vec!["kept-thinking".to_string()]
+    );
+
+    let prompts = authorized.ordinary_prompts();
+    assert_eq!(prompts, vec!["prompt".to_string()]);
+    assert!(
+        !prompts
+            .iter()
+            .any(|prompt| prompt.contains("kept-thinking"))
+    );
+}
+
+#[test]
+fn hermes_bounded_capture_rejects_a_bad_cancelled_or_oversize_frame() {
+    use std::time::{Duration, Instant};
+
+    use libra::internal::ai::{
+        capture::snapshot::{
+            CaptureSnapshotCompleteness, CaptureSnapshotPartialReason,
+            capture_authorized_hermes_bytes,
+        },
+        observed_agents::builtin::hermes::{
+            HERMES_WORKER_FRAME_MAX_BYTES, HermesWorkerError, hermes_worker_frame_authorized,
+        },
+    };
+
+    let bad = hermes_worker_frame_authorized(b"not-json", None);
+    assert_eq!(bad, Err(HermesWorkerError::BadFrame));
+    let gateway = serde_json::to_vec(&serde_json::json!({
+        "id": "0123456789abcdef0123456789abcdef",
+        "source": "matrix",
+        "cwd": "/tmp/hermes-bounded",
+        "messages": [{"id": 1, "role": "user", "content": "nope", "active": 1, "compacted": 0, "timestamp": 1}]
+    }))
+    .expect("gateway");
+    assert_eq!(
+        hermes_worker_frame_authorized(&gateway, None),
+        Err(HermesWorkerError::BadFrame)
+    );
+    let past = Instant::now()
+        .checked_sub(Duration::from_secs(1))
+        .expect("past");
+    let repo = std::env::temp_dir().join("hermes-bounded-scope");
+    let bytes = hermes_bounded_export(&repo, "kept-thinking", "stop");
+    assert_eq!(
+        hermes_worker_frame_authorized(&bytes, Some(past)),
+        Err(HermesWorkerError::Cancelled)
+    );
+
+    let huge = "t".repeat((HERMES_WORKER_FRAME_MAX_BYTES as usize).saturating_add(1));
+    let oversized = hermes_bounded_export(&repo, &huge, "stop");
+    assert_eq!(
+        hermes_worker_frame_authorized(&oversized, None),
+        Err(HermesWorkerError::Budget {
+            limit: HERMES_WORKER_FRAME_MAX_BYTES
+        })
+    );
+    let snapshot = capture_authorized_hermes_bytes(oversized, "hermes-session");
+    let projection = snapshot.safe_projection();
+    assert_eq!(
+        projection.completeness,
+        CaptureSnapshotCompleteness::Partial
+    );
+    assert_eq!(
+        projection.partial_reason,
+        Some(CaptureSnapshotPartialReason::SourceOversize)
+    );
+    assert!(snapshot.hermes_readable_thinking().is_empty());
+}

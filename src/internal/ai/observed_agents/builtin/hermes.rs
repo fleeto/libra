@@ -674,6 +674,17 @@ pub struct HermesRetainedThinking {
     pub codex_message_items: Option<String>,
 }
 
+impl HermesRetainedThinking {
+    /// Non-empty `reasoning` or `reasoning_content`. Empty and null are not
+    /// readable thinking.
+    pub fn readable_thinking(&self) -> Option<&str> {
+        [self.reasoning.as_deref(), self.reasoning_content.as_deref()]
+            .into_iter()
+            .flatten()
+            .find(|text| !text.is_empty())
+    }
+}
+
 /// Ordinary turns plus the source values HM-07 still has to store.
 ///
 /// Thinking is not a coverage reasoning record and is not copied into the
@@ -1111,6 +1122,148 @@ fn failed_finish(value: Option<&Value>) -> bool {
             "error" | "length" | "failed" | "failure" | "content_filter" | "cancelled" | "canceled"
         )
     )
+}
+
+/// Bound for one Hermes worker frame. A larger retained body is refused.
+pub const HERMES_WORKER_FRAME_MAX_BYTES: u64 = 8 * 1024 * 1024;
+
+/// Closed readable tag for the Hermes ordinary worker. It is not a native
+/// reasoning issuer and it does not change the Claude, Codex, or OpenCode tags.
+pub fn hermes_readable_tag() -> &'static str {
+    "hermes"
+}
+
+/// One bounded ordinary frame. Thinking is carried beside the answer.
+/// `acquisition_gate_passed` stays false until a real session comparison.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct HermesWorkerFrame {
+    pub tag: &'static str,
+    pub source_state: &'static str,
+    pub partial: bool,
+    pub acquisition_gate_passed: bool,
+    pub ordinary: Vec<NormalizedTurn>,
+    pub thinking: Vec<HermesRetainedThinking>,
+}
+
+impl HermesWorkerFrame {
+    /// User text only. Thinking is not an ordinary prompt.
+    pub fn ordinary_prompts(&self) -> Vec<String> {
+        let mut prompts = Vec::new();
+        for turn in &self.ordinary {
+            for record in &turn.records {
+                if let SemanticRecord::User { text } = record
+                    && !text.is_empty()
+                {
+                    prompts.push(text.clone());
+                }
+            }
+        }
+        prompts
+    }
+}
+
+/// Content-free worker failure. The body is not copied into the message.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum HermesWorkerError {
+    Budget { limit: u64 },
+    Cancelled,
+    BadFrame,
+}
+
+impl std::fmt::Display for HermesWorkerError {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Budget { limit } => {
+                write!(formatter, "hermes worker frame exceeded {limit} bytes")
+            }
+            Self::Cancelled => formatter.write_str("hermes worker frame was cancelled"),
+            Self::BadFrame => formatter.write_str("hermes worker frame is unusable"),
+        }
+    }
+}
+
+/// Import path. The scope is the same one the JSONL reader uses.
+pub fn hermes_worker_frame(
+    bytes: &[u8],
+    scope: &HermesScope,
+    deadline: Option<Instant>,
+) -> Result<HermesWorkerFrame, HermesWorkerError> {
+    let status = normalize_hermes_jsonl_until(bytes, scope, &HermesReadLimits::default(), deadline)
+        .ok_or(HermesWorkerError::Cancelled)?;
+    let HermesNormalizeStatus::Ready(normalized) = status else {
+        return Err(HermesWorkerError::BadFrame);
+    };
+    finish_hermes_worker_frame(normalized)
+}
+
+/// Snapshot and live path for bytes that were already authorized.
+/// A non-cli source is still refused. The acquisition gate stays closed.
+pub fn hermes_worker_frame_authorized(
+    bytes: &[u8],
+    deadline: Option<Instant>,
+) -> Result<HermesWorkerFrame, HermesWorkerError> {
+    if deadline.is_some_and(|deadline| Instant::now() >= deadline) {
+        return Err(HermesWorkerError::Cancelled);
+    }
+    let mut lines = bytes
+        .split(|byte| *byte == b'\n')
+        .filter(|line| !line.is_empty());
+    let Some(first) = lines.next() else {
+        return Err(HermesWorkerError::BadFrame);
+    };
+    if lines.next().is_some() {
+        return Err(HermesWorkerError::BadFrame);
+    }
+    let value: Value = serde_json::from_slice(first).map_err(|_| HermesWorkerError::BadFrame)?;
+    let session = value.as_object().ok_or(HermesWorkerError::BadFrame)?;
+    let session_id = session
+        .get("id")
+        .and_then(Value::as_str)
+        .filter(|id| !id.is_empty())
+        .ok_or(HermesWorkerError::BadFrame)?;
+    let cwd = session
+        .get("cwd")
+        .and_then(Value::as_str)
+        .ok_or(HermesWorkerError::BadFrame)?;
+    let scope = HermesScope {
+        session_id: session_id.to_string(),
+        profile: "default".to_string(),
+        repo_root: PathBuf::from(cwd),
+    };
+    hermes_worker_frame(bytes, &scope, deadline)
+}
+
+fn finish_hermes_worker_frame(
+    normalized: HermesNormalized,
+) -> Result<HermesWorkerFrame, HermesWorkerError> {
+    let mut retained_bytes = 0_u64;
+    for item in &normalized.retained {
+        for text in [
+            item.reasoning.as_deref(),
+            item.reasoning_content.as_deref(),
+            item.reasoning_details.as_deref(),
+            item.codex_reasoning_items.as_deref(),
+            item.codex_message_items.as_deref(),
+        ]
+        .into_iter()
+        .flatten()
+        {
+            retained_bytes = retained_bytes.saturating_add(text.len() as u64);
+        }
+    }
+    if retained_bytes > HERMES_WORKER_FRAME_MAX_BYTES {
+        return Err(HermesWorkerError::Budget {
+            limit: HERMES_WORKER_FRAME_MAX_BYTES,
+        });
+    }
+    Ok(HermesWorkerFrame {
+        tag: hermes_readable_tag(),
+        source_state: "unproven",
+        partial: true,
+        acquisition_gate_passed: false,
+        ordinary: normalized.turns,
+        thinking: normalized.retained,
+    })
 }
 
 fn message_timestamp(value: Option<&Value>) -> Option<i64> {

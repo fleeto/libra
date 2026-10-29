@@ -52,7 +52,8 @@ use crate::internal::{
                 PendingFinalizeReceipt, decide_finalization,
             },
             snapshot::{
-                CaptureSnapshotCompleteness, CaptureSnapshotProjection, CaptureSnapshotSourceKind,
+                CaptureSnapshotCompleteness, CaptureSnapshotPartialReason,
+                CaptureSnapshotProjection, CaptureSnapshotSourceKind,
             },
             state::{
                 CapturePhase, CheckpointWrite, DurableCaptureState, LifecycleActionPlan,
@@ -1024,7 +1025,23 @@ fn validate_v2_import_snapshot(
             }
         }
         CaptureSnapshotCompleteness::Partial => {
-            if snapshot.partial_reason.is_none()
+            // Hermes keeps the redacted ordinary transcript and records that
+            // its thinking has no native issuer. Every other partial reason
+            // stays content-free: a failed read must not look like retained
+            // source.
+            if snapshot.partial_reason == Some(CaptureSnapshotPartialReason::UnprovenOrdinary) {
+                let Some(source) = snapshot.source.as_ref() else {
+                    return Err(CaptureCatalogError::InvalidRequest);
+                };
+                let source_byte_len = source.byte_len.ok_or(CaptureCatalogError::InvalidRequest)?;
+                let bytes_scanned = catalog_metric_u64(snapshot.redaction_bytes_scanned)?;
+                if snapshot.transcript_redacted_bytes == 0
+                    || source.digest_sha256.is_none()
+                    || source_byte_len != bytes_scanned
+                {
+                    return Err(CaptureCatalogError::InvalidRequest);
+                }
+            } else if snapshot.partial_reason.is_none()
                 || snapshot.transcript_redacted_bytes != 0
                 || snapshot.redaction_match_count != 0
                 || snapshot.redaction_bytes_scanned != 0

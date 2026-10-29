@@ -683,6 +683,7 @@ impl ImportTransportContext {
                 ReasoningProvider::ClaudeCode => b"claude_code".as_slice(),
                 ReasoningProvider::Codex => b"codex".as_slice(),
                 ReasoningProvider::OpenCode => b"opencode".as_slice(),
+                ReasoningProvider::Hermes => b"hermes".as_slice(),
             },
             self.capture_session.as_bytes(),
             self.source_session.as_bytes(),
@@ -1889,6 +1890,7 @@ pub enum ReasoningProvider {
     Codex,
     #[serde(rename = "opencode")]
     OpenCode,
+    Hermes,
 }
 
 /// A future provider's explicitly authorized, checkpoint-scoped capability.

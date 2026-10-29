@@ -96,7 +96,7 @@ structured report is always present.
 | `129` | `LBR-CLI-002` | `cli` | Invalid or missing CLI arguments | missing required flag, conflicting flags, `init` targeting the per-user Libra home as repository storage; `update-ref` fatals exit `128` instead — see the note below the table |
 | `129` | `LBR-CLI-003` | `cli` | Invalid object, revision, pathspec, or move target | bad ref, invalid pathspec, outside-repo move target, `update-ref <newvalue>` naming an unresolvable revision or an object that is not a commit ; `update-ref` fatals exit `128` instead — see the note below the table |
 | `128` | `LBR-REPO-001` | `repo` | Not inside a Libra repository | running repo commands outside `.libra` |
-| `128` | `LBR-REPO-002` | `repo` | Repository metadata is corrupt or incompatible | missing DB, corrupted metadata |
+| `128` | `LBR-REPO-002` | `repo` | Repository metadata is corrupt or incompatible | missing DB, corrupted metadata, missing/corrupt nested HEAD tree in `status` (affected OID and `libra fsck`/object-restoration hint; no partial status) |
 | `128` | `LBR-REPO-003` | `repo` | Repository state blocks the operation | no commits yet, detached state mismatch, missing configured remote |
 | `128` | `LBR-WORKTREE-001` | `repo` | Pagination cursor is malformed, foreign, or expired | `libra worktree doctor --cursor <garbage>` |
 | `128` | `LBR-WORKTREE-002` | `repo` | A worktree/workspace scope is corrupt or unreadable, so the diagnosis would be incomplete | `libra worktree doctor` where a `workspace_record` row or the worktree registry cannot be read |

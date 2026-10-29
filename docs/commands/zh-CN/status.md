@@ -490,11 +490,12 @@ Git 的 porcelain v1 不包含 upstream tracking 信息；porcelain v2 会添加
 
 ## 错误处理
 
-每个 `StatusError` 变体都会映射到显式 `StableErrorCode`。
+每个 `StatusError` 变体都会映射到显式 `StableErrorCode`。HEAD 的嵌套子树缺失或损坏时，整次 status 请求失败，不输出部分状态，也不会误报 clean。人类可读、JSON/machine 与 porcelain v1/v2 模式均按既有错误契约向 stderr 报错并退出 128。gitlink 仍作为叶节点处理，不要求它引用的提交存在于本地对象库。
 
 | 场景 | 错误码 | 退出码 | 提示 |
 |----------|-----------|------|------|
 | 索引文件损坏 | `LBR-REPO-002` | 128 | "the index file may be corrupted" |
+| HEAD 的嵌套子树缺失或损坏 | `LBR-REPO-002` | 128 | 包含受影响的 tree OID；运行 `libra fsck` 或恢复对象后重试 |
 | 无效路径编码 | `LBR-CLI-003` | 129 | "path contains invalid characters" |
 | 无法哈希文件 | `LBR-IO-001` | 128 | -- |
 | 无法列出工作目录 | `LBR-IO-001` | 128 | -- |

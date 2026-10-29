@@ -46,7 +46,7 @@ Nowledge 定向检索已尝试，服务连接被环境阻止；本计划依据�
 
 ## 全局执行约束与字段默认
 
-- 每张卡当前 Lifecycle=pending，Acceptance=空；没有 agent-ready 标签，没有代码开工授权。实施前刷新源码、计划、Issue、写集冲突和环境；先复现失败再修复。任务字段列明的 `(new)` 测试必须在同卡新增，过滤零命中不算通过。
+- 建卡时各卡 Lifecycle=pending，Acceptance=空且没有 agent-ready 标签；当前状态以任务卡为准。2026-10-29 用户已选定并授权 SP-01 实施；未授权的后续卡不因此获得开工权限。实施前刷新源码、计划、Issue、写集冲突和环境；先复现失败再修复。任务字段列明的 `(new)` 测试必须在同卡新增，过滤零命中不算通过。
 - 每次推进同一变更同步本计划与 `plan-status.md`。证据只汇总在本计划，不创建新证据目录/文件；工具临时运行文件不作为独立交付产物。
 - 全局继承模板 GC-*、ER-*、G-*；新测试复用现有 target，若需要新增 target/serial lane，先更新卡写集及 `tests/INDEX.md`/registry 等再实施，不暗自扩张。
 - **用户资源硬门槛（2026-10-28）：每次启动 nextest 前先核验实际执行宿主的物理总内存及当前资源压力。总内存低于 32G 禁止启动；无法确认则不启动。不能通过降低 nextest 并发绕过。资源不达标时门记 not-run，改在获授权且达标的执行宿主运行，不得自动连接远程主机。**
@@ -79,8 +79,8 @@ Phase 0 基线：SP-00；Phase 1 正确性与 stat：SP-01..03；Phase 2 核心�
 
 | 卡 | 优先级 | 选择 | Issue | Lifecycle / Acceptance |
 |---|---|---|---|---|
-| SP-00 冻结 status 性能基线与修正审计口径 | P1 | 必选验收前置 | [#639](https://github.com/libra-tools/libra/issues/639) | in-progress / locally-accepted |
-| SP-01 status 递归子树加载返回错误而非 panic | P1 | 必选正确性 | [#640](https://github.com/libra-tools/libra/issues/640) | pending / 空 |
+| SP-00 冻结 status 性能基线与修正审计口径 | P1 | 必选验收前置 | [#639](https://github.com/libra-tools/libra/issues/639) | done / complete |
+| SP-01 status 递归子树加载返回错误而非 panic | P1 | 必选正确性 | [#640](https://github.com/libra-tools/libra/issues/640) | in-progress / 空 |
 | SP-02 restore 区分 decoded size 与对象加载内存成本 | P1 | 必选正确性 | [#641](https://github.com/libra-tools/libra/issues/641) | pending / 空 |
 | SP-03 materialization 后安全写入真实 index stat | P1 | 本轮核心提速 | [#642](https://github.com/libra-tools/libra/issues/642) | pending / 空 |
 | SP-04 单次 status 复用同一 index 快照 | P2 | 可选建议项，默认未启用 | [#643](https://github.com/libra-tools/libra/issues/643) | pending / 空 |
@@ -96,7 +96,7 @@ Phase 0 基线：SP-00；Phase 1 正确性与 stat：SP-01..03；Phase 2 核心�
 
 **Task type:** audit
 
-**Lifecycle / Acceptance:** in-progress / locally-accepted
+**Lifecycle / Acceptance:** done / complete
 
 **Priority / Selection:** P1；必选验收前置
 
@@ -152,7 +152,7 @@ Phase 0 基线：SP-00；Phase 1 正确性与 stat：SP-01..03；Phase 2 核心�
 
 **Release boundary:** no-release；本卡文档随 PR #652 独立合入上游 main，不等待 SP-01 发版
 
-**C/D coverage from:** self（EX-SP-00-AUDIT-01）；自行通过文档、评审、fmt/Clippy 与 PR #652 最终 head 的 base/CodeQL 门，不继承 SP-01 发布。远端检查及合并待完成。
+**C/D coverage from:** self（EX-SP-00-AUDIT-01）；自行通过文档、评审、fmt/Clippy 与 PR #652 最终 head 的 base/CodeQL 门，不继承 SP-01 发布。PR #652 最终 head `5e395e0` 的全部检查成功；2026-10-29T15:47:49Z 合并为 `d0578dbe6dd3d484521db4cf60daff736256dc59`，文档已进入上游 main。Issue #639 仍 open，状态关闭未同步。
 
 **Granularity:** type=audit; axis=冻结 status 性能基线与修正审计口径; recovery=回退文档; complete=yes; self-contained=yes; AC=4/20; VER=2/20; landing=0; prod-files=0; scope=S; deps=DEP-SP-DATA; writeset=按实施顺序串行; release=no-release; split-from=N/A; exception=EX-SP-00-AUDIT-01
 
@@ -160,7 +160,7 @@ Phase 0 基线：SP-00；Phase 1 正确性与 stat：SP-01..03；Phase 2 核心�
 
 **Task type:** implementation
 
-**Lifecycle / Acceptance:** pending / 空
+**Lifecycle / Acceptance:** in-progress / 空
 
 **Priority / Selection:** P1；必选正确性
 
@@ -174,22 +174,22 @@ Phase 0 基线：SP-00；Phase 1 正确性与 stat：SP-01..03；Phase 2 核心�
 
 **Acceptance criteria:**
 
-- [ ] 缺失子树返回 LBR-REPO-002 而非 panic。
+- [x] 缺失子树返回 LBR-REPO-002 而非 panic。
 
-- [ ] 损坏子树返回包含受影响 OID 的可操作错误。
+- [x] 损坏子树返回包含受影响 OID 的可操作错误。
 
-- [ ] human/JSON/porcelain 错误输出遵守现有格式与退出契约。
+- [x] human/JSON/porcelain 错误输出遵守现有格式与退出契约。
 
-- [ ] 合法含 gitlink 的 tree 不被当成缺失子树。
+- [x] 合法含 gitlink 的 tree 不被当成缺失子树。
 
 - [ ] ER-06a：文档清单逐文件同步并验收（全局必需门，不计入特有 AC）。
 
 
 **Verification:**
 
-- [ ] `cargo test --test command_test status_error_test::`
+- [x] `cargo test --test command_test status_error_test::`
 
-- [ ] `cargo test --test command_test status_error_test::status_nested_tree_ -- --nocapture` — `(new)` 测试前缀；须非零命中。
+- [x] `cargo test --test command_test status_error_test::status_nested_tree_ -- --nocapture` — `(new)` 测试前缀；须非零命中。
 
 
 **Full-suite trigger:** T-1：共享 tree 读取辅助逻辑
@@ -907,3 +907,9 @@ DEP-SP-DATA 按用户指定采用公开标准仓库 [`libra-tools/libra@d0a5c28`
 | 2026-10-29 | #639 收口复核：在 `codex/SP-00` 以未提交合并方式合入 main `1e5310c24ef4eaa07575256482490705181c360a`（含 PR #654），保留其全部生产/测试修复；`plan-status.md` 冲突保留本卡基线行及 main 其它最新条目。16 格唯一组合、800/640 样本数及展示精度下倍率一致性检查通过；历史采样原件未读取、基准未重跑，原采样结果按 PR #652 记录引用，非本轮独立实测。修正“audit 可免 Clippy”表述及过早 complete：本卡为 in-progress / locally-accepted，SP-01 的 C/D 覆盖仍待；本轮 fmt 与合并后 `cargo clippy --all-targets --all-features --offline -- -D warnings` 均 exit 0（Clippy 58.85s）；依赖 `block 0.1.6` 的 future-incompat 提示保留，不称零警告。首轮在合并完成前读到旧源码的 Clippy exit 101，仅作失败历史，不用于判断 #654；本轮未启动 nextest。 | PR #652 已提交/推送、仍 open；本轮修复尚未提交/推送，Issue 未关闭；不发布版本、不扩大到 SP-01 |
 
 | 2026-10-29 | 用户批准 EX-SP-00-AUDIT-01：SP-00 取消继承 SP-01 发布验收，改为自行完成文档/评审/静态门及 PR #652 最终 head 的 CI；保留 SP-01 对 SP-00 的执行依赖及其原有 C/D。历史反向继承记录保留为当时事实，以本决策为现行口径。 | Codex 本轮文档复核 PASS（范围、依赖方向、现行/历史分离及验收条件一致）；SP-01 卡逐字未改、4 AC/2 VER 保留、workflow 与变更内链接目标及冲突标记检查通过。fmt 与严格 Clippy（offline，1.88s）均 exit 0，既有 block 0.1.6 future-incompat 提示保留；未重跑基准或 nextest。旧索引中的跨仓链接不在本次变更检查范围。待提交/推送；最终 head CI、合并与 Issue 收口仍未完成，保持 in-progress / locally-accepted |
+
+| 2026-10-29 SP-01 开工 | 实核 #652 已合并 d0578db，最终 head 全部 CI SUCCESS；据 EX-SP-00-AUDIT-01 将 SP-00 登记 done/complete，#639 仍 open 另计。用户授权 SP-01，从 upstream/main d0578db 创建 codex/SP-01；发现根 tree 安全加载后仍有三处使用递归 panic 展开路径。测试边界沿用卡内指定 status CLI 集成测试。 | 第一条缺失第二层子树回归已写，等待 RED；网站 /Volumes/Sea/libra-backend 不存在，用户明确暂且搁置网站同步，公开文档交付门仍未完成；本机 macOS arm64、物理内存 17179869184 bytes（16 GiB）且资源压力已查，禁止 nextest。两份 .env 测试文件缺失；本轮仅运行使用隔离 HOME/config 的既有 deterministic CLI 测试，不宣称全量通过 |
+
+| SP-01 本仓库 RED → GREEN | 首次短过滤器搭配 --exact 命中 0，不计验收；改为完整 `command::status_error_test::status_nested_tree_missing_returns_repo_error` 后实际 1/1 RED：Tree::load 缺失第二层子树 panic、CLI exit 1 而非 128。加入携带 OID/source 的 TreeExpansionError 和独立 fallible 展开函数，status 三处展开调用改为错误传播；保留 TreeExt 原公开契约与其它命令原路径。首次 missing 1/1 GREEN；扩展四例 4/4 GREEN；独立函数调整后整个 status_error_test 14/14 GREEN（9.43s），包含四例新回归。 | 三类错误各覆盖 human/no-renames/porcelain v1/v2/JSON/machine 六种调用，均 exit 128、LBR-REPO-002、包含 OID 与 fsck 提示、stdout 空、结构化模式单 JSON、index 字节不变；合法嵌套 gitlink 三种输出成功。EN/zh-CN status、错误码表和兼容表已同步；网站按用户决定搁置。严格 Clippy（all-targets/all-features，offline，2m12s）exit 0，既有 block 0.1.6 future-incompat 提示保留；Display 单元 1/1、现有缺失 HEAD 1/1、现有 gitlink 2/2 通过；新增前缀在最终实现再次 4/4 通过（4.26s）。含 status_error_test 14 项共 18 个不同用例，重跑不重复计数。补充回归初次误用文件名 status_wave0_test 作模块过滤命中 0，不计通过；查询测试清单后以实际模块 command::status_wave0 执行以上 1/1 和 2/2。fmt、diff check、双语文档及 TreeExt 契约/三调用点检查通过。代码差异自查未新增生产 panic/unwrap/expect；正式完整验收与 C/D 未取得，仍 in-progress / 验收空 |
+
+| SP-01 当前交付边界 | 本仓库四个生产文件、status_error_test 与四份现有命令/错误/兼容文档已修改；原 TreeExt trait 逐字保持，status 的三处展开均改为 fallible 调用。测试和静态门实证见上一行。 | 网站依用户决定暂搁；16 GiB nextest 硬门槛与缺失双 env 使 T-1 全量 not-run；版本 bump、release build/安装、提交/推送、PR/发布及远端 C/D 均未执行，不将局部绿标为 complete |

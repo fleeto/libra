@@ -1302,7 +1302,8 @@ fn tree_item_mode_to_unix(mode: TreeItemMode) -> u32 {
 
 /// The error for a HEAD object that passes ref validation but is not in the
 /// object store. `Commit::load` / `Tree::load` PANIC in that case, so every
-/// status path that expands HEAD goes through the `try_load` pair below: a
+/// status path loads roots through the `try_load` pair below and expands
+/// subtrees through the fallible helper: a
 /// pruned or corrupt object is a repository problem the user can act on, not
 /// a reason to take the process down.
 pub(crate) fn head_object_unreadable(what: &str, oid: &ObjectHash) -> CliError {
@@ -1326,8 +1327,8 @@ pub(crate) fn load_head_commit_tree(head_oid: &ObjectHash) -> CliResult<(Commit,
 /// of the staged snapshot).
 fn load_head_tree_blobs(head_oid: &ObjectHash) -> CliResult<HashMap<PathBuf, (ObjectHash, u32)>> {
     let (_, tree) = load_head_commit_tree(head_oid)?;
-    Ok(tree
-        .get_plain_items_with_mode()
+    Ok(try_get_plain_items_with_mode(&tree)
+        .map_err(|source| StatusError::HeadTreeExpansion { source })?
         .into_iter()
         .map(|(path, hash, mode)| (path, (hash, tree_item_mode_to_unix(mode))))
         .collect())

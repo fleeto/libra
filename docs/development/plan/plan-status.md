@@ -1092,7 +1092,7 @@ FIX08采纳候选待双审；Mega109/活动108、Libra26/活动25、联合135/�
 | [`plan-20260923.md`](plan-20260923.md) | CP-00 (audit handoff delivered)..CP-20 pending; expand bounded domain cards after inventory if needed | CP-00 audit handoff delivered 2026-10-07（`plan-20260923-coverage.tsv`，0 未分配）；CP-01 可消费 CP-00 审计产物；计划级 review PASS 及 DEP-CP-01..07 仍待满足；动态实现要求 CP-06 done/complete |
 | [`plan-20260906.md`](plan-20260906.md) | SC-01..SC-07、SC-CLOSE | — |
 | [`plan-20260907.md`](plan-20260907.md) | B3-00..B3-17 | **已收口**（B3-00..B3-17 全部 `done`/`complete`；`DEP-B3-05` 已满足，不再阻塞 plan-20260913） |
-| [`plan-20260911.md`](plan-20260911.md) | PI-00..24（25卡pending） | 下一PI-00（候选pin v1.4.0 `4a08025`）；10-18双规划审查PASS，10-29的1.4.0修订Codex R13 PASS；PI-05围栏先于row writer，旧429历史不授本轮PASS |
+| [`plan-20260911.md`](plan-20260911.md) | PI-00..24（25卡pending） | PI-00 locally-accepted（Codex R3 PASS）；下一PI-24（候选pin v1.4.0 `4a08025`）；10-18双规划审查PASS，10-29的1.4.0修订Codex R13 PASS；PI-05围栏先于row writer，旧429历史不授本轮PASS |
 | [`plan-20261018-hermes-capture.md`](plan-20261018-hermes-capture.md) | HM-00、HM-02、HM-01 done/complete；HM-03 起 pending | HM-01 发布 patch。两张审计/围栏卡都无版本。本机 binary 为 v0.22.5 |
 | [`plan-20261018-grok-capture.md`](plan-20261018-grok-capture.md) | GK-06本机通过；功能暂停 | GK-00字段审计保留；GK-07交给`/root/grok_continue`，GK-08仍暂停；旧GO不覆盖当前生产接入 |
 | [`plan-20260912.md`](plan-20260912.md) | MB-01..05、MB-07/08/10/11（MB-06/09/12 已取消） | 依赖 CAP（plan-20260916）等 |
@@ -1334,7 +1334,7 @@ SBX-01..05 `done/locally-accepted`；**发布步按 DEFER-SBX-06 正式延后**�
 | [`plan-20260905`](plan-20260905.md#cc04-envelope-audit-20261019) | CC-08 | legacy Claude 受控 revision 修复 | CC-05 | 计划级 DATA-CAP R2 PASS 不替代本卡实现审查 | `claude_legacy_` 1 条通过；旧对象未改写；tombstone 拒绝复活；signed main CI 与 0.30.65 发布未登记 | done / complete；v0.30.65 / v0.30.66 已发布 |
 | [`plan-20260906`](plan-20260906.md) | SC-01 / SC-02（可并发） | SC-01 `base.yml` 最小权限加固；SC-02 会话入口 id 守卫 | 无 | **未定稿**（R2 PASS 已作废；R22 `FAIL`） | SC-04 受 DEP-SC-01/04/05/06；SC-07 受 DEP-SC-07 | ❌ 禁止开工 |
 | [`plan-20260902`](plan-20260902.md) | OG-00 | OpenCode2.0.26 Hook/export当前契约审计 | 无；按具名main source与逐文件单写者 | 当前9/9审计门；Claude Code R2 semantic PASS，旧评审为历史 | 无新增完整RG前置，typed/native归档门仍保留 |  ✅ done/complete，具名产物在v0.30.43最终tree/site，实际FAST-OG-01 C/D继承 |
-| [`plan-20260911`](plan-20260911.md) | PI-00 | Pi 1.4.0版本/source/事件身份只读审计 | 无 | 10-18 DATA-CAP-20261019 修订的 Claude R2 实际 PASS；10-29 的 1.4.0 修订 Codex R13 PASS；旧 R5 是历史 | 后继PI-05先围栏；PI-01再identity/schema配对 | pending；未实施，选卡授权及具体依赖仍须核验 |
+| [`plan-20260911`](plan-20260911.md) | PI-00 | Pi 1.4.0版本/source/事件身份只读审计 | 无 | 10-18 DATA-CAP-20261019 修订的 Claude R2 实际 PASS；10-29 的 1.4.0 修订 Codex R13 PASS；旧 R5 是历史 | 后继PI-24；PI-05先围栏；PI-01再identity/schema配对 | in-progress / locally-accepted；Codex 卡评审 R3 PASS；C/D 覆盖待 PI-05 |
 | [`plan-20261018-hermes-capture`](plan-20261018-hermes-capture.md) | HM-00 | Hermes版本/source/observer协议审计 | 无 | 冻结轮 R1 FAIL、R2 PASS 保留。本卡收口审查另记 | HM-02 已落地同步前白名单；HM-01 仍消费 PI-01 交接；本机 v0.22.5 binary 已在 | done / complete；无版本 |
 | [`plan-20261018-grok-capture`](plan-20261018-grok-capture.md) | GK-00 | 记录已安装 Grok 1.0.62 的日志与 hook 形状 | 无 | 审计已写入计划；SHA 检查已取消 | 公开 HEAD 仍是 1.0.45，该事实不再停工 | GK-01..05 GO；GK-00 Acceptance 仍空，等 GK-01 的 C/D |
 | [`plan-20261018-grok-capture`](plan-20261018-grok-capture.md) | GK-01 | Repository 接受 `grok` 且仍 unsupported | GK-00 字段矩阵 GO；DEP-GK-DB；DEP-GK-WRITE | 本卡 focused 测试已过；正式评审未记 PASS | 专用 CHECK 连接在本卡落地 | `locally-accepted`；Acceptance 仍空，等 v0.30.53 的 D-CAP-STD |

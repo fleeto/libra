@@ -2168,26 +2168,37 @@ struct StaleSchemaFixture {
     stale: Vec<String>,
 }
 
-/// A disposable repository with both forward-only receipts and their empty
-/// physical state removed, then the latest reversible migration rolled back.
-/// This models an older repository without asking the production rollback API
-/// to undo a compatibility barrier.
+/// A disposable repository with the newest reversible migration rolled back,
+/// both forward-only receipts and their empty physical state removed, then
+/// the next older reversible migration rolled back. This models an older
+/// repository without asking the production rollback API to undo a
+/// compatibility barrier.
 async fn stale_hook_repo() -> (HookRepo, StaleSchemaFixture) {
     let repo = HookRepo::init();
     let migrations = builtin_migrations();
-    let newest = migrations.last().expect("at least one built-in migration");
+    let reversible = migrations.last().expect("at least one built-in migration");
+    assert!(
+        reversible.down.is_some() && reversible.name == "agent_kind_hermes",
+        "the disposable fixture must explicitly model the latest reversible migration"
+    );
+    let newest = migrations
+        .iter()
+        .rev()
+        .nth(1)
+        .expect("session-commit links");
     assert!(
         newest.down.is_none() && newest.name == "agent_session_commit",
         "the disposable fixture must explicitly model the forward-only session links"
     );
-    let layout = migrations.iter().rev().nth(1).expect("layout barrier");
+    let layout = migrations.iter().rev().nth(2).expect("layout barrier");
     assert!(layout.down.is_none() && layout.name == "worktree_layout_capability");
     let previous = migrations
         .iter()
         .rev()
-        .nth(3)
+        .nth(4)
         .map(|migration| migration.version)
         .expect("an older reversible migration");
+    let runner = builtin_runner().expect("built-in migration registry");
     let conn = repo.db().await;
     assert_eq!(
         max_repository_schema_receipt(&conn).await,
@@ -2195,6 +2206,13 @@ async fn stale_hook_repo() -> (HookRepo, StaleSchemaFixture) {
         "fixture precondition: init writes the current schema"
     );
     let current = physical_repository_schema(&conn).await;
+    // `rollback_to` refuses any irreversible migration in its range, so the
+    // reversible migration above the forward-only pair goes first.
+    runner
+        .rollback_to(&conn, newest.version)
+        .await
+        .expect("roll the newest reversible migration back");
+    assert_eq!(reversible.version, latest_repository_schema_version());
     // This fixture is disposable and has no session-commit links. Remove both
     // forward-only migrations' physical effects and receipts before exercising
     // the older reversible schema migration.
@@ -2210,11 +2228,10 @@ async fn stale_hook_repo() -> (HookRepo, StaleSchemaFixture) {
     ))
     .await
     .expect("remove disposable forward-only receipts");
-    builtin_runner()
-        .expect("built-in migration registry")
+    runner
         .rollback_to(&conn, previous)
         .await
-        .expect("roll the latest reversible migration back");
+        .expect("roll the older reversible migration back");
     assert_eq!(
         max_repository_schema_receipt(&conn).await,
         Some(previous),

@@ -4969,6 +4969,7 @@ async fn hermes_source_sqlite_reads_wal_and_refuses_a_read_only_directory() {
     let db = root.join("state.db");
     let script = format!(
         r#"
+import os
 import sqlite3
 conn = sqlite3.connect({db:?})
 conn.execute("PRAGMA journal_mode=WAL")
@@ -4979,6 +4980,10 @@ conn.execute("INSERT INTO messages (session_id, reasoning, reasoning_content, re
 conn.execute("INSERT INTO messages (session_id, reasoning, reasoning_content, reasoning_details, codex_reasoning_items, codex_message_items, active, compacted) VALUES ('sess-hermes', NULL, '', '{{\"raw\":1}}', '[]', NULL, 1, 0)")
 conn.execute("INSERT INTO messages (session_id, reasoning, reasoning_content, reasoning_details, codex_reasoning_items, codex_message_items, active, compacted) VALUES ('sess-hermes', 'kept-thought', NULL, NULL, NULL, NULL, 0, 1)")
 conn.commit()
+# Exit without closing the connection: a clean close checkpoints and deletes
+# the WAL, and whether interpreter shutdown closes it depends on the Python
+# version.
+os._exit(0)
 "#,
         db = db.display().to_string(),
         repo = repo.display().to_string(),

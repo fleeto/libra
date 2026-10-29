@@ -54,7 +54,18 @@ Nowledge 定向检索已尝试，服务连接被环境阻止；本计划依据�
 - implementation 默认 independent，Version increment=patch；Release write set=权威版本面集合（`compat_version_surface_sync`）、工具链更新的 Cargo.lock、artifact。实际提交/推送/Release 需后续授权，本次建 Issue 不包含这些动作。
 - implementation 默认 Rollback mode=immutable-release：未发布可回退本卡实现，已发布用修复版恢复；无 schema 迁移，不自动重写历史 index。下载旧版本无法撤销已写出的 stat，必要时安全刷新，不能保留可疑 clean 缓存。
 - 默认 Docs and compatibility impact=N/A 仅适用于输出与错误完全不变的内部优化；公开行为变化卡须同卡双语与网站文档。网站路径为候选，DEP-SP-DOCS 核验后才允许开工；遵循用户 standing instruction 直接 cf，通过 Libra 提交推送，不能另建网站分支/PR/worktree。
-- 无 EX 豁免，无家族合并发布；C/D coverage=self（实现卡），audit 覆盖来源为下列具体实现卡。正式 review 与 C/D 门未执行，不能把本次自查写成批准开工。
+- 无家族合并发布；C/D coverage=self（实现卡），SP-09 继承下列具体实现卡。SP-00 按用户批准的 EX-SP-00-AUDIT-01 独立文档验收（见下）；该例外不免除评审、fmt、Clippy 或本卡 PR CI，也不授权其它卡开工。
+
+### SP-00 独立文档验收决策（EX-SP-00-AUDIT-01）
+
+2026-10-29，用户接受“取消 SP-00 对 SP-01 发布验收的继承，保留 SP-01 对基线的执行依赖”的建议，并明确授权修改、提交和推送。本决策仅针对 SP-00，作为模板 ER-04 对 no-release 卡必须继承发布点 C/D 的具名例外；不修改模板，不扩展至 SP-09 或任何实现卡。
+
+- SP-00 的产物仅为本计划中的基线协议、测量记录和审计修正，以及状态索引；独立验证这些产物不需要 SP-01 的生产修复或二进制发布。继续保留 no-code / no-config、no-release、版本递增 N/A，不 bump、不安装、不创建 tag/Release。
+- 本卡自行承担文档验收：四项 AC、两项 Verification、文档结构/内部链接与变更范围检查、Codex review PASS、最终文档状态下的 `cargo +nightly fmt --all --check` 和 `cargo clippy --all-targets --all-features -- -D warnings`；不以本决策免除任何现有文档判据或推送前静态门。
+- 本卡 D 门为 PR #652 最终 head 上 `.github/workflows/base.yml`（Check, Build and Test）及 `.github/workflows/codeql.yml`（CodeQL Advanced）的全部适用检查成功；`neutral` 的汇总检查不替代底层 CodeQL 成功。随后合并 PR，核验文档进入上游 main，才可登记 `done / complete` 并关闭 #639。检查未完成时保留 `in-progress / locally-accepted`；失败则修复后重验，不以 mergeable 代替 CI 通过。
+- 本卡不执行 C 组的版本 bump、release build、安装及发布步骤，不继承 SP-01 的全量测试或发布后置门；基准采样不因归属调整而重跑，历史实测与本轮文档核对继续区分。
+- SP-01 的 `Dependencies: SP-00, DEP-SP-DOCS`、实现范围、回归测试、独立 patch 发布及完整 C/D 门保持原样。它消费的是本卡已冻结并通过文档验收的基线；不得再以 SP-01 的未来发布反向阻止本卡收口。
+- 恢复：如撤销本决策，恢复 SP-00 的 `C/D coverage from: SP-01` 及原状态条件；不能回写历史 CI 或发布结果。
 
 ## 实施顺序与发布窗口
 
@@ -115,7 +126,7 @@ Phase 0 基线：SP-00；Phase 1 正确性与 stat：SP-01..03；Phase 2 核心�
 - [x] 人工核对：两份报告的历史统计与本轮实测分栏，未访问的外部归档不标独立复算。
 
 
-**Full-suite trigger:** N/A：audit，不执行发布 C 组
+**Full-suite trigger:** N/A：纯文档 audit；按 EX-SP-00-AUDIT-01 独立验收，不执行版本/二进制发布 C 组
 
 **Dependencies:** DEP-SP-DATA
 
@@ -139,11 +150,11 @@ Phase 0 基线：SP-00；Phase 1 正确性与 stat：SP-01..03；Phase 2 核心�
 
 **Version increment:** N/A
 
-**Release boundary:** no-release；规划记录随实现交付进入仓库
+**Release boundary:** no-release；本卡文档随 PR #652 独立合入上游 main，不等待 SP-01 发版
 
-**C/D coverage from:** SP-01；尚未运行。
+**C/D coverage from:** self（EX-SP-00-AUDIT-01）；自行通过文档、评审、fmt/Clippy 与 PR #652 最终 head 的 base/CodeQL 门，不继承 SP-01 发布。远端检查及合并待完成。
 
-**Granularity:** type=audit; axis=冻结 status 性能基线与修正审计口径; recovery=回退文档; complete=yes; self-contained=yes; AC=4/20; VER=2/20; landing=0; prod-files=0; scope=S; deps=DEP-SP-DATA; writeset=按实施顺序串行; release=no-release; split-from=N/A; exception=N/A
+**Granularity:** type=audit; axis=冻结 status 性能基线与修正审计口径; recovery=回退文档; complete=yes; self-contained=yes; AC=4/20; VER=2/20; landing=0; prod-files=0; scope=S; deps=DEP-SP-DATA; writeset=按实施顺序串行; release=no-release; split-from=N/A; exception=EX-SP-00-AUDIT-01
 
 ### Task SP-01: status 递归子树加载返回错误而非 panic
 
@@ -769,7 +780,7 @@ Phase 0 基线：SP-00；Phase 1 正确性与 stat：SP-01..03；Phase 2 核心�
 
 | 卡 | type | AC | VER | landing / prod-files | scope | writeset | release | exception |
 |---|---|---|---|---|---|---|---|---|
-| SP-00 | audit | 4/20 | 2/20 | 0/0 | S | 按依赖串行 | no-release | none |
+| SP-00 | audit | 4/20 | 2/20 | 0/0 | S | 按依赖串行 | no-release | EX-SP-00-AUDIT-01 |
 | SP-01 | implementation | 4/8 | 2/8 | 3/4 | M | 按依赖串行 | independent | none |
 | SP-02 | implementation | 5/8 | 3/8 | 4/5 | M | 按依赖串行 | independent | none |
 | SP-03 | implementation | 7/8 | 3/8 | 1/2 | M | 按依赖串行 | independent | none |
@@ -796,7 +807,7 @@ Phase 0 基线：SP-00；Phase 1 正确性与 stat：SP-01..03；Phase 2 核心�
 
 ### 基线与实施证据汇总
 
-实现卡仍全部 not-run；没有实施 PASS、独立审查 PASS、网站/发布/CI 完成证据。SP-00 已执行 release 构建与下述基线采样，`cargo +nightly fmt --all --check` 通过；该历史采样轮未运行 Clippy 和全量测试。Clippy 仍是推送前必跑门；全量测试按 audit 卡的 N/A 触发条件不在本卡执行，C/D 覆盖仍登记为 SP-01。
+实现卡仍全部 not-run；没有实施 PASS、独立审查 PASS、网站/发布/CI 完成证据。SP-00 已执行 release 构建与下述基线采样，`cargo +nightly fmt --all --check` 通过；该历史采样轮未运行 Clippy 和全量测试。Clippy 仍是推送前必跑门；全量测试按 audit 卡的 N/A 触发条件不在本卡执行，当前验收归属按 EX-SP-00-AUDIT-01 调整为本卡独立文档验收；历史登记 SP-01 已被该决策取代。
 
 #### SP-00 冻结协议与环境
 
@@ -894,3 +905,5 @@ DEP-SP-DATA 按用户指定采用公开标准仓库 [`libra-tools/libra@d0a5c28`
 | 2026-10-28 12:30:24 UTC | 用户指定 `libra-tools/libra@d0a5c28a6b236421c14a38339b592fe37137585e` 为标准仓库；Git/Libra 分别完整克隆并检出该提交，在 2,125 个跟踪文件的真实工作区上重跑 16 场景，最终完整矩阵 800 次调用、640 次正式计时及语义/退出/索引断言全过；两个 PowerShell 文件的 CRLF/LF 检出差异已披露，旧合成仓库数据仅保留为历史 | SP-00 本地 done / complete；未提交、未推送，Issue #639 保持 open |
 
 | 2026-10-29 | #639 收口复核：在 `codex/SP-00` 以未提交合并方式合入 main `1e5310c24ef4eaa07575256482490705181c360a`（含 PR #654），保留其全部生产/测试修复；`plan-status.md` 冲突保留本卡基线行及 main 其它最新条目。16 格唯一组合、800/640 样本数及展示精度下倍率一致性检查通过；历史采样原件未读取、基准未重跑，原采样结果按 PR #652 记录引用，非本轮独立实测。修正“audit 可免 Clippy”表述及过早 complete：本卡为 in-progress / locally-accepted，SP-01 的 C/D 覆盖仍待；本轮 fmt 与合并后 `cargo clippy --all-targets --all-features --offline -- -D warnings` 均 exit 0（Clippy 58.85s）；依赖 `block 0.1.6` 的 future-incompat 提示保留，不称零警告。首轮在合并完成前读到旧源码的 Clippy exit 101，仅作失败历史，不用于判断 #654；本轮未启动 nextest。 | PR #652 已提交/推送、仍 open；本轮修复尚未提交/推送，Issue 未关闭；不发布版本、不扩大到 SP-01 |
+
+| 2026-10-29 | 用户批准 EX-SP-00-AUDIT-01：SP-00 取消继承 SP-01 发布验收，改为自行完成文档/评审/静态门及 PR #652 最终 head 的 CI；保留 SP-01 对 SP-00 的执行依赖及其原有 C/D。历史反向继承记录保留为当时事实，以本决策为现行口径。 | Codex 本轮文档复核 PASS（范围、依赖方向、现行/历史分离及验收条件一致）；SP-01 卡逐字未改、4 AC/2 VER 保留、workflow 与变更内链接目标及冲突标记检查通过。fmt 与严格 Clippy（offline，1.88s）均 exit 0，既有 block 0.1.6 future-incompat 提示保留；未重跑基准或 nextest。旧索引中的跨仓链接不在本次变更检查范围。待提交/推送；最终 head CI、合并与 Issue 收口仍未完成，保持 in-progress / locally-accepted |

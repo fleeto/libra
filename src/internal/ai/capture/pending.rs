@@ -2356,7 +2356,7 @@ pub(crate) async fn erase_session_artifacts(
             // Foreign evidence is retained, but a corrupt or orphaned header
             // keeps blocking persists and destructive GC: report lost capacity.
             (_, Some(alias)) => {
-                unassigned |= !text.is_some_and(|text| PendingHeader::decode(text).is_ok())
+                unassigned |= text.is_none_or(|text| PendingHeader::decode(text).is_err())
                     || !alias_registered(txn, &scope.repo_id, &alias).await?;
             }
         }

@@ -960,7 +960,7 @@ async fn compare_reasoning_identity(
     let Some(record) = record else {
         return Ok(
             if incoming.is_some_and(|item| item.kind() == ReasoningIdentityKind::Nonempty)
-                && !(existing.completeness == "incomplete")
+                && existing.completeness != "incomplete"
             {
                 ReasoningComparison::Partial
             } else {

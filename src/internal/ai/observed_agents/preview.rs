@@ -71,8 +71,8 @@ pub fn preview_spec_for(kind: AgentKind) -> Option<&'static PreviewSpec> {
 
 /// Returns `true` if the given kind is one of the five preview agents.
 ///
-/// Hermes is an unsupported stable identity stub, not a preview spec.
-/// `PREVIEW_SPECS` stays empty; capture is disabled on the registry row.
+/// Hermes is an unsupported stable identity, not a preview spec.
+/// Its source reader lives in `builtin/hermes.rs`. Install and launch stay off.
 pub fn is_preview(kind: AgentKind) -> bool {
     preview_spec_for(kind).is_some()
 }

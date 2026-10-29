@@ -4787,3 +4787,297 @@ async fn cov2_mixed_v1_v2_direct_import_idempotent() {
         "invalid input must reject before leasing"
     );
 }
+
+fn hermes_source_scope(
+    repo: &std::path::Path,
+) -> libra::internal::ai::observed_agents::HermesScope {
+    libra::internal::ai::observed_agents::HermesScope {
+        session_id: "sess-hermes".to_string(),
+        profile: "default".to_string(),
+        repo_root: repo.to_path_buf(),
+    }
+}
+
+fn hermes_source_session(repo: &std::path::Path, messages: serde_json::Value) -> String {
+    serde_json::json!({
+        "id": "sess-hermes",
+        "source": "cli",
+        "created_source": "cli",
+        "user_id": null,
+        "cwd": repo,
+        "profile_name": "default",
+        "messages": messages,
+    })
+    .to_string()
+}
+
+#[test]
+fn hermes_source_jsonl_keeps_thinking_and_drops_revoked_rows() {
+    let repo = std::path::PathBuf::from("/work/repo");
+    let messages = serde_json::json!([
+        {"active": 0, "compacted": 0, "reasoning": "revoked-thought", "reasoning_content": null},
+        {"active": 1, "compacted": 0, "reasoning": null, "reasoning_content": "", "reasoning_details": "{\"raw\":1}", "codex_reasoning_items": "[]", "codex_message_items": null},
+        {"active": 0, "compacted": 1, "reasoning": "kept-thought", "reasoning_content": "also-kept", "reasoning_details": "{\"keep\":true}"}
+    ]);
+    let bytes = hermes_source_session(&repo, messages);
+    let status = libra::internal::ai::observed_agents::read_hermes_jsonl(
+        bytes.as_bytes(),
+        &hermes_source_scope(&repo),
+        &libra::internal::ai::observed_agents::HermesReadLimits::default(),
+    );
+    let libra::internal::ai::observed_agents::HermesSourceStatus::Read(transcript) = status else {
+        panic!("jsonl read failed: {status}");
+    };
+    assert!(transcript.thinking_fields_present);
+    assert!(!transcript.partial);
+    assert_eq!(transcript.messages.len(), 2, "revoked row must stay out");
+    assert!(
+        transcript
+            .messages
+            .iter()
+            .all(|message| message.readable_thinking() != Some("revoked-thought"))
+    );
+    assert!(transcript.messages[0].readable_thinking().is_none());
+    assert_eq!(transcript.messages[0].reasoning, None);
+    assert_eq!(
+        transcript.messages[0].reasoning_content.as_deref(),
+        Some("")
+    );
+    assert_eq!(
+        transcript.messages[0].reasoning_details.as_deref(),
+        Some("{\"raw\":1}")
+    );
+    assert_eq!(
+        transcript.messages[0].codex_reasoning_items.as_deref(),
+        Some("[]")
+    );
+    assert_eq!(transcript.messages[0].codex_message_items, None);
+    assert_eq!(
+        transcript.messages[1].readable_thinking(),
+        Some("kept-thought")
+    );
+    assert_eq!(
+        transcript.messages[1].reasoning_content.as_deref(),
+        Some("also-kept")
+    );
+    assert_eq!(
+        transcript.messages[1].reasoning_details.as_deref(),
+        Some("{\"keep\":true}")
+    );
+    assert!(!status_text_leaks(&transcript.messages[1]));
+
+    let mut limits = libra::internal::ai::observed_agents::HermesReadLimits::default();
+    limits.max_rows = 1;
+    let status = libra::internal::ai::observed_agents::read_hermes_jsonl(
+        bytes.as_bytes(),
+        &hermes_source_scope(&repo),
+        &limits,
+    );
+    let libra::internal::ai::observed_agents::HermesSourceStatus::Read(truncated) = status else {
+        panic!("row budget read failed: {status}");
+    };
+    assert!(
+        truncated.partial,
+        "a kept row past the budget must stay partial"
+    );
+    assert_eq!(truncated.messages.len(), 1);
+}
+
+#[test]
+fn hermes_source_jsonl_rejects_gateway_outside_cwd_and_symlink() {
+    let root = tempfile::tempdir().expect("root");
+    let repo = root.path().join("repo");
+    std::fs::create_dir(&repo).expect("repo");
+    let gateway = hermes_source_session(
+        &repo,
+        serde_json::json!([
+            {"active": 1, "compacted": 0, "reasoning": "nope"}
+        ]),
+    );
+    let mut gateway_value: serde_json::Value = serde_json::from_str(&gateway).expect("json");
+    gateway_value["source"] = serde_json::json!("gateway");
+    let status = libra::internal::ai::observed_agents::read_hermes_jsonl(
+        gateway_value.to_string().as_bytes(),
+        &hermes_source_scope(&repo),
+        &libra::internal::ai::observed_agents::HermesReadLimits::default(),
+    );
+    assert!(matches!(
+        status,
+        libra::internal::ai::observed_agents::HermesSourceStatus::Unavailable
+    ));
+    assert!(!status.to_string().contains("nope"));
+    gateway_value["source"] = serde_json::json!("matrix");
+    let status = libra::internal::ai::observed_agents::read_hermes_jsonl(
+        gateway_value.to_string().as_bytes(),
+        &hermes_source_scope(&repo),
+        &libra::internal::ai::observed_agents::HermesReadLimits::default(),
+    );
+    assert!(matches!(
+        status,
+        libra::internal::ai::observed_agents::HermesSourceStatus::Unavailable
+    ));
+
+    let outside = hermes_source_session(
+        std::path::Path::new("/other/repo"),
+        serde_json::json!([
+            {"active": 1, "compacted": 0, "reasoning": "outside-thought"}
+        ]),
+    );
+    let status = libra::internal::ai::observed_agents::read_hermes_jsonl(
+        outside.as_bytes(),
+        &hermes_source_scope(&repo),
+        &libra::internal::ai::observed_agents::HermesReadLimits::default(),
+    );
+    assert!(matches!(
+        status,
+        libra::internal::ai::observed_agents::HermesSourceStatus::Unavailable
+    ));
+
+    #[cfg(unix)]
+    {
+        let export_dir = root.path().join("export");
+        std::fs::create_dir(&export_dir).expect("export dir");
+        let real = export_dir.join("real.jsonl");
+        std::fs::write(&real, format!("{gateway}\n")).expect("real");
+        let link = export_dir.join("link.jsonl");
+        std::os::unix::fs::symlink(&real, &link).expect("symlink");
+        let status = libra::internal::ai::observed_agents::read_hermes_jsonl_file(
+            &link,
+            &export_dir,
+            &hermes_source_scope(&repo),
+            &libra::internal::ai::observed_agents::HermesReadLimits::default(),
+        );
+        assert!(matches!(
+            status,
+            libra::internal::ai::observed_agents::HermesSourceStatus::Unavailable
+        ));
+        assert!(!status.to_string().contains(&real.display().to_string()));
+    }
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn hermes_source_sqlite_reads_wal_and_refuses_a_read_only_directory() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let root = tempfile::tempdir().expect("root");
+    let root = root.path().canonicalize().expect("canonical root");
+    let repo = root.join("repo");
+    std::fs::create_dir(&repo).expect("repo");
+    let db = root.join("state.db");
+    let script = format!(
+        r#"
+import sqlite3
+conn = sqlite3.connect({db:?})
+conn.execute("PRAGMA journal_mode=WAL")
+conn.execute("CREATE TABLE sessions (id TEXT PRIMARY KEY, source TEXT NOT NULL, created_source TEXT, user_id TEXT, cwd TEXT, profile_name TEXT)")
+conn.execute("CREATE TABLE messages (id INTEGER PRIMARY KEY AUTOINCREMENT, session_id TEXT NOT NULL, reasoning TEXT, reasoning_content TEXT, reasoning_details TEXT, codex_reasoning_items TEXT, codex_message_items TEXT, active INTEGER NOT NULL, compacted INTEGER NOT NULL)")
+conn.execute("INSERT INTO sessions VALUES ('sess-hermes', 'cli', 'cli', NULL, ?, 'default')", ({repo:?},))
+conn.execute("INSERT INTO messages (session_id, reasoning, reasoning_content, reasoning_details, codex_reasoning_items, codex_message_items, active, compacted) VALUES ('sess-hermes', 'revoked-thought', NULL, NULL, NULL, NULL, 0, 0)")
+conn.execute("INSERT INTO messages (session_id, reasoning, reasoning_content, reasoning_details, codex_reasoning_items, codex_message_items, active, compacted) VALUES ('sess-hermes', NULL, '', '{{\"raw\":1}}', '[]', NULL, 1, 0)")
+conn.execute("INSERT INTO messages (session_id, reasoning, reasoning_content, reasoning_details, codex_reasoning_items, codex_message_items, active, compacted) VALUES ('sess-hermes', 'kept-thought', NULL, NULL, NULL, NULL, 0, 1)")
+conn.commit()
+"#,
+        db = db.display().to_string(),
+        repo = repo.display().to_string(),
+    );
+    let planted = std::process::Command::new("python3")
+        .arg("-c")
+        .arg(&script)
+        .status()
+        .expect("python");
+    assert!(planted.success(), "sqlite fixture");
+    let wal = PathBuf::from(format!("{}-wal", db.display()));
+    assert!(wal.exists(), "wal must hold the uncheckpointed rows");
+    let db_before = std::fs::read(&db).expect("db bytes");
+    let wal_before = std::fs::read(&wal).expect("wal bytes");
+    let request = libra::internal::ai::observed_agents::HermesSourceRequest {
+        authorized_root: root.clone(),
+        jsonl: None,
+        sqlite: Some(db.clone()),
+        scope: hermes_source_scope(&repo),
+        limits: libra::internal::ai::observed_agents::HermesReadLimits::default(),
+    };
+    let status = libra::internal::ai::observed_agents::read_hermes_source(&request).await;
+    let libra::internal::ai::observed_agents::HermesSourceStatus::Read(transcript) = &status else {
+        panic!("wal read failed: {status}");
+    };
+    assert_eq!(transcript.messages.len(), 2);
+    assert_eq!(
+        transcript.messages[1].readable_thinking(),
+        Some("kept-thought")
+    );
+    let mut tight = libra::internal::ai::observed_agents::HermesReadLimits::default();
+    tight.max_rows = 1;
+    let tight_status = libra::internal::ai::observed_agents::read_hermes_sqlite(
+        &db,
+        &root,
+        &hermes_source_scope(&repo),
+        &tight,
+    )
+    .await;
+    let libra::internal::ai::observed_agents::HermesSourceStatus::Read(tight_transcript) =
+        &tight_status
+    else {
+        panic!("sqlite row budget failed: {tight_status}");
+    };
+    assert!(
+        tight_transcript.partial,
+        "revoked rows must not hide a kept row past the budget"
+    );
+    assert_eq!(tight_transcript.messages.len(), 1);
+    assert!(
+        transcript
+            .messages
+            .iter()
+            .all(|message| message.readable_thinking() != Some("revoked-thought"))
+    );
+    assert_eq!(std::fs::read(&db).expect("db after"), db_before);
+    assert_eq!(std::fs::read(&wal).expect("wal after"), wal_before);
+    assert!(!status.to_string().contains("kept-thought"));
+    assert!(!status.to_string().contains("SELECT"));
+
+    let shm = PathBuf::from(format!("{}-shm", db.display()));
+    let _ = std::fs::remove_file(&shm);
+    let status = libra::internal::ai::observed_agents::read_hermes_sqlite(
+        &db,
+        &root,
+        &hermes_source_scope(&repo),
+        &libra::internal::ai::observed_agents::HermesReadLimits::default(),
+    )
+    .await;
+    assert!(matches!(
+        status,
+        libra::internal::ai::observed_agents::HermesSourceStatus::Read(_)
+    ));
+    assert_eq!(std::fs::read(&db).expect("db after shm"), db_before);
+    assert_eq!(std::fs::read(&wal).expect("wal after shm"), wal_before);
+
+    let _ = std::fs::remove_file(&shm);
+    let _ = std::fs::remove_file(PathBuf::from(format!("{}-shm", db.display())));
+    let mut locked = std::fs::metadata(&root).expect("root meta").permissions();
+    locked.set_mode(0o555);
+    std::fs::set_permissions(&root, locked).expect("readonly dir");
+    let status = libra::internal::ai::observed_agents::read_hermes_sqlite(
+        &db,
+        &root,
+        &hermes_source_scope(&repo),
+        &libra::internal::ai::observed_agents::HermesReadLimits::default(),
+    )
+    .await;
+    let mut restore = std::fs::metadata(&root).expect("root meta").permissions();
+    restore.set_mode(0o755);
+    std::fs::set_permissions(&root, restore).expect("restore dir");
+    assert!(matches!(
+        status,
+        libra::internal::ai::observed_agents::HermesSourceStatus::Unavailable
+    ));
+    assert_eq!(std::fs::read(&db).expect("db readonly"), db_before);
+    assert_eq!(std::fs::read(&wal).expect("wal readonly"), wal_before);
+    assert!(!status.to_string().contains(&db.display().to_string()));
+}
+
+fn status_text_leaks(message: &libra::internal::ai::observed_agents::HermesMessage) -> bool {
+    let rendered = format!("{message:?}");
+    rendered.contains("/secret")
+}

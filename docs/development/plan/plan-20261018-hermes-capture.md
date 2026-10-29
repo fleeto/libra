@@ -460,7 +460,7 @@ Claude 审查实现 `VERDICT: PASS`。文档挂错常量之后的复核轮也是
 
 **Task type:** implementation
 
-**Lifecycle / Acceptance:** pending / 空
+**Lifecycle / Acceptance:** done / complete
 
 **Description:** 注册 builtin/hermes.rs 替换 preview stub，读取「HM-00 版本冻结」选定的官方 JSONL。保留 `active` 或 `compacted` 为真的行，丢掉两者都为假的撤销行；三列 JSON 保持原始字符串。该 export 不可用时才用一致只读 SQLite 后备。内部 adapter 不开放安装。
 
@@ -470,14 +470,16 @@ Claude 审查实现 `VERDICT: PASS`。文档挂错常量之后的复核轮也是
 
 **Acceptance criteria:**
 
-- [ ] 接受 HM-00 核定的 source shape/版本；官方 export 缺 thinking 时选文件或一致只读 SQLite，不因没有官方 exporter 停止全部获取。
-- [ ] consent/root/no-follow/regular 先于 bytes；SQLite 的数据库角色为外部 provider source，只读零 schema writer，不经过 Libra Repository/Global/System migration；用只读连接/事务或 backup API 保持含 WAL 的一致视图，禁止写主 DB/WAL/schema 或调用自动迁移构造器；必要 -shm 协调遵守 ADR-HM-03；shape/session 与矩阵一致。
-- [ ] profile/session/cwd当前repo/worktree匹配，gateway/remote/cross-user拒绝。
-- [ ] source/row/枚举预算受限，busy/oversize/漂移返回partial或拒绝，不显示原始SQL/body/path。
+- [x] 接受 HM-00 核定的 source shape/版本；官方 export 缺 thinking 时选文件或一致只读 SQLite，不因没有官方 exporter 停止全部获取。
+- [x] consent/root/no-follow/regular 先于 bytes；SQLite 的数据库角色为外部 provider source，只读零 schema writer，不经过 Libra Repository/Global/System migration；用只读连接/事务或 backup API 保持含 WAL 的一致视图，禁止写主 DB/WAL/schema 或调用自动迁移构造器；必要 -shm 协调遵守 ADR-HM-03；shape/session 与矩阵一致。
+- [x] profile/session/cwd当前repo/worktree匹配，gateway/remote/cross-user拒绝。
+- [x] source/row/枚举预算受限，busy/oversize/漂移返回partial或拒绝，不显示原始SQL/body/path。
 
 **Verification:**
 
-- [ ] `source .env.test && cargo test --test agent_import_test hermes_source_ -- --test-threads=1`（拟新增过滤名；须列出实际匹配并确认非零）
+- [x] `source .env.test && cargo test --test agent_import_test hermes_source_ -- --test-threads=1`（拟新增过滤名；须列出实际匹配并确认非零）
+
+实现说明：`builtin/hermes.rs` 读取官方 JSONL。`active` 或 `compacted` 为真才保留。非空 `reasoning` 或 `reasoning_content` 是可读 thinking。三列 JSON 保持原始字符串。导出缺 thinking 列或不可用时才走只读 SQLite，不用 `immutable=1`，不迁移 provider 库。来源只接受 `cli`。`hermes_source_` 匹配 3 条并全部通过。Claude R1 `VERDICT: FAIL`（来源名单过宽、SQLite 行预算可能假完整）。R2 `VERDICT: PASS`，正文 SHA-256 `0a20cff33299f625a702d2430681496fd8951a1831fcfe9306c8dc1e7e979e71`。无 P0/P1。发布为独立 patch。
 
 **Full-suite trigger:** T-1/T-4（共享采集、存储、CLI 或测试契约）；执行四 provider 契约的完整双环境 nextest 门
 

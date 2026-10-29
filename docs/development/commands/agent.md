@@ -4,6 +4,10 @@
 
 Grok is supported and hook-installable with `support_wave=grok`, not `first_batch`, and is not a `review` or `investigate` launcher. **Automatic Thinking capture is paused.** Hook lifecycle events are recorded through the shared pipeline; decoding does not read session logs or write `GROK_HOME/libra-capture`. Existing readers for local `updates.jsonl` and `chat_history.jsonl` are not yet connected to the authorized snapshot/checkpoint writer. Offline observer JSON is scratch state, not a Libra checkpoint. The intended transcript retains Thinking text and unproven `encrypted_content`; Libra does not decrypt it. Current synthetic reader tests do not prove that live checkpoints contain it. Default `checkpoint show` does not print Thinking plaintext; an explicit transcript path returns only content actually stored.
 
+## Hermes source reader (HM-03)
+
+The internal reader in `builtin/hermes.rs` parses the official JSONL session export. It keeps a row only when `active` or `compacted` is true, treats a non-empty `reasoning` or `reasoning_content` string as readable thinking, and leaves the three JSON columns as raw strings. A missing, unusable, or thinking-column-free export falls back to a read-only SQLite transaction. That open does not set `immutable=1`, does not run Libra migrations, and must leave the provider database and WAL unchanged. An `-shm` file beside that database may be updated by SQLite. Gateway, remote, and cross-user sessions are refused. Hook install and launch stay disabled.
+
 ## Hermes identity (HM-01)
 
 Hermes is registered and unsupported. Migration `2026103001` extends the repository `agent_session.agent_kind` CHECK with `hermes` on a dedicated connection and keeps the previous eight values, including `grok` and `opencode`. `pi` is not added. The stub disables capture (`read_transcript` errors), hook install, and review/investigate launch. Global, system, and derived databases do not receive this receipt. Down refuses while a `hermes` row exists and keeps that row. `cloud sync` still refuses the kind before any remote write.

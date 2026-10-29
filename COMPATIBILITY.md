@@ -466,7 +466,7 @@ rewrites the agent's own transcript; `agent session show --extract-transcript
 `claude_code`, `cursor`, `codex`, `gemini`, `opencode`, `copilot`,
 `factory_ai`, and `grok` with `LBR-CONFLICT-002` before any remote write.
 `hermes` is outside that list. `--force` does not bypass the refusal.
-Repository migration `2026103001` accepts local `agent_kind=hermes` and keeps the previous kinds, including `grok` and `opencode`. `pi` stays rejected. Hermes capture, hook install, and review or investigate launch stay disabled.
+Repository migration `2026103001` accepts local `agent_kind=hermes` and keeps the previous kinds, including `grok` and `opencode`. `pi` stays rejected. The internal reader keeps official JSONL rows when `active` or `compacted` is true and can fall back to a read-only SQLite view. Hook install and review or investigate launch stay disabled.
 and `cloud sync --progress=json` reports agent-capture row failures as one
 fixed `cloud_sync.agent_capture.warning` event without session/checkpoint ids
 or remote D1 text (earlier releases emitted per-id `session_warning` /

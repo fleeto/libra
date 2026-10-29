@@ -93,6 +93,15 @@ impl std::fmt::Debug for ExportAuthorized {
     }
 }
 
+impl TranscriptSource {
+    /// Bind a filtered Hermes projection to the existing in-memory source.
+    /// The bytes are kept rows only. No path is stored on the source.
+    pub(crate) fn from_hermes_projection(session_id: &str, bytes: Vec<u8>) -> Self {
+        let auth = ExportAuthorized::issue("hermes", session_id, &bytes);
+        Self::Bytes { bytes, auth }
+    }
+}
+
 impl ExportAuthorized {
     /// Mint an authorization tag for freshly exported `bytes`. Crate-scoped:
     /// only the verified export bridge (DR-04b) may issue this export form.

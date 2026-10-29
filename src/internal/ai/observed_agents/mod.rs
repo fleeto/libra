@@ -65,10 +65,13 @@ use builtin::stable_promoted::{
 };
 pub use builtin::{
     ClaudeCodeObservedAgent, CodexRolloutScanLimit, FlushOutcome, GeminiObservedAgent,
-    STABLE_PROMOTED_SPECS, StablePromotedAgent, claude_project_slug, claude_session_dir,
-    claude_session_file_candidate, claude_session_id_is_safe_path_component, find_codex_rollout,
-    find_codex_rollout_for_import, flush_wait, resolve_session_file,
-    rfc3339_boundary_for_unix_seconds, stable_promoted_spec_for, write_truncated_transcript,
+    HermesMessage, HermesObservedAgent, HermesReadLimits, HermesScope, HermesSourceRequest,
+    HermesSourceStatus, HermesTranscript, STABLE_PROMOTED_SPECS, StablePromotedAgent,
+    claude_project_slug, claude_session_dir, claude_session_file_candidate,
+    claude_session_id_is_safe_path_component, find_codex_rollout, find_codex_rollout_for_import,
+    flush_wait, read_hermes_jsonl, read_hermes_jsonl_file, read_hermes_source, read_hermes_sqlite,
+    resolve_session_file, rfc3339_boundary_for_unix_seconds, stable_promoted_spec_for,
+    write_truncated_transcript,
 };
 pub use capability::{
     CapabilityDeclarer, DeclaredAgentCaps, HookResponseWriter, ModelExtractor, PromptExtractor,
@@ -162,7 +165,7 @@ pub fn agent_for(kind: AgentKind) -> &'static dyn ObservedAgent {
     static CLAUDE_CODE: ClaudeCodeObservedAgent = ClaudeCodeObservedAgent::new();
     static GEMINI: GeminiObservedAgent = GeminiObservedAgent::new();
     static GROK: GrokObservedAgent = GrokObservedAgent;
-    static HERMES: HermesObservedAgent = HermesObservedAgent;
+    static HERMES: builtin::hermes::HermesObservedAgent = builtin::hermes::HermesObservedAgent;
 
     match kind {
         AgentKind::ClaudeCode => &CLAUDE_CODE,
@@ -262,34 +265,6 @@ pub(crate) fn live_capture_for(
 /// crate-private lookup.
 pub fn live_capture_matches_hook_installable(kind: AgentKind) -> bool {
     live_capture_for(kind).is_some() == registration_for(kind).hook_installable
-}
-
-struct HermesObservedAgent;
-
-impl ObservedAgent for HermesObservedAgent {
-    fn provider_kind(&self) -> AgentKind {
-        AgentKind::Hermes
-    }
-
-    fn provider_name(&self) -> &'static str {
-        "hermes"
-    }
-
-    fn stability(&self) -> AgentStability {
-        AgentStability::Stable
-    }
-
-    /// Identity is registered. Reading a transcript is refused until the
-    /// Hermes source adapter lands; an empty success would look like capture.
-    fn read_transcript(&self, _session: &AgentSessionCtx) -> anyhow::Result<Option<Vec<u8>>> {
-        Err(anyhow::anyhow!(
-            "hermes capture is not available; the identity is registered but capture, hook install, and launch stay disabled"
-        ))
-    }
-
-    fn protected_dirs(&self) -> &'static [&'static str] {
-        &[".hermes"]
-    }
 }
 
 struct GrokObservedAgent;

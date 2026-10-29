@@ -9,6 +9,7 @@
 
 pub mod claude_code;
 pub mod gemini;
+pub mod hermes;
 pub mod stable_promoted;
 
 pub use claude_code::{
@@ -17,6 +18,11 @@ pub use claude_code::{
     resolve_session_file, rfc3339_boundary_for_unix_seconds, write_truncated_transcript,
 };
 pub use gemini::GeminiObservedAgent;
+pub use hermes::{
+    HermesMessage, HermesObservedAgent, HermesReadLimits, HermesScope, HermesSourceRequest,
+    HermesSourceStatus, HermesTranscript, read_hermes_jsonl, read_hermes_jsonl_file,
+    read_hermes_source, read_hermes_sqlite,
+};
 pub use stable_promoted::{
     CodexRolloutScanLimit, STABLE_PROMOTED_SPECS, StablePromotedAgent, find_codex_rollout,
     find_codex_rollout_for_import, stable_promoted_spec_for,

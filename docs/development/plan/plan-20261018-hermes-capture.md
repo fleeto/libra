@@ -479,7 +479,7 @@ Claude 审查实现 `VERDICT: PASS`。文档挂错常量之后的复核轮也是
 
 - [x] `source .env.test && cargo test --test agent_import_test hermes_source_ -- --test-threads=1`（拟新增过滤名；须列出实际匹配并确认非零）
 
-实现说明：`builtin/hermes.rs` 读取官方 JSONL。`active` 或 `compacted` 为真才保留。非空 `reasoning` 或 `reasoning_content` 是可读 thinking。三列 JSON 保持原始字符串。导出缺 thinking 列或不可用时才走只读 SQLite，不用 `immutable=1`，不迁移 provider 库。来源只接受 `cli`。`hermes_source_` 匹配 3 条并全部通过。Claude R1 `VERDICT: FAIL`（来源名单过宽、SQLite 行预算可能假完整）。R2 `VERDICT: PASS`，正文 SHA-256 `0a20cff33299f625a702d2430681496fd8951a1831fcfe9306c8dc1e7e979e71`。无 P0/P1。发布为独立 patch。
+实现说明：`builtin/hermes.rs` 读取官方 JSONL。`active` 或 `compacted` 为真才保留。非空 `reasoning` 或 `reasoning_content` 是可读 thinking。三列 JSON 保持原始字符串。导出缺 thinking 列或不可用时才走只读 SQLite，不用 `immutable=1`，不迁移 provider 库。来源只接受 `cli`。`hermes_source_` 匹配 3 条并全部通过。Claude R1 `VERDICT: FAIL`（来源名单过宽、SQLite 行预算可能假完整）。R2 `VERDICT: PASS`，正文 SHA-256 `0a20cff33299f625a702d2430681496fd8951a1831fcfe9306c8dc1e7e979e71`。无 P0/P1。发布 `v0.30.94`，commit `11a14284c2a9ff18d4c5de01b3c1090c1c77bb9e`，release.yml run `40938239386` conclusion success。
 
 **Full-suite trigger:** T-1/T-4（共享采集、存储、CLI 或测试契约）；执行四 provider 契约的完整双环境 nextest 门
 

@@ -24,7 +24,7 @@ use std::{
     path::{Path, PathBuf},
     sync::{
         Arc,
-        atomic::{AtomicBool, AtomicUsize, Ordering},
+        atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering},
         mpsc,
     },
     time::{Duration, Instant, SystemTime, UNIX_EPOCH},
@@ -1381,6 +1381,21 @@ impl std::fmt::Display for GlobalConfigSchemaFuture {
     }
 }
 
+/// Report a storage-configuration degrade (the backend fell back to local
+/// storage). Text output keeps the historical `Warning: ...` stderr line
+/// byte-for-byte and does not trip `--exit-code-on-warning`. A structured
+/// (`--json`/`--machine`) invocation must keep stderr a single JSON document,
+/// so the message joins the invocation's warning buffer instead, the same
+/// channel [`crate::utils::error::emit_warning`] uses for the global
+/// future-schema degrade.
+fn emit_storage_degrade_warning(message: String) {
+    if crate::utils::output::structured_output_active() {
+        crate::utils::output::record_warning_message(message);
+    } else {
+        eprintln!("Warning: {message}");
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum StorageConfigResolutionError {
     GlobalSchemaFuture(GlobalConfigSchemaFuture),
@@ -1695,15 +1710,17 @@ impl ClientStorage {
         Self::ready(storage, base_path)
     }
 
-    /// Emit a stderr warning and degrade to `LocalStorage` when a storage env
-    /// var cannot be resolved. Centralised so every fallback prints the same
-    /// message shape and ensures CLI commands keep working when remote storage
-    /// is broken — the `Warning:` prefix mirrors the recovered, non-fatal
-    /// nature of the degrade path so users do not mistake it for a fatal
-    /// command failure (e.g. a `~/.libra/config.db` whose schema is newer than
-    /// this binary supports still surfaces a chain like "Repository database
-    /// schema version ... is newer than this Libra binary supports", but the
-    /// clone/init operation itself still succeeds via `LocalStorage`).
+    /// Report a degrade warning (a `Warning:` stderr line in text output, the
+    /// invocation's warning buffer under `--json`/`--machine`) and degrade to
+    /// `LocalStorage` when a storage env var cannot be resolved. Centralised so
+    /// every fallback reports the same message shape and CLI commands keep
+    /// working when remote storage is broken; in text output the `Warning:`
+    /// prefix marks the recovered, non-fatal nature of the degrade path so
+    /// users do not mistake it for a fatal command failure (e.g. a
+    /// `~/.libra/config.db` whose schema is newer than this binary supports
+    /// still surfaces a chain like "Repository database schema version ... is
+    /// newer than this Libra binary supports", but the clone/init operation
+    /// itself still succeeds via `LocalStorage`).
     fn storage_config_resolution_fallback(
         base_path: &Path,
         name: &str,
@@ -1716,10 +1733,10 @@ impl ClientStorage {
             );
             return Arc::new(LocalStorage::new_with_alternates(base_path.to_path_buf()));
         }
-        eprintln!(
-            "Warning: failed to resolve {}: {}. Falling back to local storage.",
+        emit_storage_degrade_warning(format!(
+            "failed to resolve {}: {}. Falling back to local storage.",
             name, error
-        );
+        ));
         Arc::new(LocalStorage::new_with_alternates(base_path.to_path_buf()))
     }
 
@@ -1895,12 +1912,14 @@ impl ClientStorage {
             }
         };
         if bucket.is_empty() {
-            eprintln!(
-                "Warning: LIBRA_STORAGE_BUCKET cannot be empty. Falling back to local storage."
+            emit_storage_degrade_warning(
+                "LIBRA_STORAGE_BUCKET cannot be empty. Falling back to local storage.".to_string(),
             );
             return Self::local_configured_client(base_path);
         }
-        eprintln!("Warning: Unsupported storage type: local. Falling back to local storage.");
+        emit_storage_degrade_warning(
+            "Unsupported storage type: local. Falling back to local storage.".to_string(),
+        );
         Self::local_configured_client(base_path)
     }
 
@@ -3554,11 +3573,67 @@ pub async fn inspect_configuration_schema_issues() -> Vec<GlobalConfigSchemaFutu
     issues
 }
 
+/// Process-wide time that storage-config reads may spend waiting out a
+/// repository database held by another writer (FIX-LTR-08). Unresolved storage
+/// is never cached, so a per-read allowance would add up across lookups; once
+/// this one is spent, every read gets the single 200 ms attempt it had before.
+const STORAGE_CONFIG_BUSY_BUDGET: Duration = Duration::from_secs(5);
+const STORAGE_CONFIG_BUSY_BACKOFF_STEP: Duration = Duration::from_millis(50);
+const STORAGE_CONFIG_BUSY_BACKOFF_CAP: Duration = Duration::from_millis(500);
+static STORAGE_CONFIG_BUSY_SPENT_MS: AtomicU64 = AtomicU64::new(0);
+
+/// One failed storage-config read. `busy` is set only when the repository
+/// database's own SQLite error says another writer holds it.
+struct ConfigReadFailure {
+    message: String,
+    busy: bool,
+}
+
+impl From<String> for ConfigReadFailure {
+    fn from(message: String) -> Self {
+        Self {
+            message,
+            busy: false,
+        }
+    }
+}
+
+fn is_sqlite_busy_message(message: &str) -> bool {
+    message.contains("database is locked")
+        || message.contains("database schema is locked")
+        || message.contains("database table is locked")
+}
+
+/// `ConfigKv` errors carry the SQLite cause below an anyhow context such as
+/// "failed to query config_kv", so the whole chain is classified.
+fn is_sqlite_busy_error(error: &anyhow::Error) -> bool {
+    error
+        .chain()
+        .any(|cause| is_sqlite_busy_message(&cause.to_string()))
+}
+
+fn storage_config_busy_budget_left() -> Duration {
+    STORAGE_CONFIG_BUSY_BUDGET.saturating_sub(Duration::from_millis(
+        STORAGE_CONFIG_BUSY_SPENT_MS.load(Ordering::Relaxed),
+    ))
+}
+
+fn spend_storage_config_busy_budget(spent: Duration) {
+    // Spending only happens while budget is left, so the counter stays near the
+    // budget; the per-call cap keeps `fetch_add` far from overflow.
+    let millis = u64::try_from(spent.as_millis())
+        .unwrap_or(u64::MAX)
+        .min(60_000);
+    STORAGE_CONFIG_BUSY_SPENT_MS.fetch_add(millis, Ordering::Relaxed);
+}
+
 /// Read a single `vault.env.*` entry from a config database, decrypting if needed.
 ///
 /// Functional scope:
-/// - Connects with a 200 ms busy timeout so background storage init cannot block on
-///   foreground writers.
+/// - Each attempt connects with a 200 ms busy timeout so background storage init
+///   cannot block on foreground writers. A repository database that another
+///   writer holds is retried with backoff while [`STORAGE_CONFIG_BUSY_BUDGET`],
+///   shared by the whole process, lasts; any other failure returns at once.
 /// - When the entry is encrypted, decrypts using the per-scope key (local repo key
 ///   or global key).
 ///
@@ -3573,6 +3648,33 @@ async fn read_config_env_value(
     db_path: &Path,
     role: DatabaseRole,
 ) -> Result<Option<String>, String> {
+    let mut attempt: u32 = 0;
+    loop {
+        let started = Instant::now();
+        let failure = match read_config_env_value_once(env_name, vault_key, db_path, role).await {
+            Ok(value) => return Ok(value),
+            Err(failure) => failure,
+        };
+        let left = storage_config_busy_budget_left();
+        if !failure.busy || left.is_zero() {
+            return Err(failure.message);
+        }
+        attempt = attempt.saturating_add(1);
+        let pause = STORAGE_CONFIG_BUSY_BACKOFF_STEP
+            .saturating_mul(attempt)
+            .min(STORAGE_CONFIG_BUSY_BACKOFF_CAP)
+            .min(left);
+        tokio::time::sleep(pause).await;
+        spend_storage_config_busy_budget(started.elapsed());
+    }
+}
+
+async fn read_config_env_value_once(
+    env_name: &str,
+    vault_key: &str,
+    db_path: &Path,
+    role: DatabaseRole,
+) -> Result<Option<String>, ConfigReadFailure> {
     let (conn, scope) = match role {
         DatabaseRole::GlobalConfig => {
             let conn = schema::open_readonly_connection_for_role(
@@ -3611,26 +3713,31 @@ async fn read_config_env_value(
                 role,
             )
             .await
-            .map_err(|error| {
-                format!(
+            .map_err(|error| ConfigReadFailure {
+                busy: is_sqlite_busy_message(&error.to_string()),
+                message: format!(
                     "failed to connect to local config '{}': {error}",
                     db_path.display()
-                )
+                ),
             })?;
             (conn, "local")
         }
         DatabaseRole::SystemConfig | DatabaseRole::Derived => {
             return Err(format!(
                 "{role} cannot supply storage credentials; use local or global configuration"
-            ));
+            )
+            .into());
         }
     };
 
     let entry = ConfigKv::get_with_conn(&conn, vault_key)
         .await
-        .map_err(|err| format!("failed to read '{env_name}' from {scope} config: {err}"))?;
+        .map_err(|err| ConfigReadFailure {
+            busy: role == DatabaseRole::Repository && is_sqlite_busy_error(&err),
+            message: format!("failed to read '{env_name}' from {scope} config: {err}"),
+        })?;
 
-    match entry {
+    let value = match entry {
         Some(entry) if entry.encrypted => decrypt_value(&entry.value, scope)
             .await
             .map(Some)
@@ -3643,7 +3750,8 @@ async fn read_config_env_value(
             }),
         Some(entry) => Ok(Some(entry.value)),
         None => Ok(None),
-    }
+    };
+    value.map_err(ConfigReadFailure::from)
 }
 
 /// Locate the global config database.
@@ -8091,6 +8199,278 @@ mod tests {
         storage
             .put(&blob.id, &blob.data, blob.get_type())
             .expect("an unreadable global store does not block local objects");
+    }
+
+    /// FIX-LTR-08: holds an exclusive write lock on `repo`'s database from a
+    /// dedicated OS thread and runtime, so no test worker can strand the pooled
+    /// connection, until `release_when` reports true (or 30 s pass); then rolls
+    /// back and writes the `released` marker. Returns once the lock is held.
+    fn hold_repository_write_lock(
+        repo: &std::path::Path,
+        mut release_when: impl FnMut() -> bool + Send + 'static,
+    ) -> std::thread::JoinHandle<()> {
+        use sea_orm::ConnectionTrait;
+
+        let database = repo.join(".libra").join(crate::utils::util::DATABASE);
+        let released = repo.join("busy-probe").join("released");
+        let (held_tx, held_rx) = std::sync::mpsc::channel();
+        let handle = std::thread::spawn(move || {
+            let runtime = tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .expect("locker runtime");
+            runtime.block_on(async move {
+                let locker = db::open_connection_without_schema_management(
+                    database.to_str().expect("utf8 database path"),
+                    Duration::from_secs(5),
+                )
+                .await
+                .expect("open the locker connection");
+                locker
+                    .execute_unprepared("PRAGMA journal_mode = DELETE")
+                    .await
+                    .expect("rollback journal");
+                locker
+                    .execute_unprepared("BEGIN EXCLUSIVE")
+                    .await
+                    .expect("take the write lock");
+                held_tx.send(()).expect("report the held lock");
+                let deadline = Instant::now() + Duration::from_secs(30);
+                while !release_when() && Instant::now() < deadline {
+                    tokio::time::sleep(Duration::from_millis(10)).await;
+                }
+                locker
+                    .execute_unprepared("ROLLBACK")
+                    .await
+                    .expect("release the write lock");
+                fs::write(&released, b"").expect("write the released marker");
+            });
+        });
+        held_rx.recv().expect("the locker holds the write lock");
+        handle
+    }
+
+    /// Runs `storage_config_busy_probe` as its own process in `repo`, so the
+    /// held repository, the process-wide wait budget and the cwd stay out of
+    /// every other test in this binary.
+    fn spawn_busy_probe(repo: &std::path::Path, mode: &str) -> std::process::Output {
+        let home = repo.join("probe-home");
+        fs::create_dir_all(&home).expect("probe home");
+        let mut command = std::process::Command::new(std::env::current_exe().expect("test bin"));
+        for key in STORAGE_ENV_KEYS {
+            command.env_remove(key);
+        }
+        command
+            .current_dir(repo)
+            .env("HOME", &home)
+            .env("LIBRA_CONFIG_GLOBAL_DB", repo.join("missing-global.db"))
+            .env("STORAGE_CONFIG_BUSY_PROBE", mode)
+            .env("STORAGE_CONFIG_BUSY_DIR", repo.join("busy-probe"))
+            .args([
+                "utils::client_storage::tests::storage_config_busy_probe",
+                "--exact",
+                "--ignored",
+                "--nocapture",
+                "--test-threads=1",
+            ]);
+        command.output().expect("spawn the busy probe")
+    }
+
+    fn assert_busy_probe_passed(output: &std::process::Output) {
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        assert!(
+            output.status.success() && stdout.contains("1 passed"),
+            "busy probe failed\nstdout: {stdout}\nstderr: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+
+    /// Child side of the FIX-LTR-08 busy-lock cases; does nothing in a normal run.
+    #[test]
+    #[ignore]
+    fn storage_config_busy_probe() {
+        let Ok(mode) = std::env::var("STORAGE_CONFIG_BUSY_PROBE") else {
+            return;
+        };
+        let dir = PathBuf::from(
+            std::env::var("STORAGE_CONFIG_BUSY_DIR").expect("probe marker directory"),
+        );
+        let _hash = set_hash_kind_for_test(HashKind::Sha1);
+        fs::write(dir.join("started"), b"").expect("write the started marker");
+        let started = Instant::now();
+        match mode.as_str() {
+            "waited_out" => {
+                let storage = must_ok(
+                    ClientStorage::resolve_configured_storage(dir.join("objects")),
+                    "a briefly held repository database is waited out",
+                );
+                let waited = started.elapsed();
+                assert!(
+                    waited >= Duration::from_millis(500),
+                    "the read waited for the writer: {waited:?}"
+                );
+                let blob = Blob::from_content("busy-waited-out");
+                storage
+                    .put(&blob.id, &blob.data, blob.get_type())
+                    .expect("put after the wait");
+                assert_eq!(storage.get(&blob.id).expect("read back"), blob.data);
+            }
+            "past_budget" => {
+                let side = dir.join("side-objects");
+                let error = must_err(
+                    ClientStorage::resolve_configured_storage(side.clone()),
+                    "a database held past the budget is not local",
+                );
+                let waited = started.elapsed();
+                assert_eq!(error.variable(), "LIBRA_STORAGE_TYPE");
+                assert_eq!(
+                    error.to_string(),
+                    "failed to read storage configuration for LIBRA_STORAGE_TYPE"
+                );
+                assert!(!side.exists());
+                assert!(
+                    waited >= super::STORAGE_CONFIG_BUSY_BUDGET,
+                    "the first read spends the budget: {waited:?}"
+                );
+                assert!(
+                    waited < super::STORAGE_CONFIG_BUSY_BUDGET + Duration::from_secs(3),
+                    "the first read stops after the budget: {waited:?}"
+                );
+
+                let again = Instant::now();
+                let spent = crate::utils::util::objects_storage();
+                let waited = again.elapsed();
+                assert_eq!(spent.configuration_variable(), Some("LIBRA_STORAGE_TYPE"));
+                assert!(!crate::utils::util::objects_storage_cache_contains(
+                    &crate::utils::path::objects()
+                ));
+                assert!(
+                    waited < Duration::from_millis(1500),
+                    "a spent budget leaves a single attempt: {waited:?}"
+                );
+
+                fs::write(dir.join("phase1"), b"").expect("write the phase1 marker");
+                let released = dir.join("released");
+                let deadline = Instant::now() + Duration::from_secs(30);
+                while !released.exists() {
+                    assert!(Instant::now() < deadline, "the locker never released");
+                    std::thread::sleep(Duration::from_millis(10));
+                }
+                let restored = crate::utils::util::objects_storage();
+                assert!(restored.configuration_variable().is_none());
+                let blob = Blob::from_content("busy-restored");
+                restored
+                    .put(&blob.id, &blob.data, blob.get_type())
+                    .expect("put after the release");
+            }
+            other => panic!("unknown busy probe mode {other}"),
+        }
+    }
+
+    /// FIX-LTR-08: another process holding the repository database briefly is
+    /// waited out instead of failing closed at the first 200 ms busy timeout.
+    #[tokio::test]
+    #[serial(cwd, env)]
+    async fn storage_config_busy_repository_lock_is_waited_out() {
+        let _env = isolate_storage_env();
+        let repo = tempdir().expect("temp");
+        setup_with_new_libra_in(repo.path()).await;
+        fs::create_dir_all(repo.path().join("busy-probe")).expect("probe marker directory");
+        let started = repo.path().join("busy-probe").join("started");
+        let probe_done = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let done = Arc::clone(&probe_done);
+        let mut seen: Option<Instant> = None;
+        let locker = hold_repository_write_lock(repo.path(), move || {
+            if seen.is_none() && started.exists() {
+                seen = Some(Instant::now());
+            }
+            done.load(Ordering::SeqCst)
+                || seen.is_some_and(|at| at.elapsed() >= Duration::from_millis(600))
+        });
+        let output = spawn_busy_probe(repo.path(), "waited_out");
+        probe_done.store(true, Ordering::SeqCst);
+        locker.join().expect("locker thread");
+        assert_busy_probe_passed(&output);
+        assert!(
+            output.stderr.is_empty(),
+            "waiting prints nothing: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+
+    /// FIX-LTR-08: a lock that outlasts the process-wide budget still fails
+    /// closed as before; once the budget is spent the next read gets a single
+    /// attempt, and the released database resolves again.
+    #[tokio::test]
+    #[serial(cwd, env)]
+    async fn storage_config_busy_repository_lock_past_budget_fails_closed() {
+        let _env = isolate_storage_env();
+        let repo = tempdir().expect("temp");
+        setup_with_new_libra_in(repo.path()).await;
+        fs::create_dir_all(repo.path().join("busy-probe")).expect("probe marker directory");
+        let phase1 = repo.path().join("busy-probe").join("phase1");
+        let probe_done = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let done = Arc::clone(&probe_done);
+        let locker = hold_repository_write_lock(repo.path(), move || {
+            done.load(Ordering::SeqCst) || phase1.exists()
+        });
+        let output = spawn_busy_probe(repo.path(), "past_budget");
+        probe_done.store(true, Ordering::SeqCst);
+        locker.join().expect("locker thread");
+        assert_busy_probe_passed(&output);
+    }
+
+    /// FIX-LTR-08: only SQLite's own "held by another writer" errors count as busy.
+    #[test]
+    fn storage_config_busy_message_classifier() {
+        for busy in [
+            "error returned from database: (code: 5) database is locked",
+            "error returned from database: (code: 6) database table is locked",
+            "database schema is locked: main",
+        ] {
+            assert!(super::is_sqlite_busy_message(busy), "{busy}");
+        }
+        for other in [
+            "unable to open database file",
+            "file is not a database",
+            "no such table: config_kv",
+            "failed to decrypt vault.env.LIBRA_STORAGE_TYPE",
+        ] {
+            assert!(!super::is_sqlite_busy_message(other), "{other}");
+        }
+        let wrapped = anyhow::anyhow!("error returned from database: (code: 5) database is locked")
+            .context("failed to query config_kv");
+        assert_eq!(wrapped.to_string(), "failed to query config_kv");
+        assert!(super::is_sqlite_busy_error(&wrapped));
+        assert!(!super::is_sqlite_busy_error(
+            &anyhow::anyhow!("no such table: config_kv").context("failed to query config_kv")
+        ));
+    }
+
+    /// FIX-LTR-08: a failure that is not a held lock is not retried.
+    #[tokio::test]
+    #[serial(cwd, env)]
+    async fn storage_config_busy_non_busy_failure_returns_at_once() {
+        let _env = isolate_storage_env();
+        let repo = tempdir().expect("temp");
+        setup_with_new_libra_in(repo.path()).await;
+        break_repository_database(repo.path());
+        let _cwd = ChangeDirGuard::new(repo.path());
+        let _global = ScopedEnvVar::set(
+            "LIBRA_CONFIG_GLOBAL_DB",
+            repo.path().join("missing-global.db"),
+        );
+        let started = Instant::now();
+        let error = must_err(
+            ClientStorage::resolve_configured_storage(repo.path().join("local-objects")),
+            "a broken repository database is not local",
+        );
+        let waited = started.elapsed();
+        assert_eq!(error.variable(), "LIBRA_STORAGE_TYPE");
+        assert!(
+            waited < Duration::from_secs(1),
+            "a non-busy failure is not retried: {waited:?}"
+        );
     }
 
     fn spawn_unresolved_probe(repo: &std::path::Path) -> std::process::Output {

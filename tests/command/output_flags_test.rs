@@ -1331,3 +1331,259 @@ fn sync_data_flag_is_accepted_and_writes_round_trip() {
         "committed object should be readable back after a --sync-data write"
     );
 }
+
+/// FIX-LTR-06: the two `LIBRA_STORAGE_TYPE=local` degrade variants and the
+/// message fragment each one records.
+const LOCAL_STORAGE_DEGRADES: [(&[(&str, &str)], &str); 2] = [
+    (
+        &[("LIBRA_STORAGE_TYPE", "local")],
+        "Unsupported storage type: local",
+    ),
+    (
+        &[
+            ("LIBRA_STORAGE_TYPE", "local"),
+            ("LIBRA_STORAGE_BUCKET", ""),
+        ],
+        "LIBRA_STORAGE_BUCKET cannot be empty",
+    ),
+];
+
+fn committed_repo_for_storage_degrade() -> tempfile::TempDir {
+    let temp = tempdir().unwrap();
+    init_repo_with_commit_via_cli(temp.path());
+    temp
+}
+
+fn stderr_single_json(out: &Output) -> serde_json::Value {
+    serde_json::from_slice(&out.stderr).unwrap_or_else(|error| {
+        panic!(
+            "stderr must be one JSON document ({error}): {}",
+            String::from_utf8_lossy(&out.stderr)
+        )
+    })
+}
+
+fn status_warning_messages(out: &Output) -> Vec<(String, String, String)> {
+    let envelope: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap_or_else(|error| {
+        panic!(
+            "stdout must be the status envelope ({error}): {}",
+            String::from_utf8_lossy(&out.stdout)
+        )
+    });
+    envelope["data"]["warnings"]
+        .as_array()
+        .expect("data.warnings must be an array")
+        .iter()
+        .map(|w| {
+            (
+                w["code"].as_str().unwrap_or_default().to_string(),
+                w["source"].as_str().unwrap_or_default().to_string(),
+                w["message"].as_str().unwrap_or_default().to_string(),
+            )
+        })
+        .collect()
+}
+
+fn assert_status_lists_storage_degrade(out: &Output, fragment: &str) {
+    assert_eq!(
+        out.status.code(),
+        Some(9),
+        "{fragment}: stdout: {}\nstderr: {}",
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert!(
+        out.stderr.is_empty(),
+        "{fragment}: status JSON must keep stderr clean: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let warnings = status_warning_messages(out);
+    assert!(
+        warnings
+            .iter()
+            .any(|(code, source, message)| code == "repository_preflight"
+                && source == "config"
+                && message.contains(fragment)),
+        "{fragment}: data.warnings must carry the storage degrade: {warnings:?}"
+    );
+}
+
+/// FIX-LTR-06: under `--json --exit-code-on-warning`, a successful command
+/// whose object storage degrades to local (the global config store exists but
+/// is not a database) reports one `LBR-WARN-001` document on stderr instead of
+/// a raw `Warning:` line.
+#[test]
+fn json_exit_code_on_warning_reports_storage_degrade() {
+    let temp = committed_repo_for_storage_degrade();
+    let global = temp.path().join("broken-global.db");
+    fs::write(&global, b"not a sqlite database").unwrap();
+    let out = run_with_env(
+        &["--json", "--exit-code-on-warning", "cat-file", "-p", "HEAD"],
+        temp.path(),
+        "LIBRA_CONFIG_GLOBAL_DB",
+        global.to_str().unwrap(),
+    );
+    assert_eq!(
+        out.status.code(),
+        Some(9),
+        "stdout: {}\nstderr: {}",
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert_eq!(stderr_single_json(&out)["error_code"], "LBR-WARN-001");
+
+    // Status reads its config defaults before any storage access, so an
+    // unreadable global store still fails it closed with one JSON document.
+    let status = run_with_env(
+        &["--json", "status"],
+        temp.path(),
+        "LIBRA_CONFIG_GLOBAL_DB",
+        global.to_str().unwrap(),
+    );
+    assert_eq!(
+        status.status.code(),
+        Some(128),
+        "{}",
+        String::from_utf8_lossy(&status.stderr)
+    );
+    assert_eq!(stderr_single_json(&status)["error_code"], "LBR-IO-001");
+}
+
+/// FIX-LTR-06: the `LIBRA_STORAGE_TYPE=local` and empty-bucket warnings stay
+/// off stderr under `--json`; with `--exit-code-on-warning` they surface as a
+/// single `LBR-WARN-001` document.
+#[test]
+fn json_local_storage_type_warnings_leave_stderr_json() {
+    let temp = committed_repo_for_storage_degrade();
+    for (extra, fragment) in LOCAL_STORAGE_DEGRADES {
+        let plain = run_with_envs(&["--json", "cat-file", "-p", "HEAD"], temp.path(), extra);
+        assert!(
+            plain.status.success(),
+            "{fragment}: {}",
+            String::from_utf8_lossy(&plain.stderr)
+        );
+        assert!(
+            plain.stderr.is_empty(),
+            "{fragment}: stderr must stay clean: {}",
+            String::from_utf8_lossy(&plain.stderr)
+        );
+        let strict = run_with_envs(
+            &["--json", "--exit-code-on-warning", "cat-file", "-p", "HEAD"],
+            temp.path(),
+            extra,
+        );
+        assert_eq!(strict.status.code(), Some(9), "{fragment}");
+        assert_eq!(
+            stderr_single_json(&strict)["error_code"],
+            "LBR-WARN-001",
+            "{fragment}"
+        );
+    }
+}
+
+/// FIX-LTR-06: text output keeps the historical `Warning:` line and does not
+/// trip `--exit-code-on-warning` for a storage degrade.
+#[test]
+fn text_exit_code_on_warning_keeps_storage_degrade_exit_zero() {
+    let temp = committed_repo_for_storage_degrade();
+    let global = temp.path().join("broken-global.db");
+    fs::write(&global, b"not a sqlite database").unwrap();
+    let out = run_with_env(
+        &["--exit-code-on-warning", "cat-file", "-p", "HEAD"],
+        temp.path(),
+        "LIBRA_CONFIG_GLOBAL_DB",
+        global.to_str().unwrap(),
+    );
+    assert_eq!(
+        out.status.code(),
+        Some(0),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert!(
+        String::from_utf8_lossy(&out.stderr)
+            .contains("Warning: failed to resolve LIBRA_STORAGE_TYPE:"),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+}
+
+/// FIX-LTR-06: structured status reports the storage degrade in
+/// `data.warnings[]` (exit 9, clean stderr) for a repository with commits.
+#[test]
+fn json_status_exit_code_on_warning_lists_storage_degrade() {
+    let temp = committed_repo_for_storage_degrade();
+    for (extra, fragment) in LOCAL_STORAGE_DEGRADES {
+        let out = run_with_envs(
+            &["--json", "--exit-code-on-warning", "status"],
+            temp.path(),
+            extra,
+        );
+        assert_status_lists_storage_degrade(&out, fragment);
+    }
+}
+
+/// FIX-LTR-06: the same holds for a repository without commits, where the
+/// scan itself never opens object storage.
+#[test]
+fn json_status_unborn_exit_code_on_warning_lists_storage_degrade() {
+    let temp = tempdir().unwrap();
+    init_repo_via_cli(temp.path());
+    for (extra, fragment) in LOCAL_STORAGE_DEGRADES {
+        let out = run_with_envs(
+            &["--json", "--exit-code-on-warning", "status"],
+            temp.path(),
+            extra,
+        );
+        assert_status_lists_storage_degrade(&out, fragment);
+    }
+}
+
+/// FIX-LTR-06: `status --cached` on a fresh dirty cache also reports the
+/// storage degrade, not merely a stale-cache fallback.
+#[test]
+fn json_status_cached_exit_code_on_warning_lists_storage_degrade() {
+    let temp = committed_repo_for_storage_degrade();
+    assert_cli_success(&run(&["status", "--scan"], temp.path()), "status --scan");
+    for (extra, fragment) in LOCAL_STORAGE_DEGRADES {
+        let out = run_with_envs(
+            &["--json", "--exit-code-on-warning", "status", "--cached"],
+            temp.path(),
+            extra,
+        );
+        assert_status_lists_storage_degrade(&out, fragment);
+        let envelope: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
+        assert_eq!(
+            envelope["data"]["freshness"], "cached",
+            "{fragment}: {envelope}"
+        );
+        let warnings = status_warning_messages(&out);
+        assert!(
+            !warnings
+                .iter()
+                .any(|(code, _, _)| code == "dirty_cache_stale_fallback"),
+            "{fragment}: {warnings:?}"
+        );
+    }
+}
+
+/// FIX-LTR-06: text status on a repository without commits stays exactly as
+/// before (empty stderr): the structured-only pre-resolution must not run.
+#[test]
+fn text_status_unborn_stderr_unchanged() {
+    let temp = tempdir().unwrap();
+    init_repo_via_cli(temp.path());
+    for (extra, fragment) in LOCAL_STORAGE_DEGRADES {
+        let out = run_with_envs(&["status"], temp.path(), extra);
+        assert!(
+            out.status.success(),
+            "{fragment}: {}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        assert!(
+            out.stderr.is_empty(),
+            "{fragment}: {}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+    }
+}

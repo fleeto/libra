@@ -72,14 +72,20 @@ flag, threshold, or cache size keeps its existing default. The same check applie
 `pull` and `clone`. A readable unset type, including a missing global
 configuration file, stays on the historical local path. An unread repository database, or a resolver that does not return, fails
 `fetch`, `pull`, and `clone` with `LBR-IO-001` before a pack is installed and
-reports only `LIBRA_STORAGE_TYPE`. An unreadable global config store, after the
+reports only `LIBRA_STORAGE_TYPE`. A repository database that is merely held by another
+writer is first retried, for about 5 seconds in total per process. An unreadable global config store, after the
 repository has no type, stays on the historical local path so existing objects
 can still be read. A future global schema while reading the type stays on that
 same local path. A type other than `s3` or `r2`, including `gcs`, also fails with
 `LBR-IO-001`. `ClientStorage::init` uses the same rule and does not build a
 writable local backend for an unread type. `LIBRA_STORAGE_TYPE=local` still
 warns and stays local for `ClientStorage::init`. Fetch, pull, and clone
-already reject that exact value.
+already reject that exact value. In text output the unreadable-global-store degrade, the `LIBRA_STORAGE_TYPE=local`
+warning and its empty-bucket warning print a `Warning:` line on stderr and do not trip
+`--exit-code-on-warning`. Under `--json`/`--machine` they never reach stderr:
+the message joins the invocation's warning buffer and `--exit-code-on-warning`
+exits 9 (`LBR-WARN-001`); `status` lists the `local` and empty-bucket warnings
+as `repository_preflight` entries.
 
 ### Prune config defaults (`fetch.prune`, `remote.<name>.prune`)
 

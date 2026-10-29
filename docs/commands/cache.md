@@ -30,10 +30,16 @@ DB), so the reported values match what the backend uses:
   repository database, or a resolver that does not return, fails the object
   command. `ClientStorage::init` does not build a writable local backend for
   that case, names only the setting, and does not keep the client in the
-  process object cache. An unreadable global config store, after the repository
+  process object cache. A repository database that is merely held by another
+  writer is first retried, for about 5 seconds in total per process. An unreadable global config store, after the repository
   has no type, stays on the historical local backend so existing objects can
   still be read. The next call reads the setting again after the repository
-  database is repaired. A future global schema, an exact `local` value, and a
+  database is repaired. In text output the unreadable-global-store degrade, the `LIBRA_STORAGE_TYPE=local`
+  warning and its empty-bucket warning print a `Warning:` line on stderr and do not trip
+  `--exit-code-on-warning`. Under `--json`/`--machine` they never reach stderr:
+  the message joins the invocation's warning buffer and `--exit-code-on-warning`
+  exits 9 (`LBR-WARN-001`); `status` lists the `local` and empty-bucket warnings
+  as `repository_preflight` entries. A future global schema, an exact `local` value, and a
   readable unset type stay local and can still be cached. Confirmed unusable settings
   stay out of that cache. The cache tunables only take effect when tiered; a
   local-only repository caches nothing. An actual connection additionally needs

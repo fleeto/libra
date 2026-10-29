@@ -26,13 +26,297 @@
 
 **恢复顺序（候选，待各自审查）：** `FIX-LTR-06（ER-03 → A → ER-05 → C → v0.30.92 → D）→ F2 关闭审查（依 DEP-QUAL-F2-GATE）→ 在 v0.30.92 发布树执行计划最终资格窗口 → 本地 Claude 来源资格审查 → 终态登记提交及其 D`。每一步的 Cargo 窗口都要先取得 root 交接。
 
+### 2026-10-28/29 FIX-LTR-06 A 执行记录、用户决定与新增卡（当前要求）
+
+本段由用户指定的 Claude 执行 Agent 写入，覆盖上方「恢复顺序」中 FIX-LTR-06 之后的现状；历史 FAIL/STOP 与原文保留。本段相对证据路径以仓外 `/media/eli/data/libra-source-qual-20261027/` 为根。
+
+**执行经过：**
+- 2026-10-28：
+  - root 于 07:49:04Z 授予窗口。RED0、RED1 PASS；GREEN 的 fmt、strict clippy、VER-1..VER-4 PASS。
+  - GREEN 的 nextest 全量于 11:00:26Z 依用户决定 DEC-QUAL-BLAZE-FULL 停止。停止前 `command::replace::tests::delete_mutation_path_invalidates_the_cache` 已 3/3 失败，全量覆盖 6262/10832（`fix-ltr06/run-green*`）。
+  - 随后 blaze 全量 TIMEOUT：ra-jit 守护进程未就绪（`fix-ltr06/run-blaze/`）。
+  - 14:48:41Z 归还 root 窗口（`coordination/libra-return-20261028T144841Z.json`），root 此后未重新授予。之后的 Cargo/测试依用户指令执行，每次先在协调目录发通知，结束发收据。
+- replace 用例根因已确认：夹具为 0 字节库，加上 FIX-LTR-05 的 fail-closed（`fix-ltr06/diag-replace/`）。处置为 FIX-LTR-07。
+- 2026-10-29，FIX-LTR-06+07 合并树 nextest 全量（DEC-QUAL-RESTART-180）：10832 例，2 例 3/3 失败、13 例 FLAKY；15 例中 12 例的失败文字含存储配置拒绝，3 例机制未证，其余归入同一机制为推断（见 FIX-LTR-08 卡）（`fix-ltr06/run-r2-nextest/`、`fix-ltr06/r2-nextest-failures.json`）。依用户决定 DEC-QUAL-R2-SKIP-BLAZE（作答 01:35:43Z；`run-r2-blaze.STOPPED-BY-USER.txt` 中「约 01:2xZ」为执行器当时的估计，以 user-decisions.json 为准）停止 blaze 并归还窗口（`coordination/libra-complete-20261029T013714Z.json`）。处置为 FIX-LTR-08。
+- 2026-10-29 R3（FIX-LTR-06+07+08 树，main `21f8e4c`）：nextest 全量 PASS，10836/10836，0 FLAKY、0 重试（`fix-ltr06/run-r3-nextest/`）。blaze 以 rustc 1.99.0 编译时，FIX-LTR-08 的 `AtomicU64::fetch_update` 报弃用警告；执行器在 blaze 跑任何测试前停止（`fix-ltr06/run-r3-blaze.STOPPED.txt`），按 FIX-LTR-08 green3 改为 `fetch_add`，并在新树上重跑全量（R4）。R3 blaze 期间 root 的 Mega2 构建并行运行（`postrun-r3-blaze.json` 记录其 stable cargo/rustc 进程；cwd `/media/eli/data/mega2-blob-index-red-20261029` 由执行器观察并写入 `coordination/libra-test-notice-20261029T054814Z.json`），Libra 未触及其目录。
+- 2026-10-29 R4（green3 后的三卡树，main `ba38e30`，18 个被测文件逐文件存档于 `fix-ltr08/tested-tree-snapshot-r4/`）：nextest 全量 PASS，10836/10836，0 FLAKY、0 重试（`fix-ltr06/run-r4-nextest/`）；blaze 的 ra-jit 守护进程再次停在「loading」、未跑任何测试，依用户决定 DEC-QUAL-R4-CARGO-TEST 于 08:08:47Z 停止（`run-r4-blaze.STOPPED-BY-USER.txt`；执行器 08:08:53Z 退出），改跑普通进程内 `cargo test --all`：在窗口结束时 TIMEOUT（`command_test` 中途），已完成的 69 个二进制中 lib 15 例失败、`command_test` 已运行部分 3 例 fsck 失败，均在 nextest 下通过；依 DEC-QUAL-R4-BASELINE 在发布代码上对照，对照显示：最终树两次进程内 lib 运行合计 21 例失败，其中 17 例在发布代码上同样失败，另 4 例只在最终树失败（判为同族是推断）；依 DEC-QUAL-INPROCESS-DEFER（含接受这 4 例）登记为 DEFER-QUAL-INPROCESS-ISOLATION；其中 4 例带存储配置拒绝文字，依 DEC-QUAL-FIX08-NEXTEST-RULE 不作为 FIX-LTR-08 的依据；A 的全量门以 nextest PASS 为准（`fix-ltr06/r4-gate.json`）。
+- 2026-10-29 R5（main `1e5310c` 加三卡，被测文件逐文件存档于 `fix-ltr08/tested-tree-snapshot-r5/`）：fmt、strict clippy PASS；nextest 全量 PASS，10836/10836，0 FLAKY、0 重试（`fix-ltr06/run-r5/`）；门文件 `fix-ltr06/r5-gate.json`。
+- main 于 2026-10-29 前进到 `21f8e4c`（PR #651，只增 `issues/650.md` 与 `plan-status.md` 两行，与本计划工作区 14 个文件不重叠）。快进后逐文件哈希核对，然后继续（`sync-21f8e4c/`）。随后又前进到 `ba38e30`（PR #653，只改 issue 650 文档与 `plan-status.md` 中 issue 650 的两行）；本计划 `plan-status.md` 行以补丁重放，其余文件逐字节核对（`sync-ba38e30/`）。R4 之后 main 再前进到 `1e5310c`（PR #654，CLP-01：`src/utils/util.rs` 与四个 AI capture/coverage 文件的 `nonminimal_bool` 化简及一个测试）；与本计划工作区只在 `plan-status.md` 重叠（不同行，以补丁重放，`sync-1e5310c/`），另改了 `issues/650.md` 与一个测试文件；因改动了产品代码，因此在合并树上重跑 R5（fmt、strict clippy、nextest 全量），R5 PASS 后才提交和推送。
+
+**用户决定（原文与作答时间存 `user-decisions.json`）：**
+- DEC-QUAL-BLAZE-FULL（2026-10-28T10:59:49Z）：「请关闭之前的测试, 采用 blaze 测试重新开始, 并且在交接中说明采用这个更快速的方案」。
+- DEC-QUAL-RESTART-180（14:59:25Z）：「請重新啓動 blaze + nextest 的測試， 堆棧設置爲 32M ，超時時間設置爲 180 分鐘，全量測試通過後，提交和推送。然後完成交接。」
+- DEC-QUAL-FIX-FIRST：先修复，再跑全量。
+- DEC-QUAL-FIX07-RELEASE（作答 23:51:29Z）：FIX-LTR-07 随 FIX-LTR-06 的 v0.30.92 发布。
+- DEC-QUAL-R2-SKIP-BLAZE 与 DEC-QUAL-FIX08-RELEASE（均作答于 2026-10-29T01:35:43Z）：跳过 R2 的 blaze 并归还窗口；FIX-LTR-08 随 v0.30.92 发布。
+- DEC-QUAL-R4-CARGO-TEST（作答 2026-10-29T08:08:20Z）：R4 的 blaze 再次停在 ra-jit「loading」、未跑任何测试，停止 blaze，改在同一 180 分钟窗口剩余时间内跑普通进程内 `cargo test --all`（CLAUDE.md 的权威验收门），通过才提交和推送；记录 blaze 在本机两次未能启动。
+- DEC-QUAL-R4-BASELINE（作答 2026-10-29T09:10:42Z）：先在本机以发布代码（main `ba38e30`，不含三卡）同样进程内运行作对照；相同失败即为既有进程内隔离缺陷，登记 FIX/DEFER 并在提交前回报用户。
+- DEC-QUAL-INPROCESS-DEFER（作答 2026-10-29T10:37:52Z）：登记 DEFER-QUAL-INPROCESS-ISOLATION，应用 ER-05 计划修订并复审 FIX-LTR-06 ER-05/DOCS，PASS 后三提交、推送、观察 CI，再提交网站改动。
+- DEC-QUAL-FIX08-NEXTEST-RULE（作答 2026-10-29T10:56:05Z）：进程内运行观测不到 FIX-LTR-08（进程级预算共用），其失败处置与关闭只以 nextest 与 C/D 为依据；进程内带该文字的病例归 DEFER-QUAL-INPROCESS-ISOLATION；审查意见修正后复审再提交推送；不改代码。这是对 FIX-LTR-08 卡已登记规则的变更，已在提问中向用户说明；提问时写的是 3 例，复核后为 4 例（另有 `client_storage_reads_pack_sha1`，只在第二次进程内运行出现，发布代码上同文字），归入同一规则，交接时告知用户。
+- 越过 G-07 只限 FIX-LTR-07 与 FIX-LTR-08 两卡。两卡各有自己的卡、审查与提交，共用 FIX-LTR-06 的一次全量 C/D。v0.30.92 成员为 FIX-LTR-06、FIX-LTR-07、FIX-LTR-08。
+
+**blaze 使用说明（依 DEC-QUAL-BLAZE-FULL 写明）：**
+- 本计划 A 阶段的全量依用户决定改用更快的 `cargo blaze test --all --no-fail-fast`（ra-jit，`RUST_MIN_STACK=33554432`、`RUSTUP_TOOLCHAIN=1.99.0`）。
+- 自 DEC-QUAL-RESTART-180 起，顺序为先 `cargo nextest run --all --no-fail-fast --retries 2`、后 blaze（R4 起 blaze 部分依 DEC-QUAL-R4-CARGO-TEST 改为进程内 `cargo test --all`，其结果依 DEC-QUAL-INPROCESS-DEFER 延期；最终门为 R5 的 nextest 全量），合计不超过 180 分钟，两者栈均为 32 MiB。
+- 与 nextest 的差异：
+  - 进程内线程并行，无重试；
+  - 工具链 1.99.0，nextest 为 1.98.1；
+  - 运行时 skip 不可见（doctest 两者都不跑：A 的全量没有 doctest 证据，由 CI 的 `cargo test --doc` 与最终资格的 doc 门覆盖）；
+  - `.config/nextest.toml` 的测试组互斥不适用。
+- blaze 结果按 `work/blaze_summary.py` 判定，盘点下限为 170 个二进制、10500 例。
+- 远端 D 仍为 nextest。C 窗口与最终资格窗口是否也用 blaze，待交接时请用户确认；确认前按计划原文用 nextest。
+
+**FIX-LTR-06 卡的更正（C 冻结时以本段为准，原卡文字保留；其中写集与 Description 两处措辞已就地改正，原文见 `review-R6/` 与 `card-correction.md`）：**
+1. VER-3 用例更名为 `json_local_storage_type_warnings_leave_stderr_json`。探测证明 `init` 不输出 local 警告，改用有提交仓库的 `cat-file -p HEAD`（`fix-ltr06/card-correction.md` 第一项）。写集与 Description 的两处措辞按 R6 改正。
+2. A 不做 release 构建，default/keyring release 构建、安装与资源后检只在 C 执行。`--retries 2` 下的 FLAKY 按 (target, case) 逐条登记，新 flake 不以重试通过视为通过。RED 的失败原因逐条核对（第三项）。
+3. GREEN 停止与改用 blaze 见上（第四项）。原 10800 秒 A 窗口已随 blaze TIMEOUT 与窗口归还结束，不续用。
+4. A 的全量在 FIX-LTR-06 + FIX-LTR-07 + FIX-LTR-08 合并树上重跑（第五项）。
+5. Release boundary 仍为 `independent`，但 v0.30.92 同时携带 FIX-LTR-07 与 FIX-LTR-08 的提交；C/D coverage 为 `self`，并覆盖这两卡。新增依赖边：`FIX-LTR-07 -> FIX-LTR-06`、`FIX-LTR-08 -> FIX-LTR-06`。
+6. 提交顺序：FIX-LTR-06 → FIX-LTR-07 → FIX-LTR-08（含本计划与 plan-status 的治理文字）→ v0.30.92 版本面。重叠文件按 FIX-LTR-08 卡的 Commit split 用逐字节存档拆分（`commit-20261029/commit.py`）。网站：主仓推送且 CI 通过后，在 `../libra-backend` 的 `cf` 分支提交 FIX-LTR-06 的两页，内容与 `fix-ltr06/impl/site.diff` 逐字节一致，先跑站点检查再推送，并记录提交哈希。
+
+**FIX-LTR-05 系列注记：** FIX-LTR-05 父卡与 05P、05Q、05R、05S、05T、05U、05V、05W、05X、05Y、05Z 各卡 Performance budget 中「不增加重试 / 不新增重试 / 保持 200ms 配置库锁上限 / 不延长锁」各条（共 12 处），就仓库库被占用时的存储配置读取一项，由 FIX-LTR-08 前滚取代。其余内容不变，原文保留。
+
+### Task FIX-LTR-07: replace -d 用例使用已迁移的仓库数据库
+
+**Task type:** `implementation`（仅测试）
+
+**Lifecycle / Acceptance:** `in-progress` / 空（ER-03 R2 PASS，session `dbbe2623-2a1b-4629-a57f-c3eb62ca2ae6`；VER-1..VER-4 PASS，`fix-ltr07/run-ver/`；ER-05 PASS，session `ce62cf45-699c-4aac-bed8-1102ebd1f6bd`；待 FIX-LTR-06 的 C/D）
+
+**Description:** 单一行为轴：`command::replace::tests::delete_mutation_path_invalidates_the_cache` 的夹具。`repo_fixture()` 只写一个 0 字节的 `libra.db` 标记；该用例先用 `ClientStorage::init(objects).put` 写入对象，触发后台对象索引登记，在空库上执行全部 schema 迁移（strace 下约 150 次带日志的事务、约 2.5 秒）。紧接着 `util::objects_storage()` 读取 `LIBRA_STORAGE_TYPE` 时仓库库仍被占用，200 ms 忙等待超时；按 FIX-LTR-05 的 fail-closed 规则返回被拒绝的客户端，`resolve_any` 退回提交解析并失败。CI 上该用例通过（推断为迁移在 200 ms 内完成）；本机当前稳定失败，0.30.87 时本机通过（推断由旧的告警降级掩盖；0.30.88–0.30.90 的 C 在另一台机器执行，本机无这几个版本的证据）。修复为该用例使用 `crate::utils::test::setup_with_new_libra_in` 建立真实、已迁移的仓库，并把串行车道从 `serial(cwd)` 改为 `serial(cwd, env)`（该 helper 经 `mark_test_process_non_interactive` 写进程环境、init 读环境与全局配置，进程内运行器需要 env 车道），同步 `tests/SRC_SERIAL_REGISTRY.tsv` 与 `tests/SRC_SERIAL_CENSUS.tsv` 的对应行；断言与被测路径（真实 `replace -d`、原始 oid 经仓库存储解析）不变。
+
+**Out of scope:** 不改产品代码；不改 FIX-LTR-05 的 fail-closed 语义或 200 ms 上限（FIX-LTR-05 卡已具名保持；注：其后的 FIX-LTR-08 保持每次尝试 200 ms，另加进程级有界重试）；`repo_fixture()` 其余三个用例（`replace.rs:608`、`:634`、`:684`）不写对象、不受影响，不改；后台索引写入与前台存储解析的自身争用在慢盘上的产品风险登记为 RISK-QUAL-INDEX-SELF-CONTENTION（P2，尚未排期；关联计划中既有的 RISK-QUAL-STASH-QUIET（SQLite code 5 与存储配置降级），继承其「资格计划完成前登记 FIX/DEFER 并取得 baseline」的义务；fail-closed 下其后果由告警升级为命令失败）。
+
+**Current evidence:**
+
+| 事实 | 证据 |
+|---|---|
+| 夹具为 0 字节库 | `src/command/replace.rs:591-597` `repo_fixture` |
+| 失败机制 | 临时诊断：`objects_storage().configuration_variable()` 为 `Some("LIBRA_STORAGE_TYPE")`，`get` 报 `failed to read storage configuration for LIBRA_STORAGE_TYPE`，耗时 206 ms（`fix-ltr06/diag-replace/H-diag.out`） |
+| 等待迁移完成即通过 | 临时在 `objects_storage()` 前等待 5 秒：`configuration_variable()=None`，用例 PASS（`I-wait5s.out`） |
+| 后台迁移事务 | `strace.txt`：空库上 journal 的 O_CREAT 与 unlink 各 150 次，持续约 2.5 秒 |
+| 非 FIX-LTR-06、非环境、非 cwd | `diag-replace` A–G：GREEN 环境、隔离 HOME、无 env、生产文件恢复为 d0a5c28、非仓库 cwd 均失败 |
+| 历史 | 本机 0.30.87 通过 0.220–0.230 秒（`inputs/local-tmp-originals/` 的 fix-ltr01-A/C、fix-ltr02-A1/A2/C1、fix-ltr04-A1/C1-draft）；CI 在 db331cd、29eaa97 通过 0.17–0.49 秒（`ci/job-122123779875.log`、`ci/job-122333596291.log`） |
+
+**Acceptance criteria:**
+
+- [ ] AC-1: 该用例在本机与 CI 都稳定通过，不依赖等待或重试（修复后后台写入只剩单行索引登记；「约十几毫秒」是由 strace 均值推算的每事务耗时（约 2.5 秒 ÷ 150 ≈ 17 ms），不是在已迁移库上实测的单行登记；本机空载连续 20 次单例运行作补充证据，满载证据由 FIX-LTR-06 合并树的全量与 CI D 提供）。
+- [ ] AC-2: 断言、被测函数与路径不变；只替换夹具建立方式。
+- [ ] AC-3: replace 模块其余用例不受影响。
+
+**Verification:**
+
+- [ ] VER-1: `source .env.test && source .env.live-test && cargo nextest run --lib -E 'test(command::replace::)' --no-fail-fast --retries 0`（完整模块；修复后全部通过。修复前 RED 不在本卡 VER 合约内，证据为 `fix-ltr06/diag-replace/` A–D、H 与 FIX-LTR-06 GREEN 全量中该用例 3/3 失败（树 8cfcff1d…））。
+- [ ] VER-2: `source .env.test && source .env.live-test && cargo test --lib command::replace::`（进程内并发运行，覆盖 env/cwd 车道）。
+- [ ] VER-3: `source .env.test && source .env.live-test && cargo test --test compat_serial_registry`。
+- [ ] VER-4: `cargo +nightly fmt --all --check`、`cargo clippy --all-targets --all-features -- -D warnings`。
+
+**Full-suite trigger:** none（注：合入 FIX-LTR-08 后，本卡 AC-1「不依赖等待或重试」不能在合并树上单独观察；本卡 VER 在只含 FIX-LTR-06+07 的树上执行。仅测试；完整默认套件由 FIX-LTR-06 的 A/C 覆盖，本卡改动包含在其被测树中；`tests/SRC_SERIAL_*.tsv` 属测试基础设施，相关 compat 守卫列入 VER-3）。
+
+**Dependencies:** `DEP-QUAL-SOURCE`（d0a5c28）。新增依赖边 `FIX-LTR-07 -> FIX-LTR-06`。执行环境依据：Libra 已于 2026-10-28T14:48:41Z 归还 root 窗口（`coordination/libra-return-20261028T144841Z.json`），此后未取得新的 root 授权；本卡 VER（2026-10-29T00:06:43Z–00:12:25Z）与 FIX-LTR-06 合并树全量的依据是用户直接指令 DEC-QUAL-RESTART-180 与 DEC-QUAL-FIX-FIRST，以及 14:59:25Z 发给 root 的测试通知（00:13:56Z 的刷新通知在 VER 之后发出）。VER 合约 `deviations.CARGO_BUILD_JOBS` 中「the window is exclusive under root's grant」是沿用 DOC-LTR-03 合约的过时文字，冻结合约不改，以本段为准。
+
+**Deliverables:** N/A。
+
+**Implementation write set:** `src/command/replace.rs`（仅 `delete_mutation_path_invalidates_the_cache` 的串行属性、夹具改为真实仓库、cwd/scope guard 移到写入对象之前，及注释）、`tests/SRC_SERIAL_REGISTRY.tsv`（该用例一行：`lane:cwd+env`）、`tests/SRC_SERIAL_CENSUS.tsv`（该用例一行：`touches=env+cwd`）、本计划、`docs/development/plan/plan-status.md` 本计划行。
+
+**Release write set:** N/A（依用户决定 DEC-QUAL-FIX07-RELEASE，本卡改动随 FIX-LTR-06 的 v0.30.92 发布，不单独 bump）。
+
+**Docs and compatibility impact:** N/A（测试代码，无外部可见行为）。
+
+**Rollback mode:** `immutable-release`（随 v0.30.92 发布后只能前滚）
+
+**Estimated scope:** `S`
+
+**Version increment:** `N/A`
+
+**Release boundary:** 依用户具名决定 `DEC-QUAL-FIX07-RELEASE`（user-decisions.json；用户作答 2026-10-28T23:51:29Z，记录于 23:52:42Z），仅本卡越过 G-07：作为单独的卡与单独的提交，并入 FIX-LTR-06 的 v0.30.92 发布，共用一次全量 C/D。
+
+**C/D coverage from:** `FIX-LTR-06`
+
+**Granularity:** `type=implementation; axis=replace -d 用例夹具的数据库状态; recovery=revert; complete=yes; self-contained=yes; AC=3/8; VER=4/8; landing=1; prod-files=0; scope=S; deps=DEP-QUAL-SOURCE; writeset=no-overlap; release=G-07 user exception (rides FIX-LTR-06 v0.30.92); split-from=FIX-LTR-06 A GREEN; exception=N/A; governance=DEC-QUAL-FIX07-RELEASE`
+
+### Task FIX-LTR-08: 仓库库被其他写者占用时，存储配置读取在进程级有界预算内重试再判定
+
+**Task type:** `implementation`
+
+**Lifecycle / Acceptance:** `in-progress` / 空（ER-03 R3 PASS，session `6254861f-e64f-4956-98f8-74cd94f98cdb`；VER-2 RED PASS，`fix-ltr08/run-red/`；green2 后 A1 PASS，`fix-ltr08/run-green2/`，A2 PASS，`fix-ltr08/run-ver4b/`；ER-05 PASS，session `7d2e6c72-2dbd-4180-9446-fc99b33e32df`；C/D 由 FIX-LTR-06 覆盖）
+
+**Description:** 单一行为轴：读取对象存储配置时，若仓库数据库（`.libra/libra.db`）只是被写者占用，不再在第一次 200 ms 忙等待超时后就按「仓库库不可读」fail-closed，而是退避后重试。占用判定看内层 SQLite 错误文字是否为 `database is locked`、`database schema is locked` 或 `database table is locked`；写者可以是其它进程，也可以是本进程的后台线程。
+
+所有这类等待共用一个**进程级**预算（5 秒）。预算用尽后，同进程后续读取都只尝试一次，与现在相同。预算内一直忙、预算用尽后忙、任何非忙错误，结果都与现在逐字相同：按 FIX-LTR-05 fail-closed，只报设置名。
+
+实现落在 `src/utils/client_storage.rs` 的 `read_config_env_value`（`:3589`），拆为单次尝试函数加重试外壳：
+- 单次尝试只在 Repository 分支标记「忙」，两处判定点：
+  - 连接返回的 `io::Error` 文字（`:3627-3638`）。该连接函数内部完成 schema 检查，并在需要时就地迁移；其 DbErr 已被拼进这个 `io::Error`。
+  - `ConfigKv` 查询的错误（`:3648-3650`）。此查询由全局库与仓库库两个分支共用，只在 `role == Repository` 时标记。该错误是 `anyhow::Error`，外层 context 为 `failed to query config_kv`（`src/internal/config.rs:175`），其 Display 不含内层 SQLite 文字，所以按整条错误链判定（`is_sqlite_busy_error`）。
+  - 只看格式化前的内层错误文字，不看拼入路径后的外层字符串。匹配做法同 `src/internal/reflog.rs:31-34`。
+- 全局库分支、SystemConfig/Derived 分支以及解密失败，一律不标记忙。
+- 重试外壳：判忙且进程预算有余时，按 50 ms × 尝试次数退避（上限 500 ms，且不超过预算余量），然后整段重试（连接、内部 schema 检查/迁移、查询）。本次判忙尝试的耗时加上休眠，计入进程级已用预算（原子量）。预算已用尽时直接返回原错误，不计入。
+- 不提供生产开关。测试经子进程隔离预算（见 VER-1），不需要复位函数。
+
+现实影响：自 v0.30.88 起，任何在同一仓库并发写库的 libra 进程或线程，都可能让读对象的命令以 `LBR-IO-001`/`LBR-REPO-002` 失败。写者包括另一终端写对象、后台对象索引登记、命令自身的索引修复预检、IDE 插件。0.30.87 时这条路径只打印警告并退回本地存储。
+
+本卡承接 RISK-QUAL-STASH-QUIET 的仓库库部分（计划 FIX-LTR-04 卡「五项P2处置」第（1）项：资格完成前为 SQLite BUSY 导致的存储配置问题登记 FIX/DEFER 并取得 baseline，锁持有者当时未证）与 RISK-QUAL-FIX05-VER-GAP（风险登记表该行：存储配置锁故障复现则另立 FIX 卡）。
+- 关闭条件：本卡 C/D 完成，且 FIX-LTR-06 合并树的 nextest 全量中不再出现带该文字的失败（依用户决定 DEC-QUAL-FIX08-NEXTEST-RULE，2026-10-29T10:56:05Z：进程内运行中进程级预算由同进程上千用例共用，很快耗尽，之后的行为与发布代码相同，所以进程内运行不是本卡的观测点）。
+- RISK-QUAL-STASH-QUIET 当初观察到的「退回本地」警告可能来自全局库分支，该部分转入 RISK-QUAL-GLOBAL-BUSY-DEGRADE，不由本卡关闭。
+
+本卡显式前滚取代 FIX-LTR-05 系列卡 Performance budget 中「不增加重试 / 不新增重试 / 保持 200ms 配置库锁上限 / 不延长锁」的条款（FIX-LTR-05 父卡与 05P、05Q、05R、05S、05T、05U、05V、05W、05X、05Y、05Z 各卡的 Performance budget，共 12 处）。
+- 范围仅限上述 Repository 读取：每次尝试的 200 ms 不变，新增的是进程级重试。
+- 依据是用户的发布决定 DEC-QUAL-FIX08-RELEASE，加上本卡自身的 ER-03 准入。
+- 历史卡文字不改，由计划 2026-10-28/29 段「FIX-LTR-05 系列注记」一处集中注记指向本卡。FIX-LTR-07 卡 Out of scope「不改…200 ms 上限」已加注。
+
+**Out of scope:**
+- **全局配置库忙**（`DatabaseRole::GlobalConfig` 分支，`:3596-3618`）：后果仍是既有的退回本地加警告（输出通道由 FIX-LTR-06 管），0.30.87 起即如此。RISK-QUAL-GLOBAL-BUSY-DEGRADE，P2，open，尚未排期。
+- **需要 schema 升级的仓库库**：连接时就地迁移。
+  - 部分子步骤保留忙文字，会按本卡重试（`db.rs:744`、`:752`、`:759`、`:764`、`:817`、`:843`、`inspect_supported_schema`）。
+  - `run_builtin_migrations` 的外层 context 会丢掉忙文字（`db.rs:839-841`、`migration.rs:2816/2834`）。
+  - 读锁升写锁时 SQLite 不走 busy handler，直接返回 BUSY（`db.rs:395-401`），但该错误仍带「database is locked」文字，只要外层保留文字就会被重试。
+  - 因此这条路径「部分重试、部分立即 fail-closed」，立即 fail-closed 的只有 `run_builtin_migrations` 丢掉文字的那一处。RISK-QUAL-STORAGE-MIGRATE-BUSY，P2，open，尚未排期。
+  - 重试会重跑迁移/top-up，这是既有行为，本卡不改变。
+- **不经 `read_config_env_value` 的读取**（`inspect_global_config_schema_future_at_path`、`repo_id_prefix_for_configured_remote` 等）：不改，状态同现在。
+- **对象索引后台写入的批量化、事务合并或改 WAL**：RISK-QUAL-INDEX-SELF-CONTENTION 保留 open；补注其后果现受本卡预算约束，争用本身未处理。
+- **测试中进程内写对象后不等后台索引排空就启动子进程的写法**：不逐个改测试。
+- **200 ms 以外的其它锁超时**：不改。
+- **FIX-LTR-05 的 fail-closed 判定本身**：不改。
+
+**Current evidence:**
+
+| 事实 | 证据 |
+|---|---|
+| 全量失败 | FIX-LTR-06 A 合并树 nextest（`fix-ltr06/run-r2-nextest/full.junit.xml`，10832 例：2 FAIL、13 FLAKY）。逐例见 `fix-ltr06/r2-nextest-failures.json`，按每次失败的完整文字（含 stdout 中的 JSON 信封）匹配后重生成。15 例中 12 例至少一次失败含 `failed to read (object) storage configuration for LIBRA_STORAGE_TYPE`。另 3 例机制未证：merge restart 未打印 stderr；am --continue 只有「am --continue failed」；diff_rename_limit 截断在 `failed to store object for 'exac`。锁持有者只在 gc 例查明，其余 11 例归入同一机制是推断 |
+| 历史 | 同机 0.30.87（FIX-LTR-05 之前）的 6 份 JUnit 原件中，这些用例全部 0 重试通过（`inputs/local-tmp-originals/`） |
+| 无负载也复现 | 修复前对照（`fix-ltr08/baseline/summary.txt`，已构建二进制单例顺序各 20 次）：gc 4/20 失败；fetch mirror 11/20 失败；worktree linked fetch 0/20 失败，单独运行未复现。15 次失败全部含存储配置拒绝文字（`baseline/*.out`）。另见 `diag/D1-*` |
+| 锁持有者 | `diag/S-6.strace` 与 `S-6.attribution.txt`（`attribute_locks.py` 按 trace 顺序把 fd 对到 `.libra/libra.db`）。gc 子进程存活的约 0.8 秒内：<br>· 测试进程完成 36 次写提交（PENDING/RESERVED/EXCLUSIVE 字节上的 F_WRLCK）。这些提交来自 10500 次进程内 `save_object` 排入的后台索引登记，每个对象一个连接、一次 `synchronous=FULL` 写提交（`client_storage.rs:4240-4290`）。<br>· gc 进程自身的索引修复预检也完成 1 次写提交。<br>· gc 进程在 PENDING 字节取共享锁 51 次，其中 15 次 EAGAIN。<br>数据库为回滚日志模式。strace 放慢后该次未超 200 ms，用例通过。写者是密集的短提交串，重试有效靠的是多次探测，而不是等过一次占用 |
+| 200 ms 与无重试 | `client_storage.rs:3579-3580` 注释「200 ms busy timeout so background storage init cannot block on foreground writers」；FIX-LTR-05 系列条款见上；当时的降级只是警告 |
+| 未决结果不缓存 | `util.rs:1392-1394`；FIX-LTR-05X/05Y/05Z 卡 Performance budget：每次 `objects_storage` 都重新解析。按单次读取设预算会累加，所以改用进程级预算 |
+| 写者一侧已有重试 | 后台索引 `INDEX_UPDATE_MAX_ATTEMPTS = 12`（`client_storage.rs:1161`、`:4199-4217`，合计约 12×0.2 s + 0.1 s×(1+…+11) ≈ 9 秒）；reflog `SQLITE_BUSY_MAX_RETRIES = 15`（`reflog.rs:28`）；普通前台连接默认忙超时 30 秒（`db.rs:149`） |
+| 预算依据 | 5 秒：长于已观测最长单次占用（FIX-LTR-07 空库迁移约 2.5 秒，`fix-ltr06/diag-replace/strace.txt`）的两倍，短于写者侧约 9 秒的耐心，远短于前台默认 30 秒。S-6 中读者共享锁探测失败比例约 15/51。进程级预算使一次命令因忙而多等的总时长不超过约 5 秒，另加之后各次读取的单次 200 ms 尝试 |
+| hook 路径 | 生产中的 capture 写入使用 `init_local_existing`（`checkpoint.rs:4900`、`recovery.rs:1167`，不读配置）；`ClientStorage::init` 的其它命中在测试中。间接路径未穷举，登记 RISK-QUAL-HOOK-STORAGE-WAIT（P2，open）：托管 hook 若经间接路径初始化存储，最多多等约 5 秒 |
+| 二进制 | 诊断与对照用测试二进制为 nextest 构建（rustc 1.98.1）；`target/debug/libra` 已被中止的 blaze 以 rustc 1.99.0 重链（`diag/binaries.sha256`、`baseline/context.txt`）；源码相同。命令、cwd 与环境说明见 `diag/commands.txt` 与 `baseline/run_baseline.sh` |
+
+**Acceptance criteria:**
+
+- [ ] AC-1: 仓库库（当前 schema）被另一进程以写锁占用、且在进程级预算内释放时，存储配置解析成功（无 `LIBRA_STORAGE_TYPE` 拒绝），随后对象写入与读回成功。
+- [ ] AC-2: 占用持续到预算用尽时仍 fail-closed：错误文字、只报设置名、不建可写本地后端、不进对象缓存，均与修复前相同。该次耗时不少于预算。预算用尽后，同进程下一次解析只尝试一次，耗时回到单次尝试量级，仍 fail-closed。占用解除后，同进程再次解析恢复正常。
+- [ ] AC-3: 非忙错误不重试，也不消耗预算，立即按现有规则返回。非忙错误包括：目录代替库文件、非 SQLite 内容、解密失败、schema 版本高于本二进制。现有 `storage_config_*` 用例不改不弱化。
+- [ ] AC-4: 全局配置库分支、环境变量直取路径与 GlobalSchemaFuture 的行为不变。`env_resolution_may_read_global_config` 在 cloud schema-future 检查中读取 D1 等键（`cli.rs:2653-2664`、`client_storage.rs:1516`），也经 Repository 分支，同样按本卡规则重试。
+- [ ] AC-5: 文本与结构化输出都不新增任何 stderr 文字，等待期间不打印。
+
+**Verification:**
+
+- [ ] VER-1: `source .env.test && source .env.live-test && cargo nextest run --lib -E 'test(utils::client_storage::)' --no-fail-fast --retries 0`；完整模块零失败。
+  - 新增两个父用例（`#[tokio::test]`、`#[serial(cwd, env)]`）：`storage_config_busy_repository_lock_is_waited_out`（AC-1）与 `storage_config_busy_repository_lock_past_budget_fails_closed`（AC-2）。
+  - 父用例只在建库时持 cwd。持锁者是父进程里的专用 OS 线程及其独立 runtime：按路径打开仓库库，显式 `PRAGMA journal_mode = DELETE` 后 `BEGIN EXCLUSIVE`。
+  - 解析在子进程里进行：子进程是本测试二进制的一个 `#[ignore]` 探针 `storage_config_busy_probe`，按 `STORAGE_CONFIG_BUSY_PROBE` 选择模式，未设置时直接返回。启动参数同 `spawn_unresolved_probe`：cwd 为该仓库，HOME 隔离，`LIBRA_CONFIG_GLOBAL_DB` 指向不存在的文件，清除 `LIBRA_STORAGE_*`。
+  - 这样 cwd、环境与进程级预算都随子进程隔离，同模块其它用例看不到被锁的仓库，也不会消耗该预算。
+  - 父子以标记文件协调，每个等待都有 30 秒上限。
+  - waited_out：子进程写 `started` 后开始计时并解析；持锁线程见到 `started` 后过 600 ms 才 `ROLLBACK`。子进程断言解析成功、耗时 ≥ 500 ms，并 put/get 一个 blob。
+  - past_budget：
+    - 子进程写 `started` 后，用新 base path 调 `resolve_configured_storage`。断言拒绝、文字、未建目录，耗时 ≥ 生产常量 `STORAGE_CONFIG_BUSY_BUDGET` 且 < 预算 + 3 秒。
+    - 再调 `objects_storage()`。断言拒绝、不进缓存，耗时 < 1.5 秒。
+    - 写 `phase1`。持锁线程见到后 `ROLLBACK` 并写 `released`。
+    - 子进程等到 `released` 后再调 `objects_storage()`。断言恢复，put 成功。
+  - 父用例先调 `isolate_storage_env()` 再建库；持锁线程确认 `BEGIN EXCLUSIVE` 成功后才启动子进程；子进程输出经管道捕获（`Command::output`）；子进程退出后父进程立即通知持锁线程释放并等其结束。
+  - 父用例断言子进程退出 0 且输出含 `1 passed`；waited_out 另断言子进程 stderr 为空（AC-5）；失败时打印子进程 stdout/stderr。
+  - 另加两例（修复后才有意义，不属 RED）：`storage_config_busy_message_classifier` 只测忙判定函数；`storage_config_busy_non_busy_failure_returns_at_once` 在进程内把仓库库换成目录，断言拒绝在 1 秒内返回（AC-3，非忙错误不重试）。
+- [ ] VER-2: RED 用的源是「新用例 + 一个尚无调用者的 `STORAGE_CONFIG_BUSY_BUDGET` 常量声明，不含重试逻辑」。在其上两个父用例实际失败：前者子进程约 200 ms 后被拒；后者首次解析耗时远低于预算。修复后通过；RED 原件留存仓外。
+- [ ] VER-3: `source .env.test && source .env.live-test && cargo test --lib utils::client_storage::`（进程内并发运行）与 `cargo test --test compat_serial_registry`。新用例使用带键的 `#[serial(cwd, env)]`；守卫 `src_process_global_tests_hold_matching_lanes` 只检查 census 表内已有的行，`src_serial_registry_matches_src_classifier` 只要求登记表中的函数能被分类器找到，同文件现有带键的 `storage_config_*` 用例在两份 tsv 中均无行，所以两份 tsv 不改，由该守卫确认。
+- [ ] VER-4: A1 末尾以 `cargo test --test command_test --no-run` 与 `cargo build` 构建修复后的二进制并记录两者 SHA256（同 `baseline/context.txt`）。修复后用新二进制，把 `maintenance_test::gc_ten_thousand_objects_within_budget` 与 `fetch_test::test_fetch_into_mirror_updates_and_prunes_all_refs` 各单例顺序运行 20 次，0 失败。对照为修复前的 gc 4/20、fetch 11/20。worktree linked fetch 修复前 0/20，不作对照。另跑 `cargo +nightly fmt --all --check` 与 `cargo clippy --all-targets --all-features -- -D warnings`。
+
+**A 执行记录（GREEN 后的修正）：** 第一次 GREEN 只按 `err.to_string()` 判定查询错误。A1 通过（`run-green/`），但 A2 第 12 次 gc 仍失败（`ver4-first-green/`，执行器在 gc 1/20 失败后停止 A2，`run-ver4.STOPPED.txt`）。临时诊断（`diag2/`，日志代码已按保存的原件逐字节恢复）在 60 次 gc 中记录 3 次放弃，全部是 `busy=false`、预算余 3.7–5 秒、消息 `failed to query config_kv`；另有 17 次经重试恢复。据此加入 `green2`：查询错误按 anyhow 错误链判忙，并在 `storage_config_busy_message_classifier` 中断言被 context 包裹的忙错误判为忙、`no such table` 不判为忙。A1、A2 在 green2 后完整重跑：A1 PASS（520 秒；client_storage 模块 97/97，nextest 与进程内各一次；serial 守卫 26/26；strict clippy 唯一提示为用户具名排除项），A2 PASS（2017 秒；gc 0/20、fetch mirror 0/20 失败，对照修复前 4/20、11/20），原件 `run-green2/`、`run-ver4b/`、`ver4/`。ER-03 R1–R3 关于该处「带忙文字」的前提对这一点不成立，已在此更正。
+
+**green3（R3 全量期间发现）：** R3 的 nextest 全量在 FIX-LTR-06+07+08 树上 PASS（10836/10836，0 FLAKY、0 重试，3852 秒，`fix-ltr06/run-r3-nextest/`）。随后 blaze 以 rustc 1.99.0 编译时报 `AtomicU64::fetch_update` 已弃用（改名 `try_update`；1.98.1 尚无 `try_update`）。CI 的 clippy 用未固定的 `stable`，Issue #650 显示贡献者使用 1.95 至 1.100，因此在 1.99 及以上，`-D warnings` 会失败。执行器在 blaze 跑任何测试之前停止了它（`fix-ltr06/run-r3-blaze.STOPPED.txt`），把记账改为带单次上限的 `fetch_add`（`stages/green3.diff`，行为不变），并在新树上重跑 A1 与完整全量（nextest 加 blaze）。
+
+**ER-05 P2 处置（`review-fix08-ER05/output.json`）：** 第 1、2、3、7 项的文字修改已在 green3 后、下一次全量之前完成；第 4、5、6 项如下登记，不改测试：
+1. `docs/development/commands/fetch.md` 与 `docs/development/commands/cache.md` 已补同义句（随 green3 进入下一次全量的被测树）。
+2. Commit split 的核对基准改为 `21f8e4c`；DEP-QUAL-SOURCE 措辞改为「不改本计划工作区中的任何已改文件（plan-status.md 改动在不同行，同步无冲突）」。
+3. 行号：本卡与计划注记中的 `:288`…`:917`、`:1305`、`:1555` 指插卡前的计划；插卡后应以条款文字定位。FIX-LTR-05 系列的注记实际为一处集中注记，不是逐处旁注；卡片按此改述（全量后同步计划）。
+4. 查询分支判忙只有构造出的单元测试与 diag2 的真实观测（3 次放弃全部在该分支），未加真实 DbErr 单测：登记为残余 RISK-QUAL-FIX08-QUERY-BUSY-TEST（P2，open）；闭合观测点为 FIX-LTR-06 的 nextest 全量与 C/D。A2 0/20 不能区分 green1 与 green2（green1 残余率约 4/80），这一限制如实记录。
+5. waited_out 的「≥ 500 ms」只有约 100 ms 余量，只会误失败、不会误通过；若在全量中 FLAKY，按新 flake 处理，不改测试。
+6. 进程内运行（`cargo test`、blaze）时进程级预算由同进程用例共用，`storage_config_busy_non_busy_failure_returns_at_once` 只在 nextest 下有区分力；依 DEC-QUAL-FIX08-NEXTEST-RULE，进程内运行不是本卡的观测点。
+7. 文档「at most 5 seconds / 最多 5 秒」的实际上限是预算加最后一次尝试（至少 200 ms）：已改为「about 5 seconds / 约 5 秒」（随 green3 进入下一次全量的被测树）。源码注释「cannot block on foreground writers」指每次尝试的 200 ms，保留不改（不在被测树之后改源码）。diag2 的诊断构建与 60 次 gc 不在执行器合约内，02:46:41Z 通知未逐项列出；代码已按哈希恢复，对被测树无影响，如实记录。
+
+**After-fix failure disposition（依 DEC-QUAL-FIX08-NEXTEST-RULE 修订：只以 VER-4、FIX-LTR-06 A 的 nextest 全量与 C/D 为依据；进程内 `cargo test`/blaze 中出现的该文字失败归 DEFER-QUAL-INPROCESS-ISOLATION，R4 与 cur-2 两次进程内运行各有 3 例带该文字、合计 4 例（`rejected_reachability_production_client_rejects_fifo_without_blocking`、`unchanged_replay_verifies_ref_and_all_catalog_objects`、`client_storage_reads_pack_sha256`、`client_storage_reads_pack_sha1`），发布代码上 4 例同文字；依据比用户原文「nextest and C/D only」多列 VER-4，只会更严）：** VER-4 或 FIX-LTR-06 A 的 nextest 全量中若仍出现失败：
+- 带存储配置拒绝文字：本卡未完成，回到本卡诊断（例如预算或判忙漏点），不进入 C。
+- 其它文字：按 ER-13 T-6 处理，另立 FIX 或 DEFER，FIX-LTR-06 的 A 等待其处置。
+- 3 个未证用例（merge restart、am --continue、diff_rename_limit）同样以 FIX-LTR-06 A 的重跑为观测点；`--retries 2` 下出现 FLAKY 也算复现。「merge restart 的 exit 128 = 存储拒绝」只是假设。
+
+**Full-suite trigger:** T-1（`src/utils/client_storage.rs` 是跨命令共享存储核心）。
+- 完整默认套件由 FIX-LTR-06 A 的合并树 nextest 全量覆盖（blaze 两次未能启动，R4 改跑的进程内 `cargo test --all` 依 DEC-QUAL-INPROCESS-DEFER 归 DEFER-QUAL-INPROCESS-ISOLATION），本卡改动包含在被测树中。中间提交的树不单独测试。
+- 合入本卡后，FIX-LTR-07 AC-1 的「不依赖重试」不能再在该树上单独观察，FIX-LTR-07 卡加注。
+
+**Dependencies:**
+- `DEP-QUAL-SOURCE`：main 于 2026-10-29 由 d0a5c28 前进到 `21f8e4c`（PR #651，只增 `docs/development/plan/issues/650.md` 与 `plan-status.md` 两行，不碰本卡与 FIX-LTR-06/07 的任何文件）；本卡 RED/GREEN 以 21f8e4c 为基（同步原件 `sync-21f8e4c/`）；2026-10-29T05:5xZ main 再前进到 `ba38e30`（PR #653，只改 `issues/650.md` 与 `plan-status.md` 中 issue 650 的两行），本计划 `plan-status.md` 行的改动以补丁方式重放（`sync-ba38e30/plan-status.patch`），其余 17 个文件逐字节核对；green3 之后的 A1 与 R4 全量以 ba38e30 为基。此前的诊断、对照与 R2 全量在 d0a5c28 上，两者产品源相同。
+- `DEP-QUAL-CARGO-WINDOW`：root 窗口已于 2026-10-28T14:48:41Z 归还、未重新授予。执行依据是用户指令 DEC-QUAL-FIX-FIRST 与 DEC-QUAL-FIX08-RELEASE，加上每次 Cargo/测试前发给 root 的通知（协调目录）。
+- 新增依赖边 `FIX-LTR-08 -> FIX-LTR-06`：FIX-LTR-06 的 A 全量依赖本卡。
+
+**Deliverables:** N/A（代码卡）。
+
+**Implementation write set:**
+- 代码：`src/utils/client_storage.rs`。改动包括：`read_config_env_value` 拆分及其上方注释；预算常量、退避常量与进程级原子量；忙判定函数；两个父用例、一个 `#[ignore]` 探针、一个专用持锁线程 helper 与子进程启动 helper。
+- 文档：
+  - `docs/commands/fetch.md`、`docs/commands/zh-CN/fetch.md`、`docs/commands/cache.md`、`docs/commands/zh-CN/cache.md` 各在「仓库库不可读即失败」一句后补一句：仅被其他写者占用时，进程内共计先重试约 5 秒；`docs/development/commands/fetch.md` 与 `cache.md` 的同类句同样补充。
+  - `COMPATIBILITY.md:223` fetch 行同步补同义短语。
+  - 网站两页（`../libra-backend/.../fetch.en.md`、`cache.en.md`）不含「仓库库不可读即失败」句（网站滞后于主文档），本卡不改网站：N/A。
+- 治理：本计划、`docs/development/plan/plan-status.md` 本计划行。
+- 两份 SRC_SERIAL tsv 不改（见 VER-3）。
+
+**Commit split:** 与 FIX-LTR-06 文件重叠：`client_storage.rs` 中是不同函数；`fetch.md`、`cache.md`、`COMPATIBILITY.md` 在同一段内，按 3 行上下文生成的 hunk 会合并。拆分办法：
+- 两份逐字节存档：
+  - 实施前，已把工作区全部改动文件（FIX-LTR-06 + FIX-LTR-07 状态，即上一次 nextest 被测树，diff 哈希 dc65d2a7…）存于 `fix-ltr08/pre-impl-snapshot/tree/`，哈希见 `files.sha256`。
+  - FIX-LTR-06 A 重跑认领时，同样把含 FIX-LTR-08 的被测树全部改动文件存于 `fix-ltr08/tested-tree-snapshot-r4/`、最终门 R5 存于 `fix-ltr08/tested-tree-snapshot-r5/`，记录逐文件 SHA256；`commit.py` 绑定 R5 快照。`libra diff` 把 `client_storage.rs` 显示为 `<LargeFile>`，该标记不绑定文件内容，所以树身份另以这份逐文件哈希为准。
+- 整文件写回前，先 `libra fetch origin`，再核对 HEAD 与 `origin/main` 等于最终门运行（R5）claim 的 head，否则 STOP；上游前进后（无论改的是产品代码、测试还是文档），都在同步后的树上重跑全量门并更新快照与门文件，`commit.py` 只接受与最终门 claim head 相同的 HEAD（R5 即因 PR #654 而重跑）。
+- 提交顺序：
+  - FIX-LTR-06：只暂存其写集文件，内容取自实施前存档。`client_storage.rs`、`status.rs` 另与 GREEN 副本 `fix-ltr06/diag-replace/*.green` 核对。
+  - FIX-LTR-07：暂存 `replace.rs` 与两份 tsv 的实施前存档版本。
+  - FIX-LTR-08：写回被测树存档，暂存本卡写集。
+  - 治理：本计划与 plan-status 中三张卡的登记共用同一段文字、无法按卡拆出中间文本，作为一个已核哈希的状态随 FIX-LTR-08 提交。
+  - v0.30.92 版本面：FIX-LTR-06 的 release write set。
+- 每个提交中的文件与对应存档逐字节一致；全部提交后，工作区与被测树存档一致（版本面与治理除外）。
+- 网站仓 `cf` 分支：只有 FIX-LTR-06 的句子，本卡 N/A。
+
+**Release write set:** N/A（依用户决定 DEC-QUAL-FIX08-RELEASE，随 FIX-LTR-06 的 v0.30.92 发布，不单独 bump）。
+
+**Docs and compatibility impact:** 外部可见：仓库库被其他写者占用时，命令改为在进程内共计先重试约 5 秒，而不是立即失败。同卡更新上列中英文 fetch/cache 文档与 `COMPATIBILITY.md` fetch 行（网站 N/A，见写集）；无新错误码，`docs/error-codes.md` N/A。
+
+**Rollback mode:** `immutable-release`
+
+**Migration and rollback:** 无 schema 迁移；已发布版本只能前滚。
+
+**Security and privacy:** 不新增输出；错误文字与只报设置名的规则不变。
+
+**Performance budget:**
+- 无争用时零额外开销：第一次尝试即返回。
+- 争用时：
+  - 一个进程内所有存储配置读取共计最多多等约 5 秒，之后每次读取恢复为现在的单次 200 ms 尝试。
+  - `cached_objects_storage` 在 `ClientStorage::init` 期间持有进程级 std Mutex（`util.rs:1384-1391`）。预算用尽前，其它线程取存储也可能被挡住至多约 5 秒（现为 200 ms）。
+  - 同步的 `objects_storage()` 常在 async 代码的 runtime worker 上执行（`client_storage.rs:3429` `rx.recv()`）。阻塞时长由约 200 ms 变为最多约 5 秒，期间该 worker 上的池连接归还可能被搁住（`db.rs:236-246`），同进程其它数据库用户随之等待。
+  - 以上两条登记为本卡已知后果。
+- 长驻进程（如 `libra service`）用尽预算后不补充，此后行为与现在相同。
+- 聚焦验证分两段：
+  - A1（编译、fmt、strict clippy、RED/GREEN、VER-1、VER-3）：3600 秒。
+  - A2（VER-4 重复运行，已构建二进制，不编译）：2700 秒。修复前 fetch 通过一次约 83–94 秒（最长 93.69 秒，含 60 秒排空等待），修复后若不再等待排空会更短；以修复前上限加每个 libra 进程可能多等的 5 秒估算，约 2160 秒，在 2700 秒内。
+  - 超预算记 STOP，不续窗。
+
+**Estimated scope:** `S`（1 个生产文件）
+
+**Version increment:** `N/A`
+
+**Release boundary:** 依用户具名决定 `DEC-QUAL-FIX08-RELEASE`（user-decisions.json；用户作答 2026-10-29T01:35:43Z），仅本卡越过 G-07。G-07 在模板中不可豁免，比照 FIX-LTR-07 先例以用户具名决定处置。
+- 单独的卡与单独的提交，并入 FIX-LTR-06 的 v0.30.92 发布，共用一次全量 C/D。
+- v0.30.92 成员：FIX-LTR-06、FIX-LTR-07、FIX-LTR-08。FIX-LTR-06 卡的 Release boundary 与 C/D coverage 同步注明。
+- C 或 D 失败时，按成员定位，前滚修复，不拆分已提交的成员。
+
+**C/D coverage from:** `FIX-LTR-06`
+
+**Granularity:** `type=implementation; axis=仓库库被占用时存储配置读取的进程级有界重试; recovery=immutable-release前滚; complete=yes; self-contained=yes; AC=5/8; VER=4/8; landing=1; prod-files=1; scope=S; deps=DEP-QUAL-SOURCE,DEP-QUAL-CARGO-WINDOW(returned; user-directed notices); writeset=overlap(FIX-LTR-06: same files, separate commits via hash-checked snapshots); release=G-07 user exception (rides FIX-LTR-06 v0.30.92); split-from=FIX-LTR-06 A full (DEC-QUAL-RESTART-180 run); exception=N/A; governance=DEC-QUAL-FIX08-RELEASE`
+
 ### Task FIX-LTR-06: 结构化输出下存储配置降级警告不写原始 stderr
 
 **Task type:** `implementation`
 
-**Lifecycle / Acceptance:** `blocked` / 空（ER-03 已由本地 Claude R5/R6 PASS；root 已授予窗口；待 DOC-LTR-03 落地及本卡 A 执行器准入）
+**Lifecycle / Acceptance:** `in-progress` / 空（2026-10-29 现状：A 的 RED0/RED1 PASS、GREEN 聚焦门 PASS；全量先因 replace 用例、再因存储配置 fail-closed 一族失败，分别由 FIX-LTR-07、FIX-LTR-08 处置；A 全量在三卡合并树上重跑，见上方 2026-10-28/29 段。原文：`blocked` / 空（ER-03 已由本地 Claude R5/R6 PASS；root 已授予窗口；待 DOC-LTR-03 落地及本卡 A 执行器准入））
 
-**Description:** 单一行为轴：`--json`/`--machine` 等结构化输出下，对象存储配置降级警告不得以纯文本写入 stderr，改为写入进程的待渲染警告缓冲（`record_warning_message`，与 `emit_warning` 及 GlobalSchemaFuture 降级的现行通道相同）；文本模式下的输出与是否触发 warning 追踪逐字不变。现实影响：任何在全局配置库不可读时以结构化输出失败的命令，其 stderr 当前不是单一 JSON。注意该缓冲只由 `status`（preflight）和 `agent import` 渲染，通用成功信封与错误信封都不渲染它，因此其余命令在结构化输出下看不到这条文字（RISK-QUAL-ENVELOPE-WARNINGS，与 GlobalSchemaFuture 现状相同）；同时它会计入 warning 追踪，结构化输出加 `--exit-code-on-warning` 时原本退出 0 的成功命令会改为退出 9（`LBR-WARN-001`）；文本模式维持历史行为，不计入追踪、仍退出 0（RISK-QUAL-TEXT-WARN-EXIT，P2）。`status` 的 JSON 文档承诺「退出 9 必对应 `data.warnings[]` 中至少一条」（`docs/commands/status.md:317-331`），而 status 在收集前快照缓冲（`src/command/status.rs:582-586`），对象存储却在收集中懒打开（`status/scan.rs:101` → `status.rs:1029` → `util::objects_storage()` → `ClientStorage::init` → `open_init_storage`）；因此本卡同时让 status **仅在结构化输出时**、于进入各模式分发（`src/command/status.rs:575` 之前）先解析一次对象存储并丢弃返回值（成功的客户端进入既有进程缓存供扫描复用；被拒绝的配置不进缓存，也不改变 status 的退出码与 error code，之后照旧由扫描中的对象读取报告），使降级警告在快照前记录，并以既有的 `repository_preflight`/`config` 条目出现在 `data.warnings[]`。文本模式仍走原来的懒打开路径，输出逐字不变。结构化输出下，这也使无提交仓库与缓存命中的 `--cached`/`--check-dirty` 开始报告该降级，并每次多做一次存储配置解析（不访问网络；s3/r2 配置且 `libra.repoid` 缺失、为空或为 `unknown-repo` 的边缘仓库可能写入该文件，见 `src/utils/client_storage.rs:3709-3721`）。全局配置库不可读时 status 仍在更早的配置默认值读取处 fail-closed（`status/input.rs:706-709`，128/`LBR-IO-001`），不受本卡影响。
+**Description:** 单一行为轴：`--json`/`--machine` 等结构化输出下，对象存储配置降级警告不得以纯文本写入 stderr，改为写入进程的待渲染警告缓冲（`record_warning_message`，与 `emit_warning` 及 GlobalSchemaFuture 降级的现行通道相同）；文本模式下的输出与是否触发 warning 追踪逐字不变。现实影响：任何在全局配置库不可读时以结构化输出失败的命令，其 stderr 当前不是单一 JSON。注意该缓冲只由 `status`（preflight）和 `agent import` 渲染，通用成功信封与错误信封都不渲染它，因此其余命令在结构化输出下看不到这条文字（RISK-QUAL-ENVELOPE-WARNINGS，与 GlobalSchemaFuture 现状相同）；同时它会计入 warning 追踪，结构化输出加 `--exit-code-on-warning` 时原本退出 0 的成功命令会改为退出 9（`LBR-WARN-001`）；文本模式维持历史行为，不计入追踪、仍退出 0（RISK-QUAL-TEXT-WARN-EXIT，P2）。`status` 的 JSON 文档承诺「退出 9 必对应 `data.warnings[]` 中至少一条」（`docs/commands/status.md:317-331`），而 status 在收集前快照缓冲（`src/command/status.rs:582-586`），对象存储却在收集中懒打开（`status/scan.rs:101` → `status.rs:1029` → `util::objects_storage()` → `ClientStorage::init` → `open_init_storage`）；因此本卡同时让 status **仅在结构化输出时**、于进入各模式分发（`src/command/status.rs:575` 之前）先解析一次对象存储并丢弃返回值（成功的客户端进入既有进程缓存供扫描复用；被拒绝的配置不进缓存，也不改变 status 的退出码与 error code，之后照旧由扫描中的对象读取报告），使降级警告在快照前记录，并以既有的 `repository_preflight`/`config` 条目出现在 `data.warnings[]`。文本模式仍走原来的懒打开路径，输出逐字不变。结构化输出下，这也使无提交仓库与缓存命中的 `--cached`/`--check-dirty` 开始报告该降级，并每次多做一次存储配置解析（不访问网络；s3/r2 配置且 `libra.repoid` 缺失、为空或为 `unknown-repo` 的边缘仓库可能在本仓 `libra.db` 写入 `libra.repoid` 配置键，见 `src/utils/client_storage.rs:3709-3721`）。全局配置库不可读时 status 仍在更早的配置默认值读取处 fail-closed（`status/input.rs:706-709`，128/`LBR-IO-001`），不受本卡影响。
 
 **Out of scope:** 历史 TRY1 根因（永久 unknown，不由本卡证明）；F2 关闭（由 `DEP-QUAL-F2-GATE` 决定的关闭审查承担）；`src/utils/util.rs:3880`、`:3889` 两处 ignore 文件告警的原始 `eprintln!`（RISK-QUAL-IGNORE-WARN，P2，尚未排期）；`src/utils/client_storage.rs:1220-1223` `refuse_rejected_presence` 的纯文本加 `exit(1)` 与 `src/cli.rs:3397` init 转换重试警告（RISK-QUAL-RAW-STDERR-OTHER，P2，尚未排期）；通用成功信封与错误信封不渲染待渲染警告（RISK-QUAL-ENVELOPE-WARNINGS，P2，尚未排期）；不改变降级本身（全局库不可读时对象存储仍为历史本地后端）。
 
@@ -72,7 +356,7 @@
 
 **Deliverables:** N/A（代码卡）。
 
-**Implementation write set:** `src/utils/client_storage.rs`、`src/command/status.rs`（仅结构化输出时在模式分发前预解析对象存储，丢弃返回值）、`tests/command/reset_test.rs`、`tests/command/output_flags_test.rs`、`docs/commands/fetch.md`、`docs/commands/zh-CN/fetch.md`、`docs/commands/cache.md`、`docs/commands/zh-CN/cache.md`、`COMPATIBILITY.md`（仅 fetch 行）、本计划、`docs/development/plan/plan-status.md` 本计划行；网站 `../libra-backend/apps/tanstack-app/content/docs/commands/fetch.en.md`、`cache.en.md`（Git 仓、`cf` 分支；现有他人未跟踪文件 `memory.en.md` 保留不动）。`docs/commands/status.md`、`docs/commands/zh-CN/status.md`（`repository_preflight` 行、「命令运行前」措辞与「配置解析本身从不告警」一句（英文约 314–315 行、中文约 160 行）改为包含结构化输出下 status 扫描前的对象存储降级；英文约 317–322 行（中文约 162 行）「与 status 警告相同的投递矩阵」和英文约 328–331 行（中文约 164 行）「a warning exits 9 … in every output mode」须注明对象存储降级在文本模式下例外：输出原始 `Warning:` 行、无提交或缓存命中时不输出、不触发退出 9（RISK-QUAL-TEXT-WARN-EXIT）；`src/command/status.rs:228` 同义注释同改）。`docs/commands/config.md` 及其中文版目前不描述这两条警告，N/A；网站 `status.en.md` 不列 warning code，N/A。
+**Implementation write set:** `src/utils/client_storage.rs`、`src/command/status.rs`（仅结构化输出时在模式分发前预解析对象存储，丢弃返回值）、`tests/command/reset_test.rs`、`tests/command/output_flags_test.rs`、`docs/commands/fetch.md`、`docs/commands/zh-CN/fetch.md`、`docs/commands/cache.md`、`docs/commands/zh-CN/cache.md`、`COMPATIBILITY.md`（仅 fetch 行）、本计划、`docs/development/plan/plan-status.md` 本计划行；网站 `../libra-backend/apps/tanstack-app/content/docs/commands/fetch.en.md`、`cache.en.md`（Git 仓、`cf` 分支；现有他人未跟踪文件 `memory.en.md` 保留不动）。`docs/commands/status.md`、`docs/commands/zh-CN/status.md`（`repository_preflight` 行、「命令运行前」措辞与「配置解析本身从不告警」一句（英文约 314–315 行、中文约 160 行）改为包含结构化输出下 status 扫描前的对象存储降级；英文约 317–322 行（中文约 162 行）「与 status 警告相同的投递矩阵」和英文约 328–331 行（中文约 164 行）「a warning exits 9 … in every output mode」须注明对象存储降级在文本模式下例外：输出原始 `Warning:` 行、仅当本次 status 懒打开对象存储时输出（如有提交的完整扫描、upstream ahead/behind 计数）、不触发退出 9（RISK-QUAL-TEXT-WARN-EXIT）；`src/command/status.rs:228` 同义注释同改）。`docs/commands/config.md` 及其中文版目前不描述这两条警告，N/A；网站 `status.en.md` 不列 warning code，N/A。
 
 **Release write set:** Inherited（`Cargo.toml`、`install.sh`、`install.ps1`、工具链刷新的 `Cargo.lock`、release artifact；以 `compat_version_surface_sync` 为准）。
 
@@ -1159,6 +1443,8 @@ R1真实ER03/RECOVERY PASS、H0/VERDICT FAIL（sessionbb82411c-1e59-4e52-a7f1-93
 
 **2026-10-28 追加顺序（不改上一段历史）：** `FIX-LTR-03 -> FIX-LTR-06 -> DEP-QUAL-F2-CLOSE（依 DEP-QUAL-F2-GATE 的关闭审查）-> 计划最终资格（FIX-LTR-06 发布树）-> 来源资格 Claude 审查 -> 终态登记 -> DEP-QUAL-HANDOFF`；`DOC-LTR-03` 为 no-release 文档卡，产品 C 覆盖来自 FIX-LTR-06。每个本地窗口另依 `DEP-QUAL-CARGO-WINDOW`。
 
+**2026-10-29 追加顺序（不改上两段）：** `FIX-LTR-07 -> FIX-LTR-06`、`FIX-LTR-08 -> FIX-LTR-06`；FIX-LTR-06 的 A 全量在三卡合并树上执行，C/D 一次覆盖三卡并发布 v0.30.92；其后仍为 `DEP-QUAL-F2-CLOSE -> 计划最终资格（v0.30.92 发布树）-> 来源资格 Claude 审查 -> 终态登记 -> DEP-QUAL-HANDOFF`。root 窗口已于 2026-10-28T14:48:41Z 归还、未重新授予，此后各窗口依用户指令并先发协调通知。
+
 ### 实际 D 映射与现场复核
 
 当前 `base.yml` 为PR及main/release/** push，`codeql.yml`为main目标PR及main/release/** push，均无paths过滤；实际job/if必须在每卡开工重新读取完整workflow，绑定最终head与merge SHA，不能只看workflow标题。`release.yml`由v* tag触发，当前build-and-upload有linux amd64/arm64、darwin arm64、windows amd64四个平台并通过OIDC release API上传；完整发布job/渠道探针一并核真实成功。失败前滚，不回写版本tag，不伪造未触发workflow通过。
@@ -1467,6 +1753,10 @@ R1真实ER03/RECOVERY PASS、H0/VERDICT FAIL（sessionbb82411c-1e59-4e52-a7f1-93
 
 | 日期 | 触发 | 变更 | 实际状态 |
 |---|---|---|---|
+| 2026-10-29 UTC（DOCS R3 后） | FIX06-ER05 R3：DOCS FAIL（P1×1，带存储配置文字的进程内病例实为 4 例） | 4 例改正并补 `client_storage_reads_pack_sha1` 及证据行；注明用户作答时依据的是 3 例；DEFER 行措辞、1e5310c 重叠说明、摘要与 plan-status 前提、卡内观测点与快照路径改正；`commit.py` 去除剩余 assert 并防止重跑覆盖恢复副本 | 待 DOCS 复审后提交 |
+| 2026-10-29 UTC（R5 后） | DEC-QUAL-R4-BASELINE、DEC-QUAL-INPROCESS-DEFER、上游 1e5310c、R5、FIX06-ER05 R2 FAIL、DEC-QUAL-FIX08-NEXTEST-RULE | 记录发布代码对照与 DEFER-QUAL-INPROCESS-ISOLATION（含 4 例存储配置文字与 4 例仅最终树失败）、1e5310c 同步（plan-status 补丁重放）与 R5 结果、FIX-LTR-08 失败处置与关闭条件改为只以 nextest 与 C/D 为依据、提交与网站步骤；措辞与时间改正 | FIX-LTR-06/07/08 in-progress；待 DOCS 复审后提交 |
+| 2026-10-29 UTC（R4 后） | FIX-LTR-08 ER-05 PASS、green3、R3/R4 全量、上游 ba38e30、FIX06-ER05 R1 FAIL | 记录 green3（`fetch_update` 改 `fetch_add`）、R3 与 R4 结果、第七项用户决定 DEC-QUAL-R4-CARGO-TEST、ba38e30 同步（plan-status 补丁重放）；补齐审查日志十行与 RISK-QUAL-FIX08-QUERY-BUSY-TEST；FIX-LTR-06 卡两处 R6 措辞就地改正；R2 归属、doctest、Mega2 证据与时间措辞改正 | FIX-LTR-06/07/08 in-progress；待 FIX06-ER05 复审后提交 |
+| 2026-10-29 UTC | FIX-LTR-06 A 全量两次失败、用户决定与上游 21f8e4c | 登记 2026-10-28/29 执行记录、六项用户决定、blaze 使用说明、FIX-LTR-06 更正、FIX-LTR-07/08 两卡、依赖边、四个 RISK、审查记录与 FIX-LTR-05 系列注记 | FIX-LTR-06/07/08 in-progress；A 全量待在三卡合并树重跑；依赖保持 incoming |
 | 2026-10-28 09:16:58 UTC | 本地 Claude R8 FAIL（P1×1） | plan-status 本计划行最新前缀改为当前状态并改正 main 时点；squash 推断改为「squash 或 rebase」；R7、R8 入审查日志 | DOC-LTR-03 in-progress；F2 仍 unknown/P1 |
 | 2026-10-28 09:10:06 UTC | 执行器自查与本地 Claude R7 FAIL（P1×2） | 改正 FIX-LTR-06 证据表与文档影响中「`docs/commands/zh-CN/fetch.md` 缺对应句」的错误说法（该文件第 29 行已有对应句；首次 R7 因此中止，无结论）；8abdcf7 时间改为提交时间 06:07:23Z 并引 PR merged_at 原件；授权、整合范围、FIX-LTR-06 源锚点与生命周期括注改为当前事实；两条索引前缀注明 main 时点 | DOC-LTR-03 in-progress；F2 仍 unknown/P1 |
 | 2026-10-28 08:58:36 UTC | root 授予 Cargo 窗口（`coordination/root-grant-20261028T074904Z.json`），开工条件要求刷新 upstream | 快进到 8abdcf7（PR #649，仅文档）；三份文件的新增文字按锚点重放，与受审字节逐行相同；文首段补 8abdcf7 事实一句 | DOC-LTR-03 in-progress；F2 仍 unknown/P1 |
@@ -1532,6 +1822,8 @@ R1真实ER03/RECOVERY PASS、H0/VERDICT FAIL（sessionbb82411c-1e59-4e52-a7f1-93
 | FIX-LTR-02 | reasoning fixture索引结清 | reasoning_artifact.rs、本计划、plan-status本计划行 | 4/8、3/8 | 1/0 S | FIX-LTR-01/FIX-LTR-04 | independent/self |
 | FIX-LTR-03 | MCP owned worker teardown | agent_mcp_exec_test.rs、本计划、plan-status本计划行 | 4/8、4/8 | 1/0 S | FIX-LTR-02 | independent/self |
 | FIX-LTR-06 | 结构化输出下存储配置降级警告的输出通道（ER-03 候选） | client_storage.rs、status.rs（仅结构化输出时在模式分发前预解析）、reset_test.rs、output_flags_test.rs、fetch/cache/status 中英文、COMPATIBILITY fetch 行、网站 fetch/cache、本计划、plan-status 本计划行 | 7/8、5/8 | 2/2 S | FIX-LTR-03 + SOURCE/PUBLISH + CARGO-WINDOW | independent/self；候选 v0.30.92 |
+| FIX-LTR-07 | replace -d 用例夹具的数据库状态 | replace.rs（单个用例）、SRC_SERIAL_REGISTRY/CENSUS 各一行、本计划、plan-status 本计划行 | 3/8、4/8 | 1/0 S | DEP-QUAL-SOURCE；FIX-LTR-07 -> FIX-LTR-06 | G-07 用户例外 DEC-QUAL-FIX07-RELEASE（随 v0.30.92）/FIX-LTR-06 |
+| FIX-LTR-08 | 仓库库被占用时存储配置读取的进程级有界重试 | client_storage.rs、fetch/cache 中英文文档、COMPATIBILITY fetch 行、本计划、plan-status 本计划行 | 5/8、4/8 | 1/1 S | DEP-QUAL-SOURCE、DEP-QUAL-CARGO-WINDOW；FIX-LTR-08 -> FIX-LTR-06 | G-07 用户例外 DEC-QUAL-FIX08-RELEASE（随 v0.30.92）/FIX-LTR-06 |
 | DOC-LTR-03 | 来源资格交接复核登记 | 本计划、plan-status 本计划行、plan-20261015 DEP-TR-QUAL-REPAIRS 行 | 4/20、3/20 | 0/0 S | SOURCE + CARGO-WINDOW（仅 VER-3） | no-release / FIX-LTR-06 |
 
 上表是开工时的粒度快照，其中「未准入候选／不得先实施」不是当前状态。当前完成状态以文首任务表为准：五张实现卡的 D 均已观察。
@@ -1552,8 +1844,14 @@ R1真实ER03/RECOVERY PASS、H0/VERDICT FAIL（sessionbb82411c-1e59-4e52-a7f1-93
 | RISK-QUAL-IGNORE-WARN | `src/utils/util.rs:3880`、`:3889` ignore 告警在结构化输出下写原始 stderr | 尚未排期 | open，P2 |
 | RISK-QUAL-TEXT-WARN-EXIT | 文本模式下存储降级警告不计入 warning 追踪，`--exit-code-on-warning` 仍退出 0，与结构化模式（FIX-LTR-06 后退出 9）不对称 | FIX-LTR-06 保持历史文本行为并写入文档；尚未排期 | open，P2 |
 | RISK-QUAL-STATUS-MODES | FIX-LTR-06 的 status 预解析位于模式分发前，`--scan`、`--check-dirty` 与已测的默认/`--cached` 共享该调用，但未单列用例 | 若后续改动分发顺序则补用例；尚未排期 | open，P2 |
-| RISK-QUAL-FIX05-VER-GAP | FIX05 卡 done，但 VER-6 未勾、VER-1 同步屏障真锁未落地；VER-4 与 AC-3 的缺口由 FIX-LTR-06 AC-5/AC-1/AC-2 承接 | 不回改历史勾选；若存储配置锁故障复现则另立 FIX 卡 | open，P2，owner Claude执行Agent |
+| RISK-QUAL-FIX05-VER-GAP | FIX05 卡 done，但 VER-6 未勾、VER-1 同步屏障真锁未落地；VER-4 与 AC-3 的缺口由 FIX-LTR-06 AC-5/AC-1/AC-2 承接 | 不回改历史勾选；若存储配置锁故障复现则另立 FIX 卡。2026-10-29：已复现并立卡 FIX-LTR-08（真锁用例已落地），关闭条件见该卡 | open，P2，owner Claude执行Agent |
 | RISK-QUAL-RAW-STDERR-OTHER | `refuse_rejected_presence`（纯文本加 exit 1）与 `src/cli.rs:3397` init 转换重试警告写原始 stderr | 尚未排期 | open，P2 |
+| RISK-QUAL-INDEX-SELF-CONTENTION | 后台对象索引登记（每对象一个连接、一次写提交）与前台存储配置读取争用同一仓库库 | 后果自 FIX-LTR-08 起受进程级 5 秒重试预算约束；争用本身（批量化、事务合并、WAL）尚未排期 | open，P2 |
+| RISK-QUAL-GLOBAL-BUSY-DEGRADE | 全局配置库忙时存储配置读取退回本地并告警（0.30.87 起即如此）；含 RISK-QUAL-STASH-QUIET 中可能来自全局库的「退回本地」部分 | 尚未排期；FIX-LTR-08 只处理仓库库 | open，P2 |
+| RISK-QUAL-STORAGE-MIGRATE-BUSY | 需要 schema 升级的仓库库在连接时就地迁移；`run_builtin_migrations` 丢掉忙文字，该处忙仍立即 fail-closed | 尚未排期 | open，P2 |
+| RISK-QUAL-HOOK-STORAGE-WAIT | 托管 hook 若经间接路径初始化存储，FIX-LTR-08 后最多多等约 5 秒；已知生产 capture 写入用 `init_local_existing` | 尚未排期；间接路径未穷举 | open，P2 |
+| RISK-QUAL-FIX08-QUERY-BUSY-TEST | FIX-LTR-08 查询分支的判忙只有构造出的 anyhow 单测与 diag2 的真实观测，没有真实 DbErr 用例 | 尚未排期；闭合观测点为 FIX-LTR-06 全量与 C/D | open，P2 |
+| DEFER-QUAL-INPROCESS-ISOLATION | 本机进程内 `cargo test --all` 在发布代码与三卡最终树上都失败（blaze 两次未能跑任何测试；R4 的进程内运行在 `command_test` 中途超时，其后约 100 个二进制未在进程内跑过）：发布代码两次 lib 运行合计 28 例（排除未构建 helper 的 42 例），最终树两次合计 21 例，其中 17 例在发布代码上同样失败，其余 4 例只在最终树失败（3 例为 capture/StoreFailure 文字、1 例为 workspace 忙碰撞，判为同族是推断）；fsck 模块单独运行两树都通过；两次运行各有 3 例、合计 4 例带存储配置拒绝文字（`rejected_reachability_production_client_rejects_fifo_without_blocking`、`unchanged_replay_verifies_ref_and_all_catalog_objects`、`client_storage_reads_pack_sha256`、`client_storage_reads_pack_sha1`；`run-r4-cargotest/cargo_test_all.stdout`、`baseline-ba38e30/cur-lib2.stdout`），发布代码上 4 例同文字（`baseline-ba38e30/lib.stdout`、`base2-lib.stdout`），依 DEC-QUAL-FIX08-NEXTEST-RULE 不作为 FIX-LTR-08 的失败处置依据；4 例只在最终树失败，判为同族是推断，由 DEC-QUAL-INPROCESS-DEFER 接受；对照基线因 `libra clone` 过慢改为 rsync 副本按 HEAD 重置（`baseline-ba38e30/libra-clone-aborted/ABORTED.txt`）；全部用例在 nextest（每例独立进程）下通过（R4 10836/10836）。原件 `baseline-ba38e30/COMPARISON.md`、`evidence.sha256`、`fix-ltr06/run-r4-cargotest/` | 依用户决定 DEC-QUAL-INPROCESS-DEFER 延期；A 的全量门以 nextest 为准（计划原定的全量命令；blaze 与进程内 `cargo test --all` 依用户决定作为补充，其结果已如上处置），进程内结果作为既有缺陷登记。重开条件：任何以进程内运行为验收门的窗口（含 CLAUDE.md 的 `cargo test --all`、blaze）之前，须另立 FIX 卡处理共享 cwd/env、进程级存储与 capture 状态、SQLite 争用 | open，DEFER，owner Claude 执行 Agent |
 | RISK-QUAL-FUTURE | proc-macro-error2现有future-incompat提示；旧Clippy exit0不等于无诊断 | 原件保留；任何适用发布门拒绝则STOP独立归属，不allow压制 | open P2 |
 | RISK-QUAL-FLAKE | marker为什么未drain尚未证；fixture边界缺等待有源码证据 | FIX02 已在 v0.30.90 加入有界等待。历史原因仍未证明，不能宣称关闭历史 C2 | open P2 |
 | RISK-QUAL-ADD-LOOSE | 操作日志在命令前用 init_local 写快照，忽略 LIBRA_STORAGE_TYPE。gcs-canary 的 add 仍留下 loose 对象 | 不混入已发布修复。若要消除，另立卡 | open P2 |
@@ -1585,6 +1883,25 @@ R1真实ER03/RECOVERY PASS、H0/VERDICT FAIL（sessionbb82411c-1e59-4e52-a7f1-93
 | 2026-10-28 R7 | DOC-LTR-03 增量重审（快进到 8abdcf7、R6 收据、8abdcf7 事实句、zh-CN fetch 说法改正） | FAIL | P1×2（8abdcf7 时间写作 06:07:24Z；授权、源锚点、整合范围等当前状态未更新） | R8 修订 | session ec3937bd-ea36-4176-aa17-e8764647a513；output SHA256 8c6d8b9cc2bcc55082f3019692b37b79dbe565c365f200962cddfe9f2323a61b；input manifest SHA256 4daa424affac2b1cdd68b371d5dfcbd357dcf8b801fa82000f7a7be5d3454b80；结束 2026-10-28T09:09:05.885947370Z；仓外 review-R7/（此前一次 R7 因执行器自查中止、无结论，见 review-R7-aborted/） |
 | 2026-10-28 R8 | 同上第二轮 | FAIL；R7 的 P1 2/2 关闭 | P1×1（plan-status 索引前缀把 06:20 时的 main 写成 29eaa97，与 8abdcf7 06:07:23Z 已在远端 main 矛盾） | R9 修订：前缀改为本地 main 先后并更新为当前状态；squash 推断改为「squash 或 rebase」；R7/R8 入日志 | session 182461cc-3244-4e65-a02f-758fe23153a2；output SHA256 cee6686138de843960bf3601cadd25205cf9149b9220bdc4d081f7513fc1acfc；input manifest SHA256 fd02f371f954a2ac88338d20e8acfe1382bb60752d3b081b1c24d4edb1bec0ac；结束 2026-10-28T09:16:02.673795018Z；仓外 review-R8/ |
 | 2026-10-28 R9 | 同上第三轮 | PASS（REQUAL、DOCS 均 PASS）；R8 的 P1 1/1 关闭 | P0/P1=0；P2×3：plan-status 前缀「06:07:23Z 已在远端 main」宜用 merged_at 06:07:24Z；R9 收据行的逐字节核对须留存；plan-20261015 前缀为 06:20 快照（标时，非错误） | 具名接受，owner Claude执行Agent：第 1、3 项下次改行时处理，第 2 项已留存 `doc-ltr03/receipt-append-check.json`；本行是该审查之后唯一追加的收据，审查器未读过本行 | session 469c1dbc-c449-49fd-9bb2-f9ce548be38b；output SHA256 a4a2fd63c1f93695681de1219c2579eb426f118f45574aa39a5f08ce908db962；input manifest SHA256 ff35d342158d855a1692d245d149fa93a1303cdb5fa4325c543ec28634b520ee；结束 2026-10-28T09:20:39.062144241Z；仓外 review-R9/ |
+| 2026-10-28 EXEC-DOC03 R1 | DOC-LTR-03 VER-3 执行器准入 | FAIL | P1×4（双 env 加载未故障闭合、超时不终止自有进程树、漏 `CARGO_BUILD_JOBS` 控制、缓存/工具链未在 claim 前确认） | R2 修订执行器与合同 | session a4f6c7c9-677f-432f-bc9d-edd24af9156e；`review-exec-doc03/` |
+| 2026-10-28 EXEC-DOC03 R2 | 同上 | PASS | P0/P1=0 | — | session ec473f23-9d71-49ca-bedc-86607ba858b3；`review-exec-doc03-R2/` |
+| 2026-10-28 FIX06-A-ADMISSION R1 | FIX-LTR-06 A 合同与执行器准入 | FAIL | P1×2（测试未覆盖 AC-7 两个条件；A 合同与卡片 Performance budget 不一致且未登记更正） | 补 AC-7 用例与 card-correction 第三项 | session 5d0f31e1-a3d2-4803-b625-8b616ebe5e1e；`review-fix06-A-admission/` |
+| 2026-10-28 FIX06-A-ADMISSION R2 | 同上 | FAIL | P1×1（GREEN 预算写成「剩余时间」不可执行） | 改为数字预算 1800/1800/6900 | session 446603e8-70a2-40dd-96b6-c4bc7d5d31b9；`review-fix06-A-admission-R2/` |
+| 2026-10-28 FIX06-A-ADMISSION R3 | 同上 | PASS | P0/P1=0 | RED0 于 10:21:35Z claim | session 8347d953-77f2-4aa3-abc1-9823f167445f；`review-fix06-A-admission-R3/` |
+| 2026-10-28 FIX06-BLAZE-ADMISSION R1 | blaze 全量合同（DEC-QUAL-BLAZE-FULL） | FAIL | P1×3（claim 未要求 GREEN PASS；ra-jit 守护进程与测试进程结束后查不到；失败记录与归属不具体） | R2 修订 | session 9906d342-1397-4685-b5fa-bccfaceab1ed；`review-fix06-blaze-admission/` |
+| 2026-10-28 FIX06-BLAZE-ADMISSION R2 | 同上 | FAIL | P1×3（GREEN 真实失败对本窗口结论的影响未写；`blaze_summary.py` 按出现顺序配对会出错；无「是否跑全」标准） | R3 修订 | session e11bf25c-97df-4b61-b237-3e900e272112；`review-fix06-blaze-admission-R2/` |
+| 2026-10-28 FIX06-BLAZE-ADMISSION R3 | 同上 | FAIL | P1×2（replace 失败被写成本机既有/特有，证据不支持；`blaze_summary.py` 解析为空时判 PASS） | R4 修订（空解析判 INCONCLUSIVE 并设下限） | session 4c5c73e3-f18b-4308-bd7d-54afd7cfc75c；`review-fix06-blaze-admission-R3/` |
+| 2026-10-28 FIX06-BLAZE-ADMISSION R4 | 同上 | PASS | P0/P1=0 | blaze 随后 TIMEOUT（ra-jit 守护进程未就绪） | session 43f98b06-448e-425e-b4dc-c34e944e6b36；`review-fix06-blaze-admission-R4/` |
+| 2026-10-28 FIX07-ER03 R1 | FIX-LTR-07 根因与 ER-03 | ROOT_CAUSE PASS；ER03 FAIL | P1×2（串行车道需 cwd+env 并同步两份 tsv；implementation 卡写 no-release 违反 G-07） | R2 修订；用户决定 DEC-QUAL-FIX07-RELEASE | session 2a9df0a2-ced0-4de2-9f34-71aa98593a63；`review-fix07-ER03/` |
+| 2026-10-29 FIX07-ER03 R2 | 同上 | PASS；上轮 P1 2/2 关闭 | P0/P1=0；P2 已按卡处置 | 见 FIX-LTR-07 卡 | session dbbe2623-2a1b-4629-a57f-c3eb62ca2ae6；`review-fix07-ER03-R2/` |
+| 2026-10-29 FIX07-ER05 | FIX-LTR-07 实现与聚焦 VER | PASS；ER-03 R2 P2 7/9 处置 | P0/P1=0；P2×4（授权依据、AC-1 数字出处、VER-1 RED 引用、计划登记时点） | 写入 FIX-LTR-07 卡与本段 | session ce62cf45-699c-4aac-bed8-1102ebd1f6bd；`review-fix07-ER05/` |
+| 2026-10-29 FIX08-ER03 R1 | FIX-LTR-08 根因与 ER-03 | ROOT_CAUSE PASS；ER03 FAIL | P1×5（归属计数、FIX-LTR-05 条款取代未登记、性能上限、迁移路径、用例确定性） | R2 修订 | session fcc17bd6-2e69-4955-a987-7a43f2ea3a63；`review-fix08-ER03/` |
+| 2026-10-29 FIX08-ER03 R2 | 同上 | FAIL；上轮 P1 5/5 关闭 | P1×1（锁用例借 cwd 与进程级预算影响同进程其它用例） | R3 改为子进程探针 | session 1a6e61e5-c305-45c7-b8ef-76df876d91f2；`review-fix08-ER03-R2/` |
+| 2026-10-29 FIX08-ER03 R3 | 同上 | PASS；上轮 P1 1/1 关闭 | P0/P1=0；P2×5 已写入卡与实现 | 见 FIX-LTR-08 卡 | session 6254861f-e64f-4956-98f8-74cd94f98cdb；`review-fix08-ER03-R3/` |
+| 2026-10-29 FIX08-ER05 | FIX-LTR-08 实现、RED/GREEN2、A1/A2 与诊断处置 | PASS | P0/P1=0；P2×7（开发文档、提交基准、行号、查询分支真实错误用例、计时余量、进程内预算共用、措辞） | 处置写入 FIX-LTR-08 卡；随后 green3 | session 7d2e6c72-2dbd-4180-9446-fc99b33e32df；`review-fix08-ER05/` |
+| 2026-10-29 FIX06-ER05 R1 | FIX-LTR-06 实现、R4 nextest 证据与本计划治理文字 | ER05 FAIL；DOCS FAIL | P1×2（第三个提交未绑定 R4 被测树哈希；审查日志缺 FIX08-ER05、FIX-LTR-06 A 准入三轮、blaze 准入四轮、DOC-LTR-03 执行器两轮） | 提交脚本绑定最终（R5）被测树逐文件哈希与门文件 `r5-gate.json`；补齐本表与修订记录 | session 289e6052-8188-47d0-86c7-18244eb5d648；`review-fix06-ER05/` |
+| 2026-10-29 FIX06-ER05 R2 | 同上，含 DEFER 登记与提交脚本修订 | ER05 PASS；DOCS FAIL；上轮 P1 2/2 关闭 | P1×1（DEFER 绕过 FIX-LTR-08 已登记的失败处置与关闭条件且未披露：进程内失败中 3 例带存储配置拒绝文字） | 依用户决定 DEC-QUAL-FIX08-NEXTEST-RULE 修订 FIX-LTR-08 规则与 DEFER 行；P2 措辞、时间、门描述、修订记录、提交脚本（显式检查、R5 head 与快照绑定、恢复说明）、网站提交步骤已处置 | session 465ccf84-62f2-4a71-b54f-26cee7bbfe32；`review-fix06-ER05-R2/` |
+| 2026-10-29 FIX06-ER05 R3 | 同上 | ER05 PASS；DOCS FAIL；上轮 P1 1/1 关闭 | P1×1（带存储配置文字的进程内病例实为 4 例，计划与用户提问写 3 例） | 4 例改正并注明；P2 处置见修订记录 | session 32823329-1f9c-4497-acc0-70169e2e0132；`review-fix06-ER05-R3/` |
 
 R2实际ER03 FAIL/H0 PASS，session e9f0e17d-07b4-40d8-9098-3f2a6e68c857，output SHA256 92b3745fc0f02790221e06d6db9f80ce56acab39d945378cfeeb23cab6e6c5ba；原三P1已闭，新的终态证据/被测树矛盾由本轮预登记终止链修订。**R3时点快照：** 当时R3尚待实际审查；后来R3 FAIL与R4 PASS见实际日志，不倒改原结论。P2-7已实际核GitHub上游存在旧plan-20261015（blob bfcf4e20aff8289dce9c7a0889e5ebb9ddb926f9）；不能因此认为含当前本地治理。新计划改用纯文本说明原计划；发布clone仍须自身链接核验。
 

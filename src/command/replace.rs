@@ -722,11 +722,19 @@ mod tests {
     /// The REAL `replace -d` path: its removal is visible to the very next
     /// resolve in the same process (no snapshot can outlive the mutation).
     #[tokio::test]
-    #[serial_test::serial(cwd)]
+    #[serial_test::serial(cwd, env)]
     async fn delete_mutation_path_invalidates_the_cache() {
-        let repo = repo_fixture();
+        // A real, migrated repository: with the 0-byte `repo_fixture` marker,
+        // the first object write ran the whole schema migration in the
+        // background and could hold the database past the 200 ms storage
+        // config read, so object storage failed closed before `replace -d`
+        // resolved the raw oid (FIX-LTR-07). The guards come first so the
+        // fixture write also resolves storage config against this repository.
+        let repo = tempfile::tempdir().expect("tempdir");
+        crate::utils::test::setup_with_new_libra_in(repo.path()).await;
+        let _cd = crate::utils::test::ChangeDirGuard::new(repo.path());
+        let _pin = WorktreeScope::pin_request_scope(repo.path().to_path_buf());
         let objects = repo.path().join(".libra").join("objects");
-        fs::create_dir_all(&objects).expect("objects dir");
         let from = oid(0xee);
         let to = oid(0xef);
         // `resolve_any` accepts a raw oid only when the object exists in
@@ -740,8 +748,6 @@ mod tests {
             .expect("store fixture object");
         write_replace_ref(repo.path(), &from, &to);
 
-        let _cd = crate::utils::test::ChangeDirGuard::new(repo.path());
-        let _pin = WorktreeScope::pin_request_scope(repo.path().to_path_buf());
         assert_eq!(resolve(from), to, "the mapping caches first");
 
         delete(&[from.to_string()]).await.expect("replace -d");

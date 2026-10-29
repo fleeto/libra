@@ -38,7 +38,7 @@
 
 ## 当前状态
 
-- 仓库库打不开，或解析没有返回时，`ClientStorage::init` 失败，不构造可写本地后端，只报告设置名，也不进入进程内对象缓存。全局库文件存在但打不开时，对象存储仍用历史本地后端，已有对象仍可读取。future global schema、正好 `local` 和可读的未设置类型仍是本地结果，并且仍可缓存。
+- 仓库库打不开，或解析没有返回时，`ClientStorage::init` 失败，不构造可写本地后端，只报告设置名，也不进入进程内对象缓存。仓库库只是被其他写者占用（SQLite busy/locked）时，先在进程级约 5 秒的预算内退避重试，预算用尽后每次只尝试一次（FIX-LTR-08）。全局库文件存在但打不开时，对象存储仍用历史本地后端，已有对象仍可读取。future global schema、正好 `local` 和可读的未设置类型仍是本地结果，并且仍可缓存。
 - 公开状态：已公开（`Commands::Cache`）。
 - 测试：`tests/command/cache_test.rs`（local 默认、tiered env 覆盖、非法数值回落默认、
   human 输出标签）。

@@ -154,14 +154,14 @@ libra status --find-renames=75
 | `dirty_cache_stale_fallback` | `cache` | dirty 缓存缺失/陈旧；降级为完整 status |
 | `dirty_cache_concurrent_invalidate` | `cache` | 并发写者在读取途中使缓存失效 |
 | `dirty_cache_path_unencodable` | `cache` | 非 UTF-8 路径无法存入 dirty 缓存，其行被省略（完整 status 仍会报告该路径） |
-| `repository_preflight` | `config` | 命令运行前发出的仓库级提示（例如 durable object-index 修复待完成） |
+| `repository_preflight` | `config` | 命令运行前，或在 `--json`/`--machine` 下 status 扫描前发出的仓库级提示（例如 durable object-index 修复待完成，或 `LIBRA_STORAGE_TYPE=local` 时对象存储降级为本地） |
 | `upstream_counts_unavailable` | `metadata` | 无法计算 upstream ahead/behind 计数（任一侧历史中的提交或 shallow 边界列表读不到）；计数被省略而非猜测 |
 
-`source` 列是冻结枚举：`config`、`probe`、`rename_detect`、`worktree`、`metadata`、`cache`。`probe` 与 `rename_detect` 刻意区分——`probe` 警告表示候选可能根本没被**看到**，而 `rename_detect` 表示看到了但无法评分。`config` 用于与扫描无关的仓库级提示——目前即上表的 `repository_preflight`。配置**解析**本身从不告警：非法值一律 fail-closed 而非降级。
+`source` 列是冻结枚举：`config`、`probe`、`rename_detect`、`worktree`、`metadata`、`cache`。`probe` 与 `rename_detect` 刻意区分——`probe` 警告表示候选可能根本没被**看到**，而 `rename_detect` 表示看到了但无法评分。`config` 用于与扫描无关的仓库级提示——目前即上表的 `repository_preflight`。配置**解析**本身从不告警：非法值一律 fail-closed 而非降级。唯一例外是对象存储降级：结构化输出的 status 在扫描前解析对象存储，并以 `repository_preflight` 报告。
 
-其它子系统的仓库级 preflight 提示（例如命令运行前发出的「durable object-index 修复待完成」）遵循与 status 警告**相同**的投递矩阵：文本模式打印到 stderr，`--json` 下以 `repository_preflight` / `config` 并入 `data.warnings[]` 且 stderr 保持干净。规则因此保持精确：退出码 9 必定对应结构化列表中的至少一条记录，`--json` 消费者无需读取 stderr 就能知道退出码为何改变。
+其它子系统的仓库级 preflight 提示（例如命令运行前发出的「durable object-index 修复待完成」）遵循与 status 警告**相同**的投递矩阵：文本模式打印到 stderr，`--json` 下以 `repository_preflight` / `config` 并入 `data.warnings[]` 且 stderr 保持干净。规则因此保持精确：退出码 9 必定对应结构化列表中的至少一条记录，`--json` 消费者无需读取 stderr 就能知道退出码为何改变。对象存储降级在文本模式下是例外：只有 status 懒打开对象存储时（例如有提交的完整扫描或 upstream ahead/behind 计数）才打印自己的 `Warning:` 行，且不触发 `--exit-code-on-warning`。
 
-human/short/porcelain 模式在 stderr 打印 status 警告 `warning: …`（`--quiet` 也不抑制诊断）；`--json` 把它们放入 `data.warnings[]`，成功运行时 stderr 保持干净；唯一例外是 JSON envelope 自身遭遇非 EPIPE 的 stdout 写失败——此时待投递警告会刷到 stderr 而非静默丢失。开启全局 `--exit-code-on-warning` 时，警告以退出码 9 优先于 `--exit-code` 的 dirty 退出码 1，覆盖所有输出模式；fatal 错误（128/129）永远优先于两者。完整优先级为 **fatal ≻ 9（on-warning）≻ 1（dirty，含非空 `io_blocked`）≻ 0**，所有输出模式经由同一仲裁路径解析。
+human/short/porcelain 模式在 stderr 打印 status 警告 `warning: …`（`--quiet` 也不抑制诊断）；`--json` 把它们放入 `data.warnings[]`，成功运行时 stderr 保持干净；唯一例外是 JSON envelope 自身遭遇非 EPIPE 的 stdout 写失败——此时待投递警告会刷到 stderr 而非静默丢失。开启全局 `--exit-code-on-warning` 时，警告以退出码 9 优先于 `--exit-code` 的 dirty 退出码 1，覆盖所有输出模式（对象存储降级警告只在结构化输出下计入）；fatal 错误（128/129）永远优先于两者。完整优先级为 **fatal ≻ 9（on-warning）≻ 1（dirty，含非空 `io_blocked`）≻ 0**，所有输出模式经由同一仲裁路径解析。
 
 ### io_blocked 部分结果契约
 

@@ -16,6 +16,8 @@ const HOOKS_CMD_DOC_ZH: &str = include_str!("../../docs/commands/zh-CN/hooks.md"
 const AGENT_DEV_DOC: &str = include_str!("../../docs/development/commands/agent.md");
 const COMPATIBILITY_DOC: &str = include_str!("../../COMPATIBILITY.md");
 const ERROR_CODES_DOC: &str = include_str!("../../docs/error-codes.md");
+const CLOUD_CMD_DOC_EN: &str = include_str!("../../docs/commands/cloud.md");
+const CLOUD_CMD_DOC_ZH: &str = include_str!("../../docs/commands/zh-CN/cloud.md");
 
 #[cfg(feature = "test-live-agent")]
 #[test]
@@ -310,6 +312,79 @@ fn import_docs_pin_v2_source_commitment_and_legacy_read_boundary() {
         ),
     ] {
         assert_contains(document, label, commitment_boundary);
+    }
+}
+
+/// PI-05: the local capture-kind fence documents both recovery hints (the
+/// refusal persists while local-only capture exists; external full backup
+/// meanwhile) and never suggests deleting capture data to get past it.
+#[test]
+fn local_capture_kind_fence_docs_pin_recovery_hints() {
+    for (label, document, required) in [
+        (
+            "docs/commands/cloud.md",
+            CLOUD_CMD_DOC_EN,
+            "keeps refusing until a later Libra release adds complete cloud support for that kind",
+        ),
+        (
+            "docs/commands/cloud.md",
+            CLOUD_CMD_DOC_EN,
+            "back up the whole repository, including its `.libra` directory, with an external backup tool you choose",
+        ),
+        (
+            "docs/commands/cloud.md",
+            CLOUD_CMD_DOC_EN,
+            "The allowlist is the same list the D1 `agent_kind` CHECK is built from",
+        ),
+        (
+            "docs/commands/zh-CN/cloud.md",
+            CLOUD_CMD_DOC_ZH,
+            "会持续拒绝，直到后续 Libra 版本为该种类提供完整云支持",
+        ),
+        (
+            "docs/commands/zh-CN/cloud.md",
+            CLOUD_CMD_DOC_ZH,
+            "请用你自己选择的外部备份工具备份整个仓库（包括 `.libra` 目录）",
+        ),
+        (
+            "docs/commands/agent.md",
+            AGENT_CMD_DOC_EN,
+            "the hint points to an external backup of the whole repository meanwhile",
+        ),
+        (
+            "docs/commands/zh-CN/agent.md",
+            AGENT_CMD_DOC_ZH,
+            "期间提示改用外部工具备份整个仓库",
+        ),
+        (
+            "docs/development/commands/agent.md",
+            AGENT_DEV_DOC,
+            "full Pi cloud mirror stays DEFER-PI-08",
+        ),
+        (
+            "docs/development/tracing/agent.md",
+            AGENT_DOC,
+            "直到\n后续版本提供该 kind 的完整云支持（plan-20260911 DEFER-PI-08）",
+        ),
+        (
+            "COMPATIBILITY.md",
+            COMPATIBILITY_DOC,
+            "the hints say the refusal persists while local-only\ncapture exists",
+        ),
+    ] {
+        assert_contains(document, label, required);
+    }
+    for (label, document) in [
+        ("docs/commands/cloud.md", CLOUD_CMD_DOC_EN),
+        ("docs/commands/zh-CN/cloud.md", CLOUD_CMD_DOC_ZH),
+    ] {
+        for forbidden in [
+            "delete the capture sessions",
+            "清空数据库后重试",
+            "删除会话后重试",
+        ] {
+            assert_absent(document, label, forbidden);
+        }
     }
 }
 

@@ -2336,7 +2336,9 @@ import-ownership 字段投影省略、其它 metadata 原样；远端 catalog �
 checkpoint 的 link 只留本地（checkpoint 照常镜像），每次成功 sync 输出一个固定
 `cloud_sync.agent_capture.warning`；旧版本已镜像的 V1 行原样保留且仍可 restore。sync 失败只输出一个带固定
 具体原因的 warning 并以 `LBR-CONFLICT-002`（`agent capture mirror failed: <reason>`）结束，restore 失败保持
-`LBR-NET-002`（`agent capture restore failed: <reason>`）。
+`LBR-NET-002`（`agent capture restore failed: <reason>`）。云采集允许名单之外的本地 kind（`hermes`、Pi 及未知后续 kind）
+是仅本地采集：sync 在凭据、D1、R2 之前以 `LBR-CONFLICT-002` 拒绝（`--force` 亦然），提示存在仅本地采集时持续拒绝、直到
+后续版本提供该 kind 的完整云支持（plan-20260911 DEFER-PI-08），期间用用户选定的外部工具备份整个仓库（PI-05）。
 
 content checkpoint、source revision/current leaf、link association 与 traces ref CAS 在
 同一事务提交；tombstone、provider/session owner 与 reservation fence 均在最终事务复核。

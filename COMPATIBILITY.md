@@ -466,6 +466,10 @@ rewrites the agent's own transcript; `agent session show --extract-transcript
 `claude_code`, `cursor`, `codex`, `gemini`, `opencode`, `copilot`,
 `factory_ai`, and `grok` with `LBR-CONFLICT-002` before any remote write.
 `hermes` is outside that list. `--force` does not bypass the refusal.
+The list is the one the D1 `agent_kind` CHECK is built from, so any later
+kind is refused too; the hints say the refusal persists while local-only
+capture exists, until a release adds cloud support for the kind, and point to
+an external backup of the whole repository meanwhile.
 Before its first remote write, `cloud sync` also reads the `agent_kind`
 CHECK of existing D1 `agent_session` and `agent_capture_session_v2` tables
 (read-only), on every sync, and refuses with `LBR-CONFLICT-002` when a table

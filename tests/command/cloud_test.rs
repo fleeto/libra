@@ -4,11 +4,14 @@
 
 use super::*;
 
-fn plant_unsupported_capture_kind(repo: &std::path::Path) {
+/// Plant one capture session per kind. The fixture drops the local
+/// `agent_session` CHECK first so a kind the repository schema does not know
+/// yet (a future kind) can be planted too.
+fn plant_capture_kinds(repo: &std::path::Path, kinds: &[&str]) {
     let db = repo.join(".libra").join("libra.db");
     let script = r#"
 import sqlite3, sys
-db, kind = sys.argv[1], sys.argv[2]
+db, kinds = sys.argv[1], sys.argv[2:]
 conn = sqlite3.connect(db)
 conn.execute("PRAGMA foreign_keys=OFF")
 conn.executescript(
@@ -16,17 +19,18 @@ conn.executescript(
     "DROP TABLE agent_session;"
     "ALTER TABLE agent_session_hm02 RENAME TO agent_session;"
 )
-conn.execute(
-    "INSERT INTO agent_session (session_id, agent_kind, provider_session_id, state, working_dir, metadata_json, redaction_report, started_at, last_event_at) VALUES ('hm02-session', ?, 'hm02-provider', 'stopped', '/work', '{}', '{}', 1, 1)",
-    (kind,),
-)
+for kind in kinds:
+    conn.execute(
+        "INSERT INTO agent_session (session_id, agent_kind, provider_session_id, state, working_dir, metadata_json, redaction_report, started_at, last_event_at) VALUES (?, ?, 'hm02-provider', 'stopped', '/work', '{}', '{}', 1, 1)",
+        (kind + "-session", kind),
+    )
 conn.commit()
 "#;
     let output = std::process::Command::new("python3")
         .arg("-c")
         .arg(script)
         .arg(&db)
-        .arg("hermes")
+        .args(kinds)
         .output()
         .expect("python3 sqlite fixture");
     assert!(
@@ -36,7 +40,15 @@ conn.commit()
     );
 }
 
+fn plant_unsupported_capture_kind(repo: &std::path::Path) {
+    plant_capture_kinds(repo, &["hermes"]);
+}
+
 fn assert_unsupported_capture_kind_refused(output: &std::process::Output) {
+    assert_capture_kind_refused(output, "hermes");
+}
+
+fn assert_capture_kind_refused(output: &std::process::Output, kind: &str) {
     assert_eq!(
         output.status.code(),
         Some(128),
@@ -53,8 +65,18 @@ fn assert_unsupported_capture_kind_refused(output: &std::process::Output) {
         "missing allowlist refusal: {stderr}"
     );
     assert!(
-        stderr.contains("hermes"),
+        stderr.contains(kind),
         "refusal should name the rejected kind: {stderr}"
+    );
+    assert!(
+        stderr.contains(
+            "while this repository holds local-only capture sessions of a kind the cloud mirror does not support, `libra cloud sync` keeps refusing until a later Libra release adds complete cloud support for that kind; `--force` does not bypass it"
+        ),
+        "hint must say the refusal lasts while local-only capture exists: {stderr}"
+    );
+    assert!(
+        stderr.contains("back up the whole repository, including its `.libra` directory, with an external backup tool of your choice"),
+        "hint must name the interim external full-repository backup: {stderr}"
     );
     assert!(
         !stderr.contains("missing cloud configuration"),
@@ -62,8 +84,14 @@ fn assert_unsupported_capture_kind_refused(output: &std::process::Output) {
     );
     let stdout = String::from_utf8_lossy(&output.stdout);
     assert!(
-        !stdout.contains("\"ok\":true") && !stdout.contains("Starting cloud sync"),
+        !stdout.contains("\"ok\":true")
+            && !stdout.contains("Starting cloud sync")
+            && !stdout.contains("Sync complete"),
         "refusal rendered success or progress: stdout={stdout} stderr={stderr}"
+    );
+    assert!(
+        !stdout.contains("cloud_sync.") && !stderr.contains("cloud_sync."),
+        "refusal emitted a cloud_sync progress event: stdout={stdout} stderr={stderr}"
     );
 }
 
@@ -93,10 +121,187 @@ fn unsupported_capture_kind_json_and_progress_do_not_succeed() {
 
     let progress = run_libra_command(&["cloud", "sync", "--progress=json"], repo.path());
     assert_unsupported_capture_kind_refused(&progress);
-    let stderr = String::from_utf8_lossy(&progress.stderr);
+}
+
+/// PI-05: the fence allowlist is exactly the `agent_kind` set of the D1 DDL
+/// `cloud sync` creates, for both capture tables, and every kind in it
+/// passes the fence (the run stops later, at the credential preflight).
+#[test]
+fn unsupported_capture_kind_allowlist_matches_d1_ddl() {
+    use libra::utils::d1_client::{
+        D1_CAPTURE_AGENT_KINDS, agent_capture_session_v2_table_ddl, agent_session_table_ddl,
+        parse_agent_kind_check,
+    };
+
+    // The eight kinds today's D1 tables accept, pinned independently of the
+    // constant that both the fence and the DDL read.
+    const REQUIRED: [&str; 8] = [
+        "claude_code",
+        "cursor",
+        "codex",
+        "gemini",
+        "opencode",
+        "copilot",
+        "factory_ai",
+        "grok",
+    ];
+    assert_eq!(D1_CAPTURE_AGENT_KINDS, REQUIRED);
+    let expected: Vec<String> = REQUIRED.iter().map(|kind| kind.to_string()).collect();
+    for ddl in [
+        agent_session_table_ddl(),
+        agent_capture_session_v2_table_ddl(),
+    ] {
+        assert_eq!(
+            parse_agent_kind_check(&ddl),
+            Some(expected.clone()),
+            "{ddl}"
+        );
+    }
+
+    let repo = tempdir().unwrap();
+    init_repo_via_cli(repo.path());
+    plant_capture_kinds(repo.path(), &REQUIRED);
+    let output = run_libra_command(&["cloud", "sync"], repo.path());
+    let stderr = String::from_utf8_lossy(&output.stderr);
     assert!(
-        !stderr.contains("cloud_sync.agent_capture"),
-        "progress mode reached capture mirror: {stderr}"
+        !stderr.contains("outside the cloud capture allowlist"),
+        "a D1 DDL kind was refused by the fence: {stderr}"
+    );
+    assert!(
+        stderr.contains("missing cloud configuration for sync"),
+        "allowed kinds should reach the credential preflight: {stderr}"
+    );
+}
+
+/// PI-05: an unknown future kind is refused like `hermes`, in every mode.
+#[test]
+fn unsupported_capture_kind_future_kind_is_refused() {
+    let repo = tempdir().unwrap();
+    init_repo_via_cli(repo.path());
+    plant_capture_kinds(repo.path(), &["claude_code", "pi"]);
+
+    for args in [
+        &["cloud", "sync"][..],
+        &["cloud", "sync", "--force"][..],
+        &["--json", "cloud", "sync"][..],
+        &["cloud", "sync", "--progress=json"][..],
+    ] {
+        let output = run_libra_command(args, repo.path());
+        assert_capture_kind_refused(&output, "pi");
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert!(
+            !stderr.contains("claude_code"),
+            "only the kinds outside the allowlist are named: {stderr}"
+        );
+    }
+}
+
+/// Count TCP connections to a loopback listener that closes each one at once.
+struct ConnectionCounter {
+    url: String,
+    count: std::sync::Arc<std::sync::atomic::AtomicUsize>,
+    stop: std::sync::Arc<std::sync::atomic::AtomicBool>,
+    worker: Option<std::thread::JoinHandle<()>>,
+}
+
+impl ConnectionCounter {
+    fn start() -> Self {
+        use std::sync::{
+            Arc,
+            atomic::{AtomicBool, AtomicUsize, Ordering},
+        };
+
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind counter");
+        listener.set_nonblocking(true).expect("nonblocking counter");
+        let url = format!("http://{}", listener.local_addr().expect("counter addr"));
+        let count = Arc::new(AtomicUsize::new(0));
+        let stop = Arc::new(AtomicBool::new(false));
+        let worker = {
+            let count = count.clone();
+            let stop = stop.clone();
+            std::thread::spawn(move || {
+                while !stop.load(Ordering::SeqCst) {
+                    match listener.accept() {
+                        Ok((stream, _)) => {
+                            count.fetch_add(1, Ordering::SeqCst);
+                            drop(stream);
+                        }
+                        Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+                            std::thread::sleep(std::time::Duration::from_millis(5));
+                        }
+                        Err(_) => break,
+                    }
+                }
+            })
+        };
+        Self {
+            url,
+            count,
+            stop,
+            worker: Some(worker),
+        }
+    }
+
+    fn connections(&self) -> usize {
+        self.count.load(std::sync::atomic::Ordering::SeqCst)
+    }
+}
+
+impl Drop for ConnectionCounter {
+    fn drop(&mut self) {
+        self.stop.store(true, std::sync::atomic::Ordering::SeqCst);
+        if let Some(worker) = self.worker.take() {
+            let _ = worker.join();
+        }
+    }
+}
+
+/// PI-05: with full (fake) cloud credentials and every HTTP(S) request routed
+/// to a local counter, the refusal makes no remote request at all; the
+/// control run with an allowed kind shows the counter does see the first
+/// D1 request, so the zero is meaningful.
+#[test]
+fn unsupported_capture_kind_makes_no_remote_request() {
+    let counter = ConnectionCounter::start();
+    let env = [
+        ("LIBRA_D1_ACCOUNT_ID", "pi05-account"),
+        ("LIBRA_D1_API_TOKEN", "pi05-token"),
+        ("LIBRA_D1_DATABASE_ID", "pi05-database"),
+        ("LIBRA_STORAGE_ENDPOINT", counter.url.as_str()),
+        ("LIBRA_STORAGE_ALLOW_HTTP", "true"),
+        ("LIBRA_STORAGE_BUCKET", "pi05-bucket"),
+        ("LIBRA_STORAGE_ACCESS_KEY", "pi05-access"),
+        ("LIBRA_STORAGE_SECRET_KEY", "pi05-secret"),
+        ("HTTPS_PROXY", counter.url.as_str()),
+        ("HTTP_PROXY", counter.url.as_str()),
+        ("ALL_PROXY", counter.url.as_str()),
+    ];
+
+    let refused = tempdir().unwrap();
+    init_repo_via_cli(refused.path());
+    plant_unsupported_capture_kind(refused.path());
+    for args in [&["cloud", "sync"][..], &["cloud", "sync", "--force"][..]] {
+        let output = run_libra_command_with_env(args, refused.path(), &env);
+        assert_unsupported_capture_kind_refused(&output);
+    }
+    assert_eq!(
+        counter.connections(),
+        0,
+        "the refusal must precede every remote request"
+    );
+
+    let allowed = tempdir().unwrap();
+    init_repo_via_cli(allowed.path());
+    plant_capture_kinds(allowed.path(), &["claude_code"]);
+    let control = run_libra_command_with_env(&["cloud", "sync"], allowed.path(), &env);
+    assert!(
+        !control.status.success(),
+        "the control run cannot succeed against the counter"
+    );
+    assert!(
+        counter.connections() > 0,
+        "control run made no request through the counter: stderr={}",
+        String::from_utf8_lossy(&control.stderr)
     );
 }
 

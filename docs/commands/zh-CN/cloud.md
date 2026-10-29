@@ -29,7 +29,7 @@ libra cloud status [--verbose]
 
 ### 对象格式（B3-09 / B3-14）
 
-`cloud sync` 在凭据、D1 或 R2 之前读取本地 `agent_session.agent_kind`。不在当前采集允许名单里的种类（`claude_code`、`cursor`、`codex`、`gemini`、`opencode`、`copilot`、`factory_ai`、`grok`），包括 `hermes`，会以 `LBR-CONFLICT-002`（退出码 128）停止。`--force`、`--json` 和 `--progress=json` 都不能绕过，也不会打印同步成功。允许的种类仍走原来的同步顺序。
+`cloud sync` 在凭据、D1 或 R2 之前读取本地 `agent_session.agent_kind`。不在当前采集允许名单里的种类（`claude_code`、`cursor`、`codex`、`gemini`、`opencode`、`copilot`、`factory_ai`、`grok`），包括 `hermes`，会以 `LBR-CONFLICT-002`（退出码 128）停止。`--force`、`--json` 和 `--progress=json` 都不能绕过，也不会打印同步成功。允许的种类仍走原来的同步顺序。允许名单与构建 D1 `agent_kind` CHECK 的是同一份列表，所以一个种类恰在当前 D1 表接受时才放行，云镜像尚未支持的后续种类同样被拒绝。拒绝附带两条提示：仓库中存在这类仅本地的采集会话时，`cloud sync` 会持续拒绝，直到后续 Libra 版本为该种类提供完整云支持；在此之前，请用你自己选择的外部备份工具备份整个仓库（包括 `.libra` 目录）。停用 hook 或删除采集会话都不是受支持的绕过方式。
 
 D1 初始化之后、第一次远端写入之前，`cloud sync` 用只读的 `sqlite_master` 查询读取已有 D1 `agent_session` 与 `agent_capture_session_v2` 表的 `agent_kind` CHECK。D1 表从不重建，所以在支持 `grok` 之前建立的表仍只列原来的七种。即使仓库没有本地采集会话，每次同步也都会探测。已有表不接受某个本地种类，或 CHECK 无法读取（`agent_kind` 约束不是唯一一组带引号种类的 `agent_kind IN (...)` 列表，或 schema 查询失败）时，同步在上传任何内容之前以 `LBR-CONFLICT-002` 停止。提示给出唯一的恢复方式：新建 D1 数据库，把 `LIBRA_D1_DATABASE_ID` 指向它，再运行 `libra cloud sync --force` 全量回填（默认同步只上传尚未标记为已同步的对象）。不存在的表会按当前 DDL 创建，不会被拒绝。
 
@@ -487,6 +487,7 @@ Libra 已经通过 `LIBRA_STORAGE_*` 环境变量为分层对象缓存提供通�
 | `LBR-CLI-003` | D1 中未找到给定名称的仓库 |
 | `LBR-CONFLICT-002` | 项目名已被另一个仓库占用 |
 | `LBR-CONFLICT-002` | sync 期间 agent-capture 镜像失败（`agent capture mirror failed: <reason>`） |
+| `LBR-CONFLICT-002` | 本地采集会话使用了云采集允许名单之外的种类（例如 `hermes`）；在凭据、D1 或 R2 之前拒绝，`--force` 亦然，直到后续版本为该种类提供云支持（期间用外部工具备份整个仓库） |
 | `LBR-CONFLICT-002` | 已有 D1 采集表的 `agent_kind` CHECK 拒绝某个本地种类或无法读取；在任何远端写入之前拒绝（新建 D1 数据库并运行 `libra cloud sync --force`） |
 | `LBR-NET-002` | agent-capture restore 失败（`agent capture restore failed: <reason>`） |
 | `LBR-IO-001` | D1 client 初始化失败 |

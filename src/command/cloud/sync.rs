@@ -1,18 +1,12 @@
 use super::{metadata::sync_metadata, *};
 
-/// Kinds the current D1 capture CHECK accepts. `hermes` and any later tag
-/// stay off this list. `--force` does not widen it. PI-09 still owns the
-/// frozen snapshot; this check only refuses before the first remote call.
-pub(crate) const CLOUD_CAPTURE_KIND_ALLOWLIST: &[&str] = &[
-    "claude_code",
-    "cursor",
-    "codex",
-    "gemini",
-    "opencode",
-    "copilot",
-    "factory_ai",
-    "grok",
-];
+/// Kinds the current D1 capture CHECK accepts: the same list the D1 DDL is
+/// built from, so the fence and the DDL cannot drift (PI-05). `hermes` and
+/// any later tag stay off this list. `--force` does not widen it. PI-09 still
+/// owns the frozen snapshot; this check only refuses before the first remote
+/// call.
+pub(crate) const CLOUD_CAPTURE_KIND_ALLOWLIST: &[&str] =
+    crate::utils::d1_client::D1_CAPTURE_AGENT_KINDS;
 
 async fn unsupported_capture_kinds() -> CloudResult<Vec<String>> {
     Ok(local_capture_kinds()
@@ -146,7 +140,7 @@ pub(crate) async fn run_cloud_sync(
     // Before progress, env validation, D1, or R2. `force` is intentionally unused.
     let rejected = unsupported_capture_kinds().await?;
     if !rejected.is_empty() {
-        return Err(CloudError::PartialTransfer(format!(
+        return Err(CloudError::LocalCaptureKindRefused(format!(
             "cloud sync refused before any remote write: agent_session.agent_kind {} is outside the cloud capture allowlist and was not mirrored",
             rejected.join(", ")
         )));

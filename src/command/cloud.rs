@@ -695,6 +695,10 @@ pub(crate) enum CloudError {
     /// local capture rows use, or cannot be read (PI-18). Raised before any
     /// remote write; maps to `LBR-CONFLICT-002` with the backfill hint.
     RemoteCaptureKindRefused(String),
+    /// A local capture session uses a kind outside the cloud capture
+    /// allowlist (PI-05). Raised before credentials, D1 or R2; maps to
+    /// `LBR-CONFLICT-002` with the local-only capture hints.
+    LocalCaptureKindRefused(String),
     /// Anything else — kept as the original detail string.
     Generic(String),
 }
@@ -702,6 +706,15 @@ pub(crate) enum CloudError {
 /// Recovery for [`CloudError::RemoteCaptureKindRefused`]. Default sync only
 /// uploads rows with `is_synced = 0`, so a new database needs `--force`.
 pub(super) const REMOTE_CAPTURE_KIND_RECOVERY_HINT: &str = "create a new D1 database, point LIBRA_D1_DATABASE_ID at it, and run `libra cloud sync --force` to backfill it completely";
+
+/// First hint for [`CloudError::LocalCaptureKindRefused`]: the refusal
+/// lasts while local-only capture exists, until cloud support for that kind
+/// ships (plan-20260911 DEFER-PI-08). It never suggests deleting sessions.
+pub(super) const LOCAL_CAPTURE_KIND_REFUSAL_HINT: &str = "while this repository holds local-only capture sessions of a kind the cloud mirror does not support, `libra cloud sync` keeps refusing until a later Libra release adds complete cloud support for that kind; `--force` does not bypass it";
+
+/// Second hint for [`CloudError::LocalCaptureKindRefused`]: the interim
+/// backup path.
+pub(super) const LOCAL_CAPTURE_KIND_BACKUP_HINT: &str = "until then, back up the whole repository, including its `.libra` directory, with an external backup tool of your choice";
 
 type CloudResult<T> = std::result::Result<T, CloudError>;
 
@@ -810,6 +823,7 @@ impl fmt::Display for CloudError {
             | CloudError::R2(detail)
             | CloudError::AmbiguousObjectFormat(detail)
             | CloudError::RemoteCaptureKindRefused(detail)
+            | CloudError::LocalCaptureKindRefused(detail)
             | CloudError::Generic(detail) => write!(f, "{detail}"),
         }
     }
@@ -857,6 +871,10 @@ impl CloudError {
             CloudError::RemoteCaptureKindRefused(detail) => CliError::conflict(detail)
                 .with_stable_code(StableErrorCode::ConflictOperationBlocked)
                 .with_hint(REMOTE_CAPTURE_KIND_RECOVERY_HINT),
+            CloudError::LocalCaptureKindRefused(detail) => CliError::conflict(detail)
+                .with_stable_code(StableErrorCode::ConflictOperationBlocked)
+                .with_hint(LOCAL_CAPTURE_KIND_REFUSAL_HINT)
+                .with_hint(LOCAL_CAPTURE_KIND_BACKUP_HINT),
             CloudError::Generic(detail) => CliError::fatal(format!("{operation} failed: {detail}")),
         }
     }
@@ -3168,6 +3186,32 @@ mod tests {
         assert_eq!(hints, [REMOTE_CAPTURE_KIND_RECOVERY_HINT]);
         assert!(REMOTE_CAPTURE_KIND_RECOVERY_HINT.contains("new D1 database"));
         assert!(REMOTE_CAPTURE_KIND_RECOVERY_HINT.contains("`libra cloud sync --force`"));
+    }
+
+    #[test]
+    fn local_capture_kind_refusal_is_conflict_with_two_hints() {
+        let error =
+            CloudError::LocalCaptureKindRefused("refused".to_string()).into_cli_error("sync");
+        assert_eq!(
+            error.stable_code(),
+            StableErrorCode::ConflictOperationBlocked
+        );
+        let hints: Vec<&str> = error.hints().iter().map(|hint| hint.as_str()).collect();
+        assert_eq!(
+            hints,
+            [
+                LOCAL_CAPTURE_KIND_REFUSAL_HINT,
+                LOCAL_CAPTURE_KIND_BACKUP_HINT
+            ]
+        );
+        assert!(LOCAL_CAPTURE_KIND_REFUSAL_HINT.contains("`--force` does not bypass it"));
+        for forbidden in ["delete", "drop", "clear"] {
+            assert!(
+                !LOCAL_CAPTURE_KIND_REFUSAL_HINT.contains(forbidden)
+                    && !LOCAL_CAPTURE_KIND_BACKUP_HINT.contains(forbidden),
+                "the hints must not suggest removing capture data ({forbidden})"
+            );
+        }
     }
 
     #[tokio::test]

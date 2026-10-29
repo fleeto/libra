@@ -256,6 +256,90 @@ pub struct D1Error {
     pub message: String,
 }
 
+/// Kinds today's D1 capture tables accept in their `agent_kind` CHECK. The
+/// `cloud sync` local allowlist is this same list (PI-05), so the fence and
+/// the DDL cannot drift: GK-01 added `grok`; `hermes` and any later kind stay
+/// off until a cloud plan adds them.
+pub const D1_CAPTURE_AGENT_KINDS: &[&str] = &[
+    "claude_code",
+    "cursor",
+    "codex",
+    "gemini",
+    "opencode",
+    "copilot",
+    "factory_ai",
+    "grok",
+];
+
+const D1_CAPTURE_AGENT_KINDS_PLACEHOLDER: &str = "__D1_CAPTURE_AGENT_KINDS__";
+
+const AGENT_SESSION_TABLE_TEMPLATE: &str = r#"
+            CREATE TABLE IF NOT EXISTS agent_session (
+                session_id TEXT NOT NULL,
+                repo_id TEXT NOT NULL,
+                agent_kind TEXT NOT NULL CHECK(agent_kind IN (__D1_CAPTURE_AGENT_KINDS__)),
+                provider_session_id TEXT NOT NULL,
+                state TEXT NOT NULL,
+                working_dir TEXT NOT NULL,
+                worktree_id TEXT,
+                parent_commit TEXT,
+                parent_session_id TEXT,
+                metadata_json TEXT NOT NULL DEFAULT '{}',
+                redaction_report TEXT NOT NULL DEFAULT '{}',
+                started_at INTEGER NOT NULL,
+                last_event_at INTEGER NOT NULL,
+                stopped_at INTEGER,
+                schema_version INTEGER NOT NULL DEFAULT 1,
+                sync_revision INTEGER NOT NULL DEFAULT 1,
+                synced_at INTEGER NOT NULL,
+                PRIMARY KEY (repo_id, session_id)
+            )
+        "#;
+
+const AGENT_CAPTURE_SESSION_V2_TABLE_TEMPLATE: &str = r#"
+            CREATE TABLE IF NOT EXISTS agent_capture_session_v2 (
+                session_id TEXT NOT NULL,
+                repo_id TEXT NOT NULL,
+                agent_kind TEXT NOT NULL CHECK(agent_kind IN (__D1_CAPTURE_AGENT_KINDS__)),
+                provider_session_id TEXT NOT NULL,
+                state TEXT NOT NULL,
+                working_dir TEXT NOT NULL,
+                worktree_id TEXT,
+                parent_commit TEXT,
+                parent_session_id TEXT,
+                metadata_json TEXT NOT NULL DEFAULT '{}',
+                redaction_report TEXT NOT NULL DEFAULT '{}',
+                started_at INTEGER NOT NULL,
+                last_event_at INTEGER NOT NULL,
+                stopped_at INTEGER,
+                schema_version INTEGER NOT NULL DEFAULT 1,
+                sync_revision INTEGER NOT NULL,
+                synced_at INTEGER NOT NULL,
+                PRIMARY KEY (repo_id, session_id)
+            )
+            "#;
+
+fn with_capture_kind_check(template: &str) -> String {
+    let kinds = D1_CAPTURE_AGENT_KINDS
+        .iter()
+        .map(|kind| format!("'{kind}'"))
+        .collect::<Vec<_>>()
+        .join(", ");
+    template.replace(D1_CAPTURE_AGENT_KINDS_PLACEHOLDER, &kinds)
+}
+
+/// The `CREATE TABLE IF NOT EXISTS agent_session` statement sent to D1, with
+/// the `agent_kind` CHECK built from [`D1_CAPTURE_AGENT_KINDS`].
+pub fn agent_session_table_ddl() -> String {
+    with_capture_kind_check(AGENT_SESSION_TABLE_TEMPLATE)
+}
+
+/// The `CREATE TABLE IF NOT EXISTS agent_capture_session_v2` statement sent
+/// to D1, with the `agent_kind` CHECK built from [`D1_CAPTURE_AGENT_KINDS`].
+pub fn agent_capture_session_v2_table_ddl() -> String {
+    with_capture_kind_check(AGENT_CAPTURE_SESSION_V2_TABLE_TEMPLATE)
+}
+
 /// Remote capture tables whose `agent_kind` CHECK `cloud sync` probes before
 /// its first remote write (PI-18).
 pub const REMOTE_CAPTURE_KIND_TABLES: &[&str] = &["agent_session", "agent_capture_session_v2"];
@@ -1517,32 +1601,7 @@ impl D1Client {
     ///
     /// Idempotent — safe to call on every backup.
     pub async fn ensure_agent_session_table(&self) -> Result<(), D1Error> {
-        let sql = r#"
-            CREATE TABLE IF NOT EXISTS agent_session (
-                session_id TEXT NOT NULL,
-                repo_id TEXT NOT NULL,
-                agent_kind TEXT NOT NULL CHECK(agent_kind IN (
-                    'claude_code', 'cursor', 'codex', 'gemini',
-                    'opencode', 'copilot', 'factory_ai', 'grok'
-                )),
-                provider_session_id TEXT NOT NULL,
-                state TEXT NOT NULL,
-                working_dir TEXT NOT NULL,
-                worktree_id TEXT,
-                parent_commit TEXT,
-                parent_session_id TEXT,
-                metadata_json TEXT NOT NULL DEFAULT '{}',
-                redaction_report TEXT NOT NULL DEFAULT '{}',
-                started_at INTEGER NOT NULL,
-                last_event_at INTEGER NOT NULL,
-                stopped_at INTEGER,
-                schema_version INTEGER NOT NULL DEFAULT 1,
-                sync_revision INTEGER NOT NULL DEFAULT 1,
-                synced_at INTEGER NOT NULL,
-                PRIMARY KEY (repo_id, session_id)
-            )
-        "#;
-        self.execute(sql, None).await?;
+        self.execute(&agent_session_table_ddl(), None).await?;
         self.ensure_remote_column(
             "agent_session",
             "sync_revision",
@@ -1560,35 +1619,8 @@ impl D1Client {
             None,
         )
         .await?;
-        self.execute(
-            r#"
-            CREATE TABLE IF NOT EXISTS agent_capture_session_v2 (
-                session_id TEXT NOT NULL,
-                repo_id TEXT NOT NULL,
-                agent_kind TEXT NOT NULL CHECK(agent_kind IN (
-                    'claude_code', 'cursor', 'codex', 'gemini',
-                    'opencode', 'copilot', 'factory_ai', 'grok'
-                )),
-                provider_session_id TEXT NOT NULL,
-                state TEXT NOT NULL,
-                working_dir TEXT NOT NULL,
-                worktree_id TEXT,
-                parent_commit TEXT,
-                parent_session_id TEXT,
-                metadata_json TEXT NOT NULL DEFAULT '{}',
-                redaction_report TEXT NOT NULL DEFAULT '{}',
-                started_at INTEGER NOT NULL,
-                last_event_at INTEGER NOT NULL,
-                stopped_at INTEGER,
-                schema_version INTEGER NOT NULL DEFAULT 1,
-                sync_revision INTEGER NOT NULL,
-                synced_at INTEGER NOT NULL,
-                PRIMARY KEY (repo_id, session_id)
-            )
-            "#,
-            None,
-        )
-        .await?;
+        self.execute(&agent_capture_session_v2_table_ddl(), None)
+            .await?;
         self.execute(
             "CREATE INDEX IF NOT EXISTS idx_d1_agent_capture_session_v2_repo \
              ON agent_capture_session_v2 (repo_id, agent_kind)",

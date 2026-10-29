@@ -10,7 +10,7 @@ The internal reader in `builtin/hermes.rs` parses the official JSONL session exp
 
 ## Hermes identity (HM-01)
 
-Hermes is registered and unsupported. Migration `2026103001` extends the repository `agent_session.agent_kind` CHECK with `hermes` on a dedicated connection and keeps the previous eight values, including `grok` and `opencode`. `pi` is not added. The stub disables capture (`read_transcript` errors), hook install, and review/investigate launch. Global, system, and derived databases do not receive this receipt. Down refuses while a `hermes` row exists and keeps that row. `cloud sync` still refuses the kind before any remote write.
+Hermes is registered and unsupported. Migration `2026103001` extends the repository `agent_session.agent_kind` CHECK with `hermes` on a dedicated connection and keeps the previous eight values, including `grok` and `opencode`. `pi` is not added. The stub disables capture (`read_transcript` errors), hook install, and review/investigate launch. Global, system, and derived databases do not receive this receipt. Down refuses while a `hermes` row exists and keeps that row. `cloud sync` still refuses the kind before any remote write: `CloudError::LocalCaptureKindRefused` (`LBR-CONFLICT-002`) carries `LOCAL_CAPTURE_KIND_REFUSAL_HINT` and `LOCAL_CAPTURE_KIND_BACKUP_HINT` (plan-20260911 PI-05, ADR-PI-RECOVERY; full Pi cloud mirror stays DEFER-PI-08).
 
 ## Claude Code hook registry (CC-01)
 

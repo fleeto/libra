@@ -54,7 +54,18 @@ Nowledge 定向检索已尝试，服务连接被环境阻止；本计划依据�
 - implementation 默认 independent，Version increment=patch；Release write set=权威版本面集合（`compat_version_surface_sync`）、工具链更新的 Cargo.lock、artifact。实际提交/推送/Release 需后续授权，本次建 Issue 不包含这些动作。
 - implementation 默认 Rollback mode=immutable-release：未发布可回退本卡实现，已发布用修复版恢复；无 schema 迁移，不自动重写历史 index。下载旧版本无法撤销已写出的 stat，必要时安全刷新，不能保留可疑 clean 缓存。
 - 默认 Docs and compatibility impact=N/A 仅适用于输出与错误完全不变的内部优化；公开行为变化卡须同卡双语与网站文档。网站路径为候选，DEP-SP-DOCS 核验后才允许开工；遵循用户 standing instruction 直接 cf，通过 Libra 提交推送，不能另建网站分支/PR/worktree。
-- 无 EX 豁免，无家族合并发布；C/D coverage=self（实现卡），audit 覆盖来源为下列具体实现卡。正式 review 与 C/D 门未执行，不能把本次自查写成批准开工。
+- 无家族合并发布；C/D coverage=self（实现卡），SP-09 继承下列具体实现卡。SP-00 按用户批准的 EX-SP-00-AUDIT-01 独立文档验收（见下）；该例外不免除评审、fmt、Clippy 或本卡 PR CI，也不授权其它卡开工。
+
+### SP-00 独立文档验收决策（EX-SP-00-AUDIT-01）
+
+2026-10-29，用户接受“取消 SP-00 对 SP-01 发布验收的继承，保留 SP-01 对基线的执行依赖”的建议，并明确授权修改、提交和推送。本决策仅针对 SP-00，作为模板 ER-04 对 no-release 卡必须继承发布点 C/D 的具名例外；不修改模板，不扩展至 SP-09 或任何实现卡。
+
+- SP-00 的产物仅为本计划中的基线协议、测量记录和审计修正，以及状态索引；独立验证这些产物不需要 SP-01 的生产修复或二进制发布。继续保留 no-code / no-config、no-release、版本递增 N/A，不 bump、不安装、不创建 tag/Release。
+- 本卡自行承担文档验收：四项 AC、两项 Verification、文档结构/内部链接与变更范围检查、Codex review PASS、最终文档状态下的 `cargo +nightly fmt --all --check` 和 `cargo clippy --all-targets --all-features -- -D warnings`；不以本决策免除任何现有文档判据或推送前静态门。
+- 本卡 D 门为 PR #652 最终 head 上 `.github/workflows/base.yml`（Check, Build and Test）及 `.github/workflows/codeql.yml`（CodeQL Advanced）的全部适用检查成功；`neutral` 的汇总检查不替代底层 CodeQL 成功。随后合并 PR，核验文档进入上游 main，才可登记 `done / complete` 并关闭 #639。检查未完成时保留 `in-progress / locally-accepted`；失败则修复后重验，不以 mergeable 代替 CI 通过。
+- 本卡不执行 C 组的版本 bump、release build、安装及发布步骤，不继承 SP-01 的全量测试或发布后置门；基准采样不因归属调整而重跑，历史实测与本轮文档核对继续区分。
+- SP-01 的 `Dependencies: SP-00, DEP-SP-DOCS`、实现范围、回归测试、独立 patch 发布及完整 C/D 门保持原样。它消费的是本卡已冻结并通过文档验收的基线；不得再以 SP-01 的未来发布反向阻止本卡收口。
+- 恢复：如撤销本决策，恢复 SP-00 的 `C/D coverage from: SP-01` 及原状态条件；不能回写历史 CI 或发布结果。
 
 ## 实施顺序与发布窗口
 
@@ -68,7 +79,7 @@ Phase 0 基线：SP-00；Phase 1 正确性与 stat：SP-01..03；Phase 2 核心�
 
 | 卡 | 优先级 | 选择 | Issue | Lifecycle / Acceptance |
 |---|---|---|---|---|
-| SP-00 冻结 status 性能基线与修正审计口径 | P1 | 必选验收前置 | [#639](https://github.com/libra-tools/libra/issues/639) | pending / 空 |
+| SP-00 冻结 status 性能基线与修正审计口径 | P1 | 必选验收前置 | [#639](https://github.com/libra-tools/libra/issues/639) | in-progress / locally-accepted |
 | SP-01 status 递归子树加载返回错误而非 panic | P1 | 必选正确性 | [#640](https://github.com/libra-tools/libra/issues/640) | pending / 空 |
 | SP-02 restore 区分 decoded size 与对象加载内存成本 | P1 | 必选正确性 | [#641](https://github.com/libra-tools/libra/issues/641) | pending / 空 |
 | SP-03 materialization 后安全写入真实 index stat | P1 | 本轮核心提速 | [#642](https://github.com/libra-tools/libra/issues/642) | pending / 空 |
@@ -85,7 +96,7 @@ Phase 0 基线：SP-00；Phase 1 正确性与 stat：SP-01..03；Phase 2 核心�
 
 **Task type:** audit
 
-**Lifecycle / Acceptance:** pending / 空
+**Lifecycle / Acceptance:** in-progress / locally-accepted
 
 **Priority / Selection:** P1；必选验收前置
 
@@ -99,23 +110,23 @@ Phase 0 基线：SP-00；Phase 1 正确性与 stat：SP-01..03；Phase 2 核心�
 
 **Acceptance criteria:**
 
-- [ ] 在本计划记录实际基线 revision、release binary 标识、OS、fixture 形状与样本协议。
+- [x] 在本计划记录实际基线源码修订、Git/Libra 二进制标识、操作系统、测试数据形状与样本协议。
 
-- [ ] 记录默认/刷新 index × normal/no-untracked × 默认 rename/no-renames × porcelain v1/v2 的命令矩阵。
+- [x] 记录默认/刷新索引 × 显示/不显示未跟踪文件 × 默认重命名/关闭重命名 × 机器可读 v1/v2 的 Git/Libra 对照命令矩阵。
 
-- [ ] 逐项修正审计中的 242/206 次发现混用、线程切换下界与零风险预热结论。
+- [x] 逐项修正审计中的 242/206 次发现混用、线程切换下界与零风险预热结论。
 
-- [ ] 记录每个已采样格子的输出、退出状态与 index 不变量；缺失格子明确标未测。
+- [x] 记录每个已采样格子的输出、退出状态与索引不变量；缺失格子明确标未测。
 
 
 **Verification:**
 
-- [ ] 人工核对：本计划基线表的每格均有准确命令、revision、样本数及 measured/not-run 状态。
+- [x] 人工核对：本计划基线表的每格均有准确命令、源码修订、样本数及 measured/not-run 状态。
 
-- [ ] 人工核对：两份报告的历史统计与本轮实测分栏，未访问的外部归档不标独立复算。
+- [x] 人工核对：两份报告的历史统计与本轮实测分栏，未访问的外部归档不标独立复算。
 
 
-**Full-suite trigger:** N/A：audit，不执行发布 C 组
+**Full-suite trigger:** N/A：纯文档 audit；按 EX-SP-00-AUDIT-01 独立验收，不执行版本/二进制发布 C 组
 
 **Dependencies:** DEP-SP-DATA
 
@@ -139,11 +150,11 @@ Phase 0 基线：SP-00；Phase 1 正确性与 stat：SP-01..03；Phase 2 核心�
 
 **Version increment:** N/A
 
-**Release boundary:** no-release；规划记录随实现交付进入仓库
+**Release boundary:** no-release；本卡文档随 PR #652 独立合入上游 main，不等待 SP-01 发版
 
-**C/D coverage from:** SP-01；尚未运行。
+**C/D coverage from:** self（EX-SP-00-AUDIT-01）；自行通过文档、评审、fmt/Clippy 与 PR #652 最终 head 的 base/CodeQL 门，不继承 SP-01 发布。远端检查及合并待完成。
 
-**Granularity:** type=audit; axis=冻结 status 性能基线与修正审计口径; recovery=回退文档; complete=yes; self-contained=yes; AC=4/20; VER=2/20; landing=0; prod-files=0; scope=S; deps=DEP-SP-DATA; writeset=按实施顺序串行; release=no-release; split-from=N/A; exception=N/A
+**Granularity:** type=audit; axis=冻结 status 性能基线与修正审计口径; recovery=回退文档; complete=yes; self-contained=yes; AC=4/20; VER=2/20; landing=0; prod-files=0; scope=S; deps=DEP-SP-DATA; writeset=按实施顺序串行; release=no-release; split-from=N/A; exception=EX-SP-00-AUDIT-01
 
 ### Task SP-01: status 递归子树加载返回错误而非 panic
 
@@ -769,7 +780,7 @@ Phase 0 基线：SP-00；Phase 1 正确性与 stat：SP-01..03；Phase 2 核心�
 
 | 卡 | type | AC | VER | landing / prod-files | scope | writeset | release | exception |
 |---|---|---|---|---|---|---|---|---|
-| SP-00 | audit | 4/20 | 2/20 | 0/0 | S | 按依赖串行 | no-release | none |
+| SP-00 | audit | 4/20 | 2/20 | 0/0 | S | 按依赖串行 | no-release | EX-SP-00-AUDIT-01 |
 | SP-01 | implementation | 4/8 | 2/8 | 3/4 | M | 按依赖串行 | independent | none |
 | SP-02 | implementation | 5/8 | 3/8 | 4/5 | M | 按依赖串行 | independent | none |
 | SP-03 | implementation | 7/8 | 3/8 | 1/2 | M | 按依赖串行 | independent | none |
@@ -796,9 +807,67 @@ Phase 0 基线：SP-00；Phase 1 正确性与 stat：SP-01..03；Phase 2 核心�
 
 ### 基线与实施证据汇总
 
-当前全部 not-run。未运行 cargo、benchmark、fmt/clippy 或全量测试；没有实施 PASS、独立审查 PASS、网站/发布/CI 完成证据。
+实现卡仍全部 not-run；没有实施 PASS、独立审查 PASS、网站/发布/CI 完成证据。SP-00 已执行 release 构建与下述基线采样，`cargo +nightly fmt --all --check` 通过；该历史采样轮未运行 Clippy 和全量测试。Clippy 仍是推送前必跑门；全量测试按 audit 卡的 N/A 触发条件不在本卡执行，当前验收归属按 EX-SP-00-AUDIT-01 调整为本卡独立文档验收；历史登记 SP-01 已被该决策取代。
 
-SP-00 必须在此冻结具体命令和 fixture 构造过程，再开始生产修改。当前仓库 runner 仅直接覆盖 status --short，不能冒称支持全部矩阵；先复用其隔离 fixture 方法，补充精确的一次性临时采样命令写入本节。每格 warmup=5、测量至少20次，前后交错执行，记录 median/p95、退出码及语义断言。热缓存与清缓存分开；清系统缓存需要额外操作授权时标 not-run，不能擅自修改宿主。Linux 历史归档不可用时用当前平台新基线，不能跨平台比较绝对毫秒。
+#### SP-00 冻结协议与环境
+
+DEP-SP-DATA 按用户指定采用公开标准仓库 [`libra-tools/libra@d0a5c28`](https://github.com/libra-tools/libra/commit/d0a5c28a6b236421c14a38339b592fe37137585e)：Git 与 Libra 各自完整克隆并检出该提交，不再使用临时生成 5,000 个文件的测试仓库。未访问历史 Linux 原始归档或工作区外报告，历史数字只保留为引用。基线定义为**同一系统内，指定版本 Git 与当前构建 Libra 在标准仓库的等价状态下直接性能对照**，不是某个操作系统的绝对毫秒数。下表是 macOS 样本；其他系统使用相同协议、指定 Git 版本和当前 Libra 重跑即可验证，不要求持有 Mac，也不跨系统直接比较绝对耗时或倍率。
+
+| 项目 | 冻结值 |
+|---|---|
+| 标准仓库与提交 | `https://github.com/libra-tools/libra.git`；`d0a5c28a6b236421c14a38339b592fe37137585e` |
+| 标准仓库形状 | 2,125 个跟踪文件；两边初始状态干净；另构造 10 个暂存重命名、10 个未暂存修改、100 个未跟踪文件 |
+| Libra 源码修订 | `8abdcf7633f8fef8f6d0994d9f0621bb074de292` |
+| Libra 构建 | `cargo +nightly build --release --locked`；`rustc 1.100.0-nightly (574ff7d98 2026-09-14)` |
+| Libra 发布构建 | `libra 0.30.91`；SHA-256 `72967e40bba1b2d0e8c85d337771509b7ad873a653f5a3d7c89114f8b9b0dc9e` |
+| Git 对照 | `git version 2.56.0`；`/opt/homebrew/bin/git`；SHA-256 `40163333061f7223ecb604ed0f12988cfc8096d57ca8b1db006d410d4aeb700e` |
+| 本次样本系统 | macOS 27.0.1 (26A434)，Darwin 27.0.0 arm64，Apple M1 |
+| 缓存 | 新 CLI 进程、热页面缓存；清系统缓存 not-run（未获额外操作授权） |
+| 插桩工作量 | not-run；本表只含无插桩实际经过时间，不能与历史插桩计数混算 |
+
+仓库 runner 仍只直接覆盖 `status --short`。本卡使用一次性 Python 标准库采样器（非交付产物），实际入口为 `python3 /tmp/libra-sp00-standard-baseline.8HXV64/run-baseline.py`，结果为同目录的 `result.json`；以下命令、路径选择规则与断言是重放依据，临时脚本和原始结果不是交付物。
+
+所有子进程使用临时 `HOME`、`USERPROFILE`、`XDG_CONFIG_HOME`、`LIBRA_HOME`、`LIBRA_CONFIG_GLOBAL_DB`、`LIBRA_CONFIG_SYSTEM_DB` 和空 `GIT_CONFIG_GLOBAL`，并设置 `GIT_CONFIG_NOSYSTEM=1`、`GIT_OPTIONAL_LOCKS=0`、`NO_COLOR=1`、`LC_ALL=C`，不读取真实全局配置。`GIT_OPTIONAL_LOCKS=0` 防止 Git status 的可选索引写回，使两边遵守相同的只读索引不变量。克隆、检出、测试状态构造与刷新均不计时，Git/Libra 分别执行以下等价步骤：
+
+1. Git 执行 `git clone --quiet https://github.com/libra-tools/libra.git <repo>` 和 `git checkout --quiet --detach d0a5c28a6b236421c14a38339b592fe37137585e`；Libra 执行 `libra clone --quiet --no-progress https://github.com/libra-tools/libra.git <repo>` 和 `libra checkout --quiet --detach <同一提交>`。两边 `rev-parse HEAD` 均等于标准提交，初始 `status --porcelain=v1 --untracked-files=normal` 均为空，跟踪路径集合一致。
+2. 逐文件核对克隆结果：2,123 个文件内容及符号链接目标一致。`install.ps1` 与 `template/pre-commit.ps1` 是仅有的两个例外，Git 按 `eol=crlf` 检出 CRLF，Libra 检出 LF；去除 CRLF 中的 CR 后内容一致，且两边初始状态均干净。该实际检出差异予以保留，不改写文件制造逐字节相同。
+3. 按路径字典序取 `src/**/*.rs` 中前 20 个普通非符号链接文件。前 10 个在原目录改名为 `sp00-renamed-<原文件名>`，各自执行 `add -A -- <新旧路径>`，形成 10 个内容不变的暂存重命名；后 10 个各追加 `SP-00 status baseline change\n`，形成 10 个未暂存修改。HEAD 始终保持标准提交。
+4. 在 `sp00-untracked/dir-01/` 至 `sp00-untracked/dir-10/` 各写 10 个文件，共 100 个未跟踪文件。复制整个测试仓库得到默认/已刷新两种状态；仅已刷新副本执行一次对应工具的 `update-index --refresh`。两边均对 10 个修改文件报告 `needs update` 并返回 1，这是预期构造结果，不是 status 样本失败。
+
+矩阵是索引 `{默认, 已刷新}` × 未跟踪文件 `{normal, no}` × 重命名 `{默认, --no-renames}` × 机器可读输出 `{v1, v2}`，共 16 个场景；每个场景分别测量 Git 和 Libra。两边使用相同参数：`--no-pager status --porcelain=v1|v2 --untracked-files=normal|no`，重命名默认格不追加标志，关闭格追加 `--no-renames`。
+
+每个场景和索引状态执行 25 轮，Git/Libra 按 AB/BA 交替顺序运行；每边前 5 次为预热，后 20 次为正式样本。以 `time.perf_counter_ns()` 测量独立进程实际经过时间；中位数为排序后第 10/11 个值的均值，p95 为 nearest-rank（20 个排序样本的第 19 个），另计算 Libra/Git 中位数倍率。每次调用均断言退出码 0、标准错误为空、各工具自身原始标准输出稳定，并比较 `.git/index` 或 `.libra/index` 调用前后 SHA-256。
+
+跨工具语义断言使用排序后的机器可读记录集合：每行作为一条记录，排序后计算 SHA-256，Git/Libra 与两种索引状态必须一致；原始输出哈希仍分别记录，不假定逐字节相同。实测发现 v2 中 Git 将未暂存修改排在重命名前，Libra 顺序相反，记录内容一致，因此采用该规范化规则而不是掩盖排序差异。另断言 normal/no 的未跟踪标记有无，以及默认重命名的重命名记录与 `--no-renames` 的删除/新增记录。下表记录双方原始输出 SHA-256、字节/行数、退出码和索引不变量；预热也计入后三项，但不计入耗时统计。
+
+#### SP-00 基线结果
+
+16/16 个场景均为 measured，Git/Libra 每边各 5 次预热 + 20 次正式样本，无缺失格子；最终完整矩阵共 800 次调用、640 次正式计时，先前采样器断言调试轮不属于样本。Git 与 Libra 测试仓库 HEAD 均为标准提交 `d0a5c28a6b236421c14a38339b592fe37137585e`。耗时单位是 ms；命令列省略两边共同的 `--no-pager status` 前缀。原始输出列依次记录 Git/Libra SHA-256、字节数和行数；退出与索引列均覆盖每边全部 25 次调用。
+
+| 索引 | 未跟踪 | 重命名 | 输出 | 共同命令参数 | 状态 | 每边 n | Git 中位数 / p95 | Libra 中位数 / p95 | L/G 中位数 | 原始输出 SHA-256 G/L / bytes / lines | 退出 G/L | 索引不变 G/L |
+|---|---|---|---|---|---|---|---|---|---|---|---|---|
+| 默认 | no | 默认 | v1 | `--porcelain=v1 --untracked-files=no` | measured | 5+20 | 9.970 / 12.893 | 686.544 / 903.225 | 68.863× | G `d59c81cf692430c79ceba8b5834af4d758cee38089788c678c604f2d13652c57` / L `d59c81cf692430c79ceba8b5834af4d758cee38089788c678c604f2d13652c57` / 1008 / 20 | 0/0（各 25/25） | 25/25（每边各 25） |
+| 默认 | no | 默认 | v2 | `--porcelain=v2 --untracked-files=no` | measured | 5+20 | 9.630 / 11.281 | 761.951 / 807.037 | 79.119× | G `88aed3eb0ca7b1a07f37995b2c5d0c7608d92222480dd44b144ec095546f02e6` / L `d84f73f2d21971c2507c6503dcbb989df6ee58f64cde345edb6e3102f6a7583f` / 3228 / 20 | 0/0（各 25/25） | 25/25（每边各 25） |
+| 默认 | no | no-renames | v1 | `--porcelain=v1 --untracked-files=no --no-renames` | measured | 5+20 | 10.299 / 11.489 | 581.572 / 667.757 | 56.466× | G `d9a0482a655e669a54646e5c88e3f33d3bc238ec4afde579050c5ee5a3b2dd79` / L `d9a0482a655e669a54646e5c88e3f33d3bc238ec4afde579050c5ee5a3b2dd79` / 1008 / 30 | 0/0（各 25/25） | 25/25（每边各 25） |
+| 默认 | no | no-renames | v2 | `--porcelain=v2 --untracked-files=no --no-renames` | measured | 5+20 | 9.712 / 11.677 | 680.091 / 833.644 | 70.029× | G `9fdd114d73b798732dba9cdc02acdab8f0a1589060d3d6231a8d431f5812e7de` / L `9fdd114d73b798732dba9cdc02acdab8f0a1589060d3d6231a8d431f5812e7de` / 4308 / 30 | 0/0（各 25/25） | 25/25（每边各 25） |
+| 默认 | normal | 默认 | v1 | `--porcelain=v1 --untracked-files=normal` | measured | 5+20 | 15.777 / 20.037 | 915.928 / 1029.299 | 58.055× | G `168ee3f173d5a9da0501cae47e23edc35272e25eee6fe0b2815926e338da8990` / L `168ee3f173d5a9da0501cae47e23edc35272e25eee6fe0b2815926e338da8990` / 1027 / 21 | 0/0（各 25/25） | 25/25（每边各 25） |
+| 默认 | normal | 默认 | v2 | `--porcelain=v2 --untracked-files=normal` | measured | 5+20 | 15.896 / 20.614 | 1022.059 / 1205.166 | 64.296× | G `223d1ec03f76660de9413da87f81ef0968cded7430251896e4a1f0356583a078` / L `d3132dbaa1f635c41561c34c8ce97e689e8582d35600df329e95460d61193f6d` / 3246 / 21 | 0/0（各 25/25） | 25/25（每边各 25） |
+| 默认 | normal | no-renames | v1 | `--porcelain=v1 --untracked-files=normal --no-renames` | measured | 5+20 | 15.699 / 22.133 | 818.139 / 1027.019 | 52.113× | G `74beebb3d6cc22253e1cf47d5a4379bc25aab5bd0e99227732365302dde19435` / L `74beebb3d6cc22253e1cf47d5a4379bc25aab5bd0e99227732365302dde19435` / 1027 / 31 | 0/0（各 25/25） | 25/25（每边各 25） |
+| 默认 | normal | no-renames | v2 | `--porcelain=v2 --untracked-files=normal --no-renames` | measured | 5+20 | 20.144 / 23.943 | 1205.840 / 1649.260 | 59.862× | G `c810acd9dfed468e286f4c1a91fcfd35c7f44eb7d4cc92a8dd5532bccc2e2a6b` / L `c810acd9dfed468e286f4c1a91fcfd35c7f44eb7d4cc92a8dd5532bccc2e2a6b` / 4326 / 31 | 0/0（各 25/25） | 25/25（每边各 25） |
+| 已刷新 | no | 默认 | v1 | `--porcelain=v1 --untracked-files=no` | measured | 5+20 | 11.773 / 16.355 | 500.876 / 754.638 | 42.543× | G `d59c81cf692430c79ceba8b5834af4d758cee38089788c678c604f2d13652c57` / L `d59c81cf692430c79ceba8b5834af4d758cee38089788c678c604f2d13652c57` / 1008 / 20 | 0/0（各 25/25） | 25/25（每边各 25） |
+| 已刷新 | no | 默认 | v2 | `--porcelain=v2 --untracked-files=no` | measured | 5+20 | 11.442 / 20.081 | 608.665 / 809.822 | 53.196× | G `88aed3eb0ca7b1a07f37995b2c5d0c7608d92222480dd44b144ec095546f02e6` / L `d84f73f2d21971c2507c6503dcbb989df6ee58f64cde345edb6e3102f6a7583f` / 3228 / 20 | 0/0（各 25/25） | 25/25（每边各 25） |
+| 已刷新 | no | no-renames | v1 | `--porcelain=v1 --untracked-files=no --no-renames` | measured | 5+20 | 10.848 / 13.265 | 332.737 / 416.497 | 30.672× | G `d9a0482a655e669a54646e5c88e3f33d3bc238ec4afde579050c5ee5a3b2dd79` / L `d9a0482a655e669a54646e5c88e3f33d3bc238ec4afde579050c5ee5a3b2dd79` / 1008 / 30 | 0/0（各 25/25） | 25/25（每边各 25） |
+| 已刷新 | no | no-renames | v2 | `--porcelain=v2 --untracked-files=no --no-renames` | measured | 5+20 | 11.325 / 14.416 | 467.609 / 554.719 | 41.291× | G `9fdd114d73b798732dba9cdc02acdab8f0a1589060d3d6231a8d431f5812e7de` / L `9fdd114d73b798732dba9cdc02acdab8f0a1589060d3d6231a8d431f5812e7de` / 4308 / 30 | 0/0（各 25/25） | 25/25（每边各 25） |
+| 已刷新 | normal | 默认 | v1 | `--porcelain=v1 --untracked-files=normal` | measured | 5+20 | 16.611 / 22.278 | 694.357 / 1073.463 | 41.802× | G `168ee3f173d5a9da0501cae47e23edc35272e25eee6fe0b2815926e338da8990` / L `168ee3f173d5a9da0501cae47e23edc35272e25eee6fe0b2815926e338da8990` / 1027 / 21 | 0/0（各 25/25） | 25/25（每边各 25） |
+| 已刷新 | normal | 默认 | v2 | `--porcelain=v2 --untracked-files=normal` | measured | 5+20 | 18.886 / 26.372 | 897.033 / 1294.295 | 47.498× | G `223d1ec03f76660de9413da87f81ef0968cded7430251896e4a1f0356583a078` / L `d3132dbaa1f635c41561c34c8ce97e689e8582d35600df329e95460d61193f6d` / 3246 / 21 | 0/0（各 25/25） | 25/25（每边各 25） |
+| 已刷新 | normal | no-renames | v1 | `--porcelain=v1 --untracked-files=normal --no-renames` | measured | 5+20 | 18.447 / 28.521 | 647.583 / 975.519 | 35.105× | G `74beebb3d6cc22253e1cf47d5a4379bc25aab5bd0e99227732365302dde19435` / L `74beebb3d6cc22253e1cf47d5a4379bc25aab5bd0e99227732365302dde19435` / 1027 / 31 | 0/0（各 25/25） | 25/25（每边各 25） |
+| 已刷新 | normal | no-renames | v2 | `--porcelain=v2 --untracked-files=normal --no-renames` | measured | 5+20 | 19.897 / 32.019 | 799.181 / 1038.466 | 40.166× | G `c810acd9dfed468e286f4c1a91fcfd35c7f44eb7d4cc92a8dd5532bccc2e2a6b` / L `c810acd9dfed468e286f4c1a91fcfd35c7f44eb7d4cc92a8dd5532bccc2e2a6b` / 4326 / 31 | 0/0（各 25/25） | 25/25（每边各 25） |
+
+最终完整矩阵全部 800 次 status 调用的标准错误均为空；16 组 Git/Libra/索引状态的规范化记录集合一致，各工具原始输出稳定，未跟踪与重命名语义断言通过。采样结束后的索引 SHA-256 为：Git 默认 `64ddde456b6812b4c6442fc4980bbce28434b6df54b443531ca2b25bf5e13da9`、Git 已刷新 `eb75558abcd6e37822a75a38e0d1c77402ba14d673bfd7e8b494df07300bdc6f`、Libra 默认 `4c0d8ce6c8c3c2e694a84f0c033c4b9e8795b8208e2059228eea588496d44634`、Libra 已刷新 `1c31c085e4c09ff31ba902c174eda230d00d664f1ee7cef1f38898f5fd45a624`。两边预备刷新均返回预期 1，status 样本自身全部返回 0。当前样本的 Libra/Git 中位数倍率为 30.672–79.119×；不显示未跟踪文件时为 30.672–79.119×，显示时为 35.105–64.296×。该表以 Git 2.56.0 为外部参照，不设未经决策的追平目标，也不把单轮倍率或两种索引状态的差值解释为后续优化收益。
+
+审计口径复核：9,647 次 readlink 属于 242 次总发现，206 次对象读取只是其中的另一归因子集，不能把全部 readlink 算到对象读取；线程池提交次数不能推出固定线程切换下界；`ignore_sources_for_target` 从 target 父目录开始，根预热既未覆盖目录自身 ignore 文件，也不能单独证明 tracked 短路等价，因此“零风险预热”结论不成立。出队 marker probe 仍承担防目录替换的重新验证，本卡不建议删除。
+
+历史报告中的约 733→491 ms、关闭 untracked 约省 200 ms、约 12 万次 idx read 及 242/206 次计数均为未访问原始归档的历史引用，本轮未独立复算；本轮实测仅以上述同机 Git/Libra 16 场景无插桩对照为准。冷缓存、其他 OS 和插桩工作量仍为 not-run；其他系统可按同一协议产生自己的 Git/Libra 对照，不需要复现这份 macOS 绝对数据。
 
 ### 里程碑、风险与恢复
 
@@ -828,3 +897,13 @@ SP-00 必须在此冻结具体命令和 fixture 构造过程，再开始生产�
 | 2026-10-28 01:56:39 UTC | 依据两报告及用户决策建立 SP-00..09；CE_VALID 排除，SP-04 可选，缓存/marker/IPC 延后 | pending；无实施 |
 
 | 2026-10-28 02:18:21 UTC | 用户授权提交并推送两份计划文档；原报告由用户移出工作区。文档路径/任务依赖 DAG 自查通过，`cargo +nightly fmt --all --check` 通过；Clippy 在依赖获取前被 Cargo 缓存写权限阻塞，提升权限两次自动审核超时，未完成代码检查；nextest 未启动 | 仅文档交付，不表示实现卡或 C/D 验收完成 |
+
+| 2026-10-28 09:42:48 UTC | SP-00 在 `codex/SP-00` 冻结 macOS 新基线；16/16 格、400 次调用与 320 次正式样本完成，输出/退出/index 断言全过，审计口径与历史引用边界已复核 | 当时曾标本地 done / complete；后续被 Git 直接对照方案取代 |
+
+| 2026-10-28 10:19:45 UTC | 用户要求以指定 Git 与当前 Libra 直接对照；SP-00 重开并完成 16 场景、800 次调用与 640 次正式计时，双方语义、退出与索引断言全过，v2 排序差异以规范化记录集合处理 | SP-00 本地 done / complete；未提交、未推送，Issue #639 保持 open |
+
+| 2026-10-28 12:30:24 UTC | 用户指定 `libra-tools/libra@d0a5c28a6b236421c14a38339b592fe37137585e` 为标准仓库；Git/Libra 分别完整克隆并检出该提交，在 2,125 个跟踪文件的真实工作区上重跑 16 场景，最终完整矩阵 800 次调用、640 次正式计时及语义/退出/索引断言全过；两个 PowerShell 文件的 CRLF/LF 检出差异已披露，旧合成仓库数据仅保留为历史 | SP-00 本地 done / complete；未提交、未推送，Issue #639 保持 open |
+
+| 2026-10-29 | #639 收口复核：在 `codex/SP-00` 以未提交合并方式合入 main `1e5310c24ef4eaa07575256482490705181c360a`（含 PR #654），保留其全部生产/测试修复；`plan-status.md` 冲突保留本卡基线行及 main 其它最新条目。16 格唯一组合、800/640 样本数及展示精度下倍率一致性检查通过；历史采样原件未读取、基准未重跑，原采样结果按 PR #652 记录引用，非本轮独立实测。修正“audit 可免 Clippy”表述及过早 complete：本卡为 in-progress / locally-accepted，SP-01 的 C/D 覆盖仍待；本轮 fmt 与合并后 `cargo clippy --all-targets --all-features --offline -- -D warnings` 均 exit 0（Clippy 58.85s）；依赖 `block 0.1.6` 的 future-incompat 提示保留，不称零警告。首轮在合并完成前读到旧源码的 Clippy exit 101，仅作失败历史，不用于判断 #654；本轮未启动 nextest。 | PR #652 已提交/推送、仍 open；本轮修复尚未提交/推送，Issue 未关闭；不发布版本、不扩大到 SP-01 |
+
+| 2026-10-29 | 用户批准 EX-SP-00-AUDIT-01：SP-00 取消继承 SP-01 发布验收，改为自行完成文档/评审/静态门及 PR #652 最终 head 的 CI；保留 SP-01 对 SP-00 的执行依赖及其原有 C/D。历史反向继承记录保留为当时事实，以本决策为现行口径。 | Codex 本轮文档复核 PASS（范围、依赖方向、现行/历史分离及验收条件一致）；SP-01 卡逐字未改、4 AC/2 VER 保留、workflow 与变更内链接目标及冲突标记检查通过。fmt 与严格 Clippy（offline，1.88s）均 exit 0，既有 block 0.1.6 future-incompat 提示保留；未重跑基准或 nextest。旧索引中的跨仓链接不在本次变更检查范围。待提交/推送；最终 head CI、合并与 Issue 收口仍未完成，保持 in-progress / locally-accepted |

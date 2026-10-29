@@ -1,5 +1,65 @@
 use super::{metadata::sync_metadata, *};
 
+/// Kinds the current D1 capture CHECK accepts. `hermes` and any later tag
+/// stay off this list. `--force` does not widen it. PI-09 still owns the
+/// frozen snapshot; this check only refuses before the first remote call.
+pub(crate) const CLOUD_CAPTURE_KIND_ALLOWLIST: &[&str] = &[
+    "claude_code",
+    "cursor",
+    "codex",
+    "gemini",
+    "opencode",
+    "copilot",
+    "factory_ai",
+    "grok",
+];
+
+async fn unsupported_capture_kinds() -> CloudResult<Vec<String>> {
+    use sea_orm::Statement;
+
+    let db_conn = db::get_db_conn_instance().await;
+    let backend = db_conn.get_database_backend();
+    let present = db_conn
+        .query_one_raw(Statement::from_string(
+            backend,
+            "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'agent_session' LIMIT 1"
+                .to_string(),
+        ))
+        .await
+        .map_err(|error| {
+            CloudError::Generic(format!("read agent_session before cloud sync: {error}"))
+        })?;
+    if present.is_none() {
+        return Ok(Vec::new());
+    }
+    let rows = db_conn
+        .query_all_raw(Statement::from_string(
+            backend,
+            "SELECT DISTINCT agent_kind FROM agent_session ORDER BY agent_kind".to_string(),
+        ))
+        .await
+        .map_err(|error| {
+            CloudError::Generic(format!(
+                "read agent_session.agent_kind before cloud sync: {error}"
+            ))
+        })?;
+    let mut rejected = Vec::new();
+    for row in rows {
+        let kind = row.try_get_by::<String, _>("agent_kind").map_err(|error| {
+            CloudError::Generic(format!(
+                "decode agent_session.agent_kind before cloud sync: {error}"
+            ))
+        })?;
+        if !CLOUD_CAPTURE_KIND_ALLOWLIST
+            .iter()
+            .any(|allowed| *allowed == kind)
+        {
+            rejected.push(kind);
+        }
+    }
+    Ok(rejected)
+}
+
 /// Phase 1 helper extracted from `execute_sync`.
 ///
 /// Runs the full `libra cloud sync` flow without printing directly to
@@ -13,7 +73,9 @@ use super::{metadata::sync_metadata, *};
 /// (env, D1, R2, repo-id, db-query, metadata-sync) short-circuit as
 /// `Err`. Per-object failures are captured in `failed_count` and skip
 /// the metadata + agent_capture phases (preserving the pre-Phase-1
-/// "block follow-up work on object failure" gate).
+/// "block follow-up work on object failure" gate). A kind outside
+/// [`CLOUD_CAPTURE_KIND_ALLOWLIST`] returns before progress or any
+/// remote call.
 pub(crate) async fn run_cloud_sync(
     ctx: CloudSyncContext,
     progress: &dyn CloudSyncProgress,
@@ -22,6 +84,15 @@ pub(crate) async fn run_cloud_sync(
         return Err(CloudError::Generic(
             "Batch size must be at least 1".to_string(),
         ));
+    }
+
+    // Before progress, env validation, D1, or R2. `force` is intentionally unused.
+    let rejected = unsupported_capture_kinds().await?;
+    if !rejected.is_empty() {
+        return Err(CloudError::PartialTransfer(format!(
+            "cloud sync refused before any remote write: agent_session.agent_kind {} is outside the cloud capture allowlist and was not mirrored",
+            rejected.join(", ")
+        )));
     }
 
     progress.on_starting();

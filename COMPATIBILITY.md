@@ -462,6 +462,10 @@ The Codex/Claude Code/OpenCode `ReasoningDecryptor` registry remains `None`.
 `agent checkpoint rewind --apply` restores working-tree files only and never truncates or
 rewrites the agent's own transcript; `agent session show --extract-transcript
 --json` reports only `output_path` and `bytes` (no provider `source_path`);
+`cloud sync` refuses a local `agent_session.agent_kind` outside
+`claude_code`, `cursor`, `codex`, `gemini`, `opencode`, `copilot`,
+`factory_ai`, and `grok` with `LBR-CONFLICT-002` before any remote write.
+`hermes` is outside that list. `--force` does not bypass the refusal.
 and `cloud sync --progress=json` reports agent-capture row failures as one
 fixed `cloud_sync.agent_capture.warning` event without session/checkpoint ids
 or remote D1 text (earlier releases emitted per-id `session_warning` /

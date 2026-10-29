@@ -29,6 +29,8 @@ trailer-free agent links were restored; an empty link table means the evidence
 may be unavailable. A reachable commit trailer can provide a later
 reconstruction clue, subject to repository and session-scope checks.
 
+`cloud sync` reads local `agent_session.agent_kind` before credentials, D1, or R2. A kind outside the current capture allowlist (`claude_code`, `cursor`, `codex`, `gemini`, `opencode`, `copilot`, `factory_ai`, `grok`) — including `hermes` — stops the command with `LBR-CONFLICT-002` (exit 128). `--force`, `--json`, and `--progress=json` do not bypass that refusal, and the command does not print a successful sync. Kinds that are allowed keep the previous sync order.
+
 ### Object format (B3-09 / B3-14)
 
 Backup persists the repository `core.objectformat` into D1 `repositories.object_format` (and tags `object_index` rows). Restore treats that metadata as the only authority for sha1/sha256/blake3 — it never guesses from `o_id` length. Snapshots without metadata that contain any 64-hex object id fail closed with `LBR-REPO-002` (exit 128) and a hint to re-run `libra cloud sync` on the source; all-40-hex catalogs without metadata remain sha1 for legacy compatibility. Clients older than REL-B3-02 must not restore new metadata-bearing backups.

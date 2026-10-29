@@ -31,7 +31,7 @@
 | DEP | direction / 产物与可用性 | Owner / 失败路径 |
 |---|---|---|
 | DEP-HM-01 | incoming upstream：完整 commit、可安装版本、hook observer 与已选 export/session 文件/一致 SQLite shape 由 HM-00 冻结 | HM-00审计者；pin/schema/ID无证则相关parser/installerHOLD，不换main猜测 |
-| DEP-HM-02 | incoming cross-plan：plan-20260911 PI-05/09提供白名单/并发snapshot边界、PI-07提供安全CHECK runner，PI-01提供当时新增kind的role迁移经验；HM不复制fence owner | PI/HM交接者；PI-05未source-qualified前HM-02不写；HM-01保留当时所有kinds，不等整份Pi计划 |
+| DEP-HM-02 | incoming cross-plan：PI-09 仍提供冻结快照；PI-07 提供安全 CHECK runner，PI-01 提供 role 迁移经验。同步前 kind 白名单已由本目标写在 `run_cloud_sync`，因为 PI-05 仍 pending。不改 D1 CHECK，不复制 PI-09 | HM-02 执行者；PI-09 未交付前不宣称对象闭包已冻结 |
 | DEP-HM-03 | incoming local：匹配冻结 release v0.22.5 的 Hermes binary、隔离项目/profile、本机模型 smoke 与 trust 授权 | HM-06执行者；本机 binary 已是该 release。缺隔离 smoke 或 trust 只阻塞 supported 提升，不让计划审计把字段存在写成数据已取得 |
 | DEP-HM-DB | incoming：plan-20260910 MIG-02/03已done/complete；当前role manifest与旧binary oracle | schema owner；role/旧reader无法复验，HM-01 blocked |
 | DEP-HM-LIVE | incoming：HM-00 的已选文件/一致只读 SQLite/export 字段与 session 语义；HM-08 的 reader/必要 trust/lease/deadline 是实施验收，真实数据由 HM-06 另验，不构成自依赖 | HM-00审计者；语义缺证HOLD，HM-08不开工，HM-06不提升supported |
@@ -124,7 +124,7 @@
 | 卡 | 来源/行为 | 验证族 | 文档与恢复 |
 |---|---|---|---|
 | HM-00 | GAP02 source | 版本/callsite/LIVE_SOURCE矩阵 | 本计划，缺证HOLD |
-| HM-02 | GAP03 PI-05 | 已有unsupported_capture_kind_族 | 本计划，无代码 |
+| HM-02 | GAP03 同步前白名单 | `unsupported_capture_kind_` 两条 CLI 测试 | 本计划与 cloud 文档，无版本 |
 | HM-01 | GAP01 schema | hermes_role_及PI-07 child摘要 | agent/compat，前滚 |
 | HM-03 | GAP01 export | hermes_source_ | agent source限制，前滚 |
 | HM-04 | GAP04 import | hermes_normalize_ | agent import/local-only，前滚 |
@@ -342,45 +342,45 @@ HM-03 落地。分类只描述 JSONL 主源，不描述 HTML。
 
 ### Task HM-02: 现有白名单的Hermes拒绝审计
 
-**Task type:** audit
+**Task type:** implementation
 
-**Lifecycle / Acceptance:** blocked / 空
+**Lifecycle / Acceptance:** done / complete
 
-**Description:** 只审计回归PI-05白名单同样拒绝Hermes/future tag；不新增fence或改生产代码。
+**Description:** 交付同步前的 kind 白名单。PI-05 整卡仍 pending，本目标在 `run_cloud_sync` 入口补上同一拒绝，避免 HM-02 永远等一份还没写的围栏。不改 D1 CHECK，不改 restore，不实现 PI-09 的冻结快照。本卡改了生产代码，仍按目标不升版本。
 
-**HM-02 审计记录（2026-10-29）：** 本卡不改生产代码。`cargo test --test command_test cloud_test::unsupported_capture_kind_ -- --test-threads=1` 的结果是 `running 0 tests`，`0 passed`，`4594 filtered out`，进程退出码 0。零匹配不能勾验收。`plan-20260911` 的 PI-05 仍是 `pending / 空`，DEP-HM-02 规定 PI-05 未 source-qualified 前本卡不写围栏。
+**HM-02 执行记录：** `src/command/cloud/sync.rs` 的 `CLOUD_CAPTURE_KIND_ALLOWLIST` 是八个当前 D1 值，不含 `hermes`。`unsupported_capture_kinds` 在 `progress.on_starting`、凭据校验、D1 和 R2 之前读取本地 `agent_session`。名单外的 kind 返回 `CloudError::PartialTransfer`，对外是 `LBR-CONFLICT-002`、退出码 128。`--force` 不参与这个判断。允许的种类仍从原来的 `on_starting` 继续，既有缺凭据测试仍然先看到缺凭据。开工之后才插入的 kind 不在本卡范围内，由 PI-09 的快照承接。
 
-当前拒绝只来自 SQL CHECK，不是 PI-05 的同步前冲突。`src/utils/d1_client.rs:1409` 与 `:1453` 的 `CREATE TABLE IF NOT EXISTS` 允许 `claude_code`、`cursor`、`codex`、`gemini`、`opencode`、`copilot`、`factory_ai`、`grok`，没有 `hermes`。`CREATE TABLE IF NOT EXISTS` 不改已经存在的远端表。`src/command/cloud` 里没有在网络写入前把未知 kind 收成稳定 `LBR-CONFLICT-002` / 退出码 128 的白名单。因此本卡三条验收都不成立：不能证明 Hermes 行对 D1/R2/ensure/sync 零副作用，不能证明冻结对象闭包，也不能证明 force/JSON/progress 绕不过。后继 HM-01 不得开工。
+`cargo test --test command_test cloud_test::unsupported_capture_kind_ -- --test-threads=1`：2 passed，0 failed。`cloud_test::test_cloud_sync_quiet_preflight_failure_has_no_stdout_progress`：1 passed。无版本变化。
 
-Claude Code 只读审查 `VERDICT: PASS`，正文 SHA-256 `97541ee4e0d64f7dd02d90169721ccabbfe92a045930956184857e5c294e4cc8`。P0/P1 为 0。审查确认 CHECK 在 `d1_client.rs:1409` 与 `:1453`，PI-05 仍 pending，本卡不能标 done。无版本变化。
+Claude 审查实现 `VERDICT: PASS`。文档挂错常量之后的复核轮也是 `VERDICT: PASS`，正文 SHA-256 `dcd367d9b81c5c0c316ffaf3cb2d3cc4b20e12fa0fd76a10b12a12888b490766`。无新 P0/P1。
 
 **Current evidence:** `adapter.rs:30` 的 `AgentKind` 无 Hermes；`registry.rs:134` 的 8 行注册表无 hermes；`capture/extraction.rs:438` 对其余 kind 返回 partial；`migration.rs:572` 的 CHECK 扩展只到 grok。v0.22.5 的 callsite 与哈希见「HM-00 版本冻结」。
 
-**Out of scope:** 未登记的公共命令、provider 私有执行器、解密、凭据探测和其它计划的行为重构。审计卡不修改生产代码。
+**Out of scope:** 未登记的公共命令、provider 私有执行器、解密、凭据探测、D1 CHECK、restore，以及 PI-09 的冻结快照。
 
 **Acceptance criteria:**
 
-- [ ] 任意Hermes row时所有D1/R2/ensure/sync mutation零副作用，稳定conflict/128。
-- [ ] preflight后并发新writer不能进入冻结对象闭包，已有Pi与七provider回归绿。
-- [ ] force/JSON/progress不绕过；不改D1 CHECK或restore图。
+- [x] 任意Hermes row时所有D1/R2/ensure/sync mutation零副作用，稳定conflict/128。拒绝发生在凭据、D1、R2 之前。
+- [x] 开工时已经存在的名单外 kind 不会进入远端。开工之后插入的 kind 仍由 PI-09 快照承接，本卡不宣称已经冻结对象闭包。
+- [x] force/JSON/progress不绕过；不改D1 CHECK或restore图。
 
 **Verification:**
 
-- [ ] `source .env.test && cargo test --test command_test cloud_test::unsupported_capture_kind_ -- --test-threads=1`（只运行既有或前驱实现卡已交付测试，匹配必须非零）
+- [x] `source .env.test && cargo test --test command_test cloud_test::unsupported_capture_kind_ -- --test-threads=1`：2 passed，0 failed。另有缺凭据回归 1 passed。
 
-**Full-suite trigger:** N/A（只读审计，无代码变更）
+**Full-suite trigger:** T-1（`cloud sync` 共享入口）。本卡跑了聚焦测试；计划收口的全量 nextest 仍在 HM-06。
 
-**Dependencies:** HM-00、DEP-HM-02
+**Dependencies:** HM-00。同步前白名单由本卡落地，不再等 PI-05 写同一处。
 
 **Blocking condition:** 依赖产物缺失、source pin 不可复验、目标文件有未交接写者或本卡任一安全门失败即 blocked；计划 PASS 只放行选定卡的工作，不替代后继的实际依赖与验收。
 
-**Deliverables:** source/GO-HOLD审计矩阵和结论仅写本计划，不创建独立证据文件或fixture。
+**Deliverables:** 同步前拒绝、两条 CLI 测试、cloud 命令文档与 `COMPATIBILITY.md` 的同一句。
 
-**Implementation write set:** `docs/development/plan/plan-20261018-hermes-capture.md`；`docs/development/plan/plan-status.md`仅本卡状态；测试仅运行，不授权修改代码、fixture或Cargo配置。
+**Implementation write set:** `src/command/cloud/sync.rs`、`tests/command/cloud_test.rs`、`docs/commands/cloud.md`、`docs/commands/zh-CN/cloud.md`、`COMPATIBILITY.md`、本计划、`plan-status.md`、`plan-long.md` 的 Hermes 索引行。不改 D1 CHECK 与 restore。
 
 **Release write set:** N/A
 
-**Docs and compatibility impact:** 仅本计划审计/状态，不修改fixture/代码/配置或公开行为。
+**Docs and compatibility impact:** 仓库内 cloud 命令页与 `COMPATIBILITY.md` 已写明拒绝。网站页留到带版本的后继卡。本卡不升版本。
 
 **Rollback mode:** revert
 
@@ -396,7 +396,7 @@ Claude Code 只读审查 `VERDICT: PASS`，正文 SHA-256 `97541ee4e0d64f7dd02d9
 
 **C/D coverage from:** HM-01（具体后继release承载文档渠道）；本audit/spike自身signed main/CI仍实际登记，不bump/tag/artifact。
 
-**Granularity:** `type=audit; axis=现有白名单的Hermes拒绝审计; recovery=revert; complete=yes; self-contained=yes; AC=3; VER=1; landing=0; prod-files=0; scope=M; deps=HM-00、DEP-HM-02; writeset=本计划链及DEP-CAP-WRITE逐文件串行; release=no-release; split-from=本轮G-09修订表; exception=N/A`
+**Granularity:** `type=implementation; axis=同步前捕获 kind 白名单; recovery=forward-only; complete=yes; self-contained=yes; AC=3; VER=1; landing=1; prod-files=1; scope=M; deps=HM-00; writeset=sync.rs 与 cloud 文档; release=no-release; split-from=本目标补齐 PI-05 未交付的写前拒绝; exception=N/A`
 
 ### Task HM-01: Repository Hermes identity与role迁移
 

@@ -29,6 +29,8 @@ libra cloud status [--verbose]
 
 ### 对象格式（B3-09 / B3-14）
 
+`cloud sync` 在凭据、D1 或 R2 之前读取本地 `agent_session.agent_kind`。不在当前采集允许名单里的种类（`claude_code`、`cursor`、`codex`、`gemini`、`opencode`、`copilot`、`factory_ai`、`grok`），包括 `hermes`，会以 `LBR-CONFLICT-002`（退出码 128）停止。`--force`、`--json` 和 `--progress=json` 都不能绕过，也不会打印同步成功。允许的种类仍走原来的同步顺序。
+
 备份会把仓库的 `core.objectformat` 写入 D1 `repositories.object_format`（并标记 `object_index` 行）。恢复只以该元数据作为 sha1/sha256/blake3 权威，绝不根据 `o_id` 长度猜测。缺少元数据且存在任意 64-hex 对象 id 的快照会以 `LBR-REPO-002`（退出码 128）fail-closed，并提示在源仓重跑 `libra cloud sync`；无元数据且全部为 40-hex 的旧快照仍按 sha1 兼容。早于 REL-B3-02 的客户端不得通过宽度猜测恢复带元数据的新备份。
 
 ## 全局配置 Schema 保护

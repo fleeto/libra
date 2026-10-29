@@ -4,6 +4,102 @@
 
 use super::*;
 
+fn plant_unsupported_capture_kind(repo: &std::path::Path) {
+    let db = repo.join(".libra").join("libra.db");
+    let script = r#"
+import sqlite3, sys
+db, kind = sys.argv[1], sys.argv[2]
+conn = sqlite3.connect(db)
+conn.execute("PRAGMA foreign_keys=OFF")
+conn.executescript(
+    "CREATE TABLE agent_session_hm02 AS SELECT * FROM agent_session WHERE 0;"
+    "DROP TABLE agent_session;"
+    "ALTER TABLE agent_session_hm02 RENAME TO agent_session;"
+)
+conn.execute(
+    "INSERT INTO agent_session (session_id, agent_kind, provider_session_id, state, working_dir, metadata_json, redaction_report, started_at, last_event_at) VALUES ('hm02-session', ?, 'hm02-provider', 'stopped', '/work', '{}', '{}', 1, 1)",
+    (kind,),
+)
+conn.commit()
+"#;
+    let output = std::process::Command::new("python3")
+        .arg("-c")
+        .arg(script)
+        .arg(&db)
+        .arg("hermes")
+        .output()
+        .expect("python3 sqlite fixture");
+    assert!(
+        output.status.success(),
+        "fixture failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
+fn assert_unsupported_capture_kind_refused(output: &std::process::Output) {
+    assert_eq!(
+        output.status.code(),
+        Some(128),
+        "stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("LBR-CONFLICT-002"),
+        "missing conflict code: {stderr}"
+    );
+    assert!(
+        stderr.contains("outside the cloud capture allowlist"),
+        "missing allowlist refusal: {stderr}"
+    );
+    assert!(
+        stderr.contains("hermes"),
+        "refusal should name the rejected kind: {stderr}"
+    );
+    assert!(
+        !stderr.contains("missing cloud configuration"),
+        "kind refusal ran after credential preflight: {stderr}"
+    );
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        !stdout.contains("\"ok\":true") && !stdout.contains("Starting cloud sync"),
+        "refusal rendered success or progress: stdout={stdout} stderr={stderr}"
+    );
+}
+
+/// A local `hermes` capture row stops sync before D1/R2, including `--force`.
+#[test]
+fn unsupported_capture_kind_refuses_before_remote_write() {
+    let repo = tempdir().unwrap();
+    init_repo_via_cli(repo.path());
+    plant_unsupported_capture_kind(repo.path());
+
+    let output = run_libra_command(&["cloud", "sync"], repo.path());
+    assert_unsupported_capture_kind_refused(&output);
+
+    let forced = run_libra_command(&["cloud", "sync", "--force"], repo.path());
+    assert_unsupported_capture_kind_refused(&forced);
+}
+
+/// JSON and progress mode use the same pre-write refusal and do not emit success.
+#[test]
+fn unsupported_capture_kind_json_and_progress_do_not_succeed() {
+    let repo = tempdir().unwrap();
+    init_repo_via_cli(repo.path());
+    plant_unsupported_capture_kind(repo.path());
+
+    let json = run_libra_command(&["--json", "cloud", "sync"], repo.path());
+    assert_unsupported_capture_kind_refused(&json);
+
+    let progress = run_libra_command(&["cloud", "sync", "--progress=json"], repo.path());
+    assert_unsupported_capture_kind_refused(&progress);
+    let stderr = String::from_utf8_lossy(&progress.stderr);
+    assert!(
+        !stderr.contains("cloud_sync.agent_capture"),
+        "progress mode reached capture mirror: {stderr}"
+    );
+}
+
 /// Running `cloud sync` outside a repository should return exit code 128.
 #[test]
 fn test_cloud_cli_outside_repository_returns_fatal_128() {

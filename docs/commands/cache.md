@@ -30,7 +30,8 @@ DB), so the reported values match what the backend uses:
   repository database, or a resolver that does not return, fails the object
   command. `ClientStorage::init` does not build a writable local backend for
   that case, names only the setting, and does not keep the client in the
-  process object cache. An unreadable global config store, after the repository
+  process object cache. A repository database that is merely held by another
+  writer is first retried, for about 5 seconds in total per process. An unreadable global config store, after the repository
   has no type, stays on the historical local backend so existing objects can
   still be read. The next call reads the setting again after the repository
   database is repaired. In text output the unreadable-global-store degrade, the `LIBRA_STORAGE_TYPE=local`

@@ -72,7 +72,8 @@ flag, threshold, or cache size keeps its existing default. The same check applie
 `pull` and `clone`. A readable unset type, including a missing global
 configuration file, stays on the historical local path. An unread repository database, or a resolver that does not return, fails
 `fetch`, `pull`, and `clone` with `LBR-IO-001` before a pack is installed and
-reports only `LIBRA_STORAGE_TYPE`. An unreadable global config store, after the
+reports only `LIBRA_STORAGE_TYPE`. A repository database that is merely held by another
+writer is first retried, for about 5 seconds in total per process. An unreadable global config store, after the
 repository has no type, stays on the historical local path so existing objects
 can still be read. A future global schema while reading the type stays on that
 same local path. A type other than `s3` or `r2`, including `gcs`, also fails with

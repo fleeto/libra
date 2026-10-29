@@ -344,9 +344,15 @@ HM-03 落地。分类只描述 JSONL 主源，不描述 HTML。
 
 **Task type:** audit
 
-**Lifecycle / Acceptance:** pending / 空
+**Lifecycle / Acceptance:** blocked / 空
 
 **Description:** 只审计回归PI-05白名单同样拒绝Hermes/future tag；不新增fence或改生产代码。
+
+**HM-02 审计记录（2026-10-29）：** 本卡不改生产代码。`cargo test --test command_test cloud_test::unsupported_capture_kind_ -- --test-threads=1` 的结果是 `running 0 tests`，`0 passed`，`4594 filtered out`，进程退出码 0。零匹配不能勾验收。`plan-20260911` 的 PI-05 仍是 `pending / 空`，DEP-HM-02 规定 PI-05 未 source-qualified 前本卡不写围栏。
+
+当前拒绝只来自 SQL CHECK，不是 PI-05 的同步前冲突。`src/utils/d1_client.rs:1409` 与 `:1453` 的 `CREATE TABLE IF NOT EXISTS` 允许 `claude_code`、`cursor`、`codex`、`gemini`、`opencode`、`copilot`、`factory_ai`、`grok`，没有 `hermes`。`CREATE TABLE IF NOT EXISTS` 不改已经存在的远端表。`src/command/cloud` 里没有在网络写入前把未知 kind 收成稳定 `LBR-CONFLICT-002` / 退出码 128 的白名单。因此本卡三条验收都不成立：不能证明 Hermes 行对 D1/R2/ensure/sync 零副作用，不能证明冻结对象闭包，也不能证明 force/JSON/progress 绕不过。后继 HM-01 不得开工。
+
+Claude Code 只读审查 `VERDICT: PASS`，正文 SHA-256 `97541ee4e0d64f7dd02d90169721ccabbfe92a045930956184857e5c294e4cc8`。P0/P1 为 0。审查确认 CHECK 在 `d1_client.rs:1409` 与 `:1453`，PI-05 仍 pending，本卡不能标 done。无版本变化。
 
 **Current evidence:** `adapter.rs:30` 的 `AgentKind` 无 Hermes；`registry.rs:134` 的 8 行注册表无 hermes；`capture/extraction.rs:438` 对其余 kind 返回 partial；`migration.rs:572` 的 CHECK 扩展只到 grok。v0.22.5 的 callsite 与哈希见「HM-00 版本冻结」。
 

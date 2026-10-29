@@ -41,6 +41,7 @@ pub mod derived;
 pub mod extract;
 pub mod grok_reasoning;
 pub mod grok_updates;
+pub mod hermes_export;
 pub(crate) mod live_capture;
 pub mod native_origin;
 pub mod opencode_export;

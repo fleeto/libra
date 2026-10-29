@@ -336,6 +336,11 @@ pub(crate) trait LiveSubagentDiscovery: Send + Sync {
 /// Trusted export of one provider session's transcript (ADR-ACF-10, ACF-20).
 /// It is called only while the capture layer holds the export-job runner
 /// lease, and it never receives the lease, a store or a capture scope.
+///
+/// Hermes uses the same rule from `hermes_export`: the export-job lease is
+/// acquired first, and the fixed `hermes sessions export` argv runs only
+/// after that. Hermes stays out of `live_capture_for` until it is
+/// hook-installable.
 #[async_trait]
 pub(crate) trait LiveTranscriptExporter: Send + Sync {
     /// Export the session transcript before `deadline`. A successful export

@@ -323,6 +323,9 @@ struct DoctorReport {
     task_workspaces: TaskWorkspaceReport,
     /// RC-31: frozen Code-era residue (read-only existence check).
     legacy_code_residue: LegacyCodeResidue,
+    /// HM-08: Hermes exporter trust is source-qualified and is not a native
+    /// origin claim. Hook install stays disabled.
+    hermes_export: crate::internal::ai::observed_agents::hermes_export::HermesBridgeStatus,
 }
 
 #[derive(Debug, Serialize)]
@@ -1330,6 +1333,16 @@ pub async fn execute_safe(args: DoctorArgs, output: &OutputConfig) -> CliResult<
             report.journal_reset = reset;
         }
     }
+    let hermes_export =
+        crate::internal::ai::observed_agents::hermes_export::HermesBridgeStatus::current()
+            .await
+            .unwrap_or(
+                crate::internal::ai::observed_agents::hermes_export::HermesBridgeStatus {
+                    trusted: false,
+                    source_qualified: true,
+                    native_claimed: false,
+                },
+            );
     emit_report(
         &DoctorReport {
             capture_diagnostics: diagnostics::summarize(&storage),
@@ -1345,6 +1358,7 @@ pub async fn execute_safe(args: DoctorArgs, output: &OutputConfig) -> CliResult<
             findings_store,
             task_workspaces,
             legacy_code_residue,
+            hermes_export,
         },
         output,
     )
@@ -6562,6 +6576,7 @@ fn emit_report(report: &DoctorReport, output: &OutputConfig) -> CliResult<()> {
     if output.quiet {
         return Ok(());
     }
+    println!("Hermes export bridge : {}", report.hermes_export);
     println!(
         "Schema present       : {}",
         if report.schema_present { "yes" } else { "no" }

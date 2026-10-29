@@ -3340,3 +3340,332 @@ fn hook_command_exit_and_output_contract_is_byte_stable() {
         "neither failed delivery may leave a checkpoint"
     );
 }
+
+const HERMES_SESSION: &str = "20261030_120000_abcdef";
+
+fn hermes_runtime() -> tokio::runtime::Runtime {
+    tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .expect("runtime")
+}
+
+fn write_hermes_exporter(path: &std::path::Path, body: &str) {
+    use std::os::unix::fs::PermissionsExt;
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent).unwrap();
+    }
+    std::fs::write(path, body).unwrap();
+    std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o755)).unwrap();
+}
+
+fn hermes_export_script(argv_log: &std::path::Path, cwd: &std::path::Path, sleep: bool) -> String {
+    let pause = if sleep { "sleep 5" } else { ":" };
+    format!(
+        "#!/bin/sh\nprintf '%s\\n' \"$@\" > '{argv}'\n{pause}\nout=\nfor arg in \"$@\"; do out=\"$arg\"; done\ncat > \"$out\" <<'EOF'\n{{\"id\":\"{id}\",\"source\":\"cli\",\"cwd\":\"{cwd}\",\"messages\":[{{\"id\":1,\"role\":\"assistant\",\"content\":\"answer\",\"active\":1,\"compacted\":0,\"timestamp\":1,\"reasoning\":\"kept-thinking\",\"finish_reason\":\"stop\"}}]}}\nEOF\necho kept-thinking\necho kept-thinking >&2\nexit 0\n",
+        argv = argv_log.display(),
+        pause = pause,
+        id = HERMES_SESSION,
+        cwd = cwd.display()
+    )
+}
+
+async fn hermes_scope(repo: &HookRepo) -> libra::internal::ai::capture_scope::CaptureScope {
+    let conn = sea_orm::Database::connect(format!("sqlite://{}", repo.db_path().display()))
+        .await
+        .expect("open catalog");
+    libra::internal::ai::capture_scope::CaptureScope::resolve(&conn, &repo.repo)
+        .await
+        .expect("scope")
+}
+
+async fn hermes_conn(repo: &HookRepo) -> DatabaseConnection {
+    sea_orm::Database::connect(format!("sqlite://{}", repo.db_path().display()))
+        .await
+        .expect("open catalog")
+}
+
+fn hermes_request(
+    repo: &HookRepo,
+    source: libra::internal::ai::observed_agents::hermes_export::HermesLiveSource,
+) -> libra::internal::ai::observed_agents::hermes_export::HermesLiveRequest {
+    libra::internal::ai::observed_agents::hermes_export::HermesLiveRequest {
+        session_id: HERMES_SESSION.to_string(),
+        profile: "default".to_string(),
+        cwd: repo.repo.clone(),
+        source,
+    }
+}
+
+/// HM-08: without the export-job lease the bridge does not start the exporter.
+#[test]
+fn hermes_source_bridge_does_not_start_without_a_lease() {
+    let repo = HookRepo::init();
+    let argv = repo.home.join("argv.txt");
+    let binary = repo.home.join("hermes");
+    write_hermes_exporter(&binary, &hermes_export_script(&argv, &repo.repo, false));
+    hermes_runtime().block_on(async {
+        let conn = hermes_conn(&repo).await;
+        let scope = hermes_scope(&repo).await;
+        let request = hermes_request(
+            &repo,
+            libra::internal::ai::observed_agents::hermes_export::HermesLiveSource::Export,
+        );
+        let error = libra::internal::ai::observed_agents::hermes_export::read_hermes_live_source(
+            &conn,
+            &scope,
+            None,
+            None,
+            &request,
+            std::time::Instant::now() + Duration::from_secs(5),
+        )
+        .await
+        .expect_err("missing lease");
+        assert_eq!(
+            error,
+            libra::internal::ai::observed_agents::hermes_export::HermesLiveError::NoLease
+        );
+        assert!(!error.to_string().contains("kept-thinking"));
+        assert!(!argv.exists(), "exporter started without a lease");
+    });
+}
+
+/// HM-08: replacing the trusted executable revokes it before any spawn.
+#[test]
+fn hermes_source_bridge_does_not_spawn_a_changed_binary() {
+    use libra::internal::ai::observed_agents::hermes_export::{
+        HermesExporterTrust, HermesLiveError, HermesLiveSource, acquire_hermes_export_lease,
+        read_hermes_live_source,
+    };
+
+    let repo = HookRepo::init();
+    let argv = repo.home.join("changed-argv.txt");
+    let binary = repo.home.join("bin").join("hermes");
+    write_hermes_exporter(&binary, &hermes_export_script(&argv, &repo.repo, false));
+    let fixtures = binary.parent().unwrap();
+    let trust_dir = repo.run(
+        &["agent", "rpc", "trust", "--dir", fixtures.to_str().unwrap()],
+        None,
+        &[],
+    );
+    assert!(trust_dir.status.success(), "{}", describe(&trust_dir));
+    let trusted = repo.run(&["agent", "rpc", "trust", "hermes"], None, &[]);
+    assert!(trusted.status.success(), "{}", describe(&trusted));
+    write_hermes_exporter(&binary, "#!/bin/sh\necho replaced\nexit 0\n");
+
+    hermes_runtime().block_on(async {
+        let conn = hermes_conn(&repo).await;
+        let trust = HermesExporterTrust::load(&conn)
+            .await
+            .expect("read trust")
+            .expect("hermes trust");
+        let scope = hermes_scope(&repo).await;
+        let deadline = std::time::Instant::now() + Duration::from_secs(30);
+        let held = acquire_hermes_export_lease(&conn, &scope, HERMES_SESSION, deadline)
+            .await
+            .expect("admit")
+            .expect("runner");
+        let error = read_hermes_live_source(
+            &conn,
+            &scope,
+            Some(held),
+            Some(&trust),
+            &hermes_request(&repo, HermesLiveSource::Export),
+            deadline,
+        )
+        .await
+        .expect_err("changed binary");
+        assert_eq!(error, HermesLiveError::Unavailable);
+        assert!(!error.to_string().contains("replaced"));
+        assert!(!argv.exists(), "changed binary must not start");
+        assert!(
+            HermesExporterTrust::load(&conn)
+                .await
+                .expect("reread trust")
+                .is_none(),
+            "drift must revoke the hermes record on the caller connection"
+        );
+    });
+}
+
+/// HM-08: the lease holder runs the frozen argv and keeps thinking out of the
+/// status text. A second admission does not become a second runner.
+#[test]
+fn hermes_source_bridge_runs_fixed_argv_under_the_export_lease() {
+    use libra::internal::ai::observed_agents::hermes_export::{
+        HermesExporterTrust, HermesLiveSource, acquire_hermes_export_lease, read_hermes_live_source,
+    };
+    let repo = HookRepo::init();
+    let argv = repo.home.join("argv.txt");
+    let binary = repo.home.join("bin").join("hermes");
+    write_hermes_exporter(&binary, &hermes_export_script(&argv, &repo.repo, false));
+    let fixtures = binary.parent().unwrap();
+    let trust_dir = repo.run(
+        &["agent", "rpc", "trust", "--dir", fixtures.to_str().unwrap()],
+        None,
+        &[],
+    );
+    assert!(trust_dir.status.success(), "{}", describe(&trust_dir));
+    let trusted = repo.run(&["agent", "rpc", "trust", "hermes"], None, &[]);
+    assert!(trusted.status.success(), "{}", describe(&trusted));
+
+    hermes_runtime().block_on(async {
+        let conn = hermes_conn(&repo).await;
+        let trust = HermesExporterTrust::load(&conn)
+            .await
+            .expect("read trust")
+            .expect("hermes trust");
+        let scope = hermes_scope(&repo).await;
+        let deadline = std::time::Instant::now() + Duration::from_secs(30);
+        let held = acquire_hermes_export_lease(&conn, &scope, HERMES_SESSION, deadline)
+            .await
+            .expect("admit")
+            .expect("runner lease");
+        let blocked = acquire_hermes_export_lease(&conn, &scope, HERMES_SESSION, deadline)
+            .await
+            .expect("second admit");
+        assert!(
+            blocked.is_none(),
+            "a held lease must not start another runner"
+        );
+        let request = hermes_request(&repo, HermesLiveSource::Export);
+        let read =
+            read_hermes_live_source(&conn, &scope, Some(held), Some(&trust), &request, deadline)
+                .await
+                .expect("export");
+        assert!(read.spawned);
+        assert!(read.partial);
+        assert!(read.source_qualified);
+        assert!(!read.native_claimed);
+        assert_eq!(read.source_state, "unproven");
+        assert_eq!(read.readable_thinking, vec!["kept-thinking".to_string()]);
+        let argv_text = std::fs::read_to_string(&argv).expect("argv log");
+        assert!(
+            argv_text.starts_with("sessions\nexport\n--format\njsonl\n--session-id\n")
+                && argv_text.contains(HERMES_SESSION)
+                && !argv_text.contains("--redact")
+                && !argv_text.contains("--only")
+                && !argv_text.contains("--delete-after-verified")
+                && !argv_text.contains("--upload"),
+            "{argv_text}"
+        );
+    });
+}
+
+/// HM-08: a selected JSONL file is read through the HM-03 reader. No exporter
+/// starts, and the thinking stays on the authorized read.
+#[test]
+fn hermes_source_bridge_reads_selected_jsonl_without_spawn() {
+    use libra::internal::ai::observed_agents::hermes_export::{
+        HermesLiveSource, acquire_hermes_export_lease, read_hermes_live_source,
+    };
+    let repo = HookRepo::init();
+    let argv = repo.home.join("jsonl-argv.txt");
+    let jsonl = repo.repo.join("session.jsonl");
+    let body = format!(
+        "{{\"id\":\"{id}\",\"source\":\"cli\",\"cwd\":\"{cwd}\",\"messages\":[{{\"id\":1,\"role\":\"assistant\",\"content\":\"answer\",\"active\":1,\"compacted\":0,\"timestamp\":1,\"reasoning\":\"kept-thinking\",\"finish_reason\":\"stop\"}}]}}\n",
+        id = HERMES_SESSION,
+        cwd = repo.repo.display()
+    );
+    std::fs::write(&jsonl, body).expect("write jsonl");
+
+    hermes_runtime().block_on(async {
+        let conn = hermes_conn(&repo).await;
+        let scope = hermes_scope(&repo).await;
+        let deadline = std::time::Instant::now() + Duration::from_secs(30);
+        let held = acquire_hermes_export_lease(&conn, &scope, HERMES_SESSION, deadline)
+            .await
+            .expect("admit")
+            .expect("runner");
+        let read = read_hermes_live_source(
+            &conn,
+            &scope,
+            Some(held),
+            None,
+            &hermes_request(&repo, HermesLiveSource::Jsonl { path: jsonl }),
+            deadline,
+        )
+        .await
+        .expect("jsonl");
+        assert!(!read.spawned);
+        assert!(read.source_qualified);
+        assert!(!read.native_claimed);
+        assert_eq!(read.source_state, "unproven");
+        assert_eq!(read.readable_thinking, vec!["kept-thinking".to_string()]);
+        assert!(!argv.exists(), "selected file must not start the exporter");
+    });
+}
+
+/// HM-08: a slow exporter becomes partial without keeping its stdout, and the
+/// SQLite fallback does not rewrite the provider database.
+#[test]
+fn hermes_source_bridge_times_out_partial_and_leaves_sqlite_unmigrated() {
+    use libra::internal::ai::observed_agents::hermes_export::{
+        HermesExporterTrust, HermesLiveSource, acquire_hermes_export_lease, read_hermes_live_source,
+    };
+    let repo = HookRepo::init();
+    let argv = repo.home.join("slow-argv.txt");
+    let binary = repo.home.join("bin").join("hermes");
+    write_hermes_exporter(&binary, &hermes_export_script(&argv, &repo.repo, true));
+    let fixtures = binary.parent().unwrap().to_path_buf();
+    let trust_dir = repo.run(
+        &["agent", "rpc", "trust", "--dir", fixtures.to_str().unwrap()],
+        None,
+        &[],
+    );
+    assert!(trust_dir.status.success(), "{}", describe(&trust_dir));
+    let trusted = repo.run(&["agent", "rpc", "trust", "hermes"], None, &[]);
+    assert!(trusted.status.success(), "{}", describe(&trusted));
+    let sqlite = repo.repo.join("state.db");
+    std::fs::write(&sqlite, b"not-a-migrated-database").unwrap();
+    let before = std::fs::read(&sqlite).unwrap();
+
+    hermes_runtime().block_on(async {
+        let conn = hermes_conn(&repo).await;
+        let trust = HermesExporterTrust::load(&conn)
+            .await
+            .expect("read trust")
+            .expect("hermes trust");
+        let scope = hermes_scope(&repo).await;
+        let deadline = std::time::Instant::now() + Duration::from_secs(30);
+        let held = acquire_hermes_export_lease(&conn, &scope, HERMES_SESSION, deadline)
+            .await
+            .expect("admit")
+            .expect("runner");
+        let slow = read_hermes_live_source(
+            &conn,
+            &scope,
+            Some(held),
+            Some(&trust),
+            &hermes_request(&repo, HermesLiveSource::Export),
+            deadline,
+        )
+        .await
+        .expect("timeout read");
+        assert!(slow.spawned);
+        assert!(slow.partial);
+        assert!(slow.readable_thinking.is_empty());
+        let held = acquire_hermes_export_lease(&conn, &scope, HERMES_SESSION, deadline)
+            .await
+            .expect("readmit")
+            .expect("sqlite runner");
+        let sqlite_read = read_hermes_live_source(
+            &conn,
+            &scope,
+            Some(held),
+            None,
+            &hermes_request(
+                &repo,
+                HermesLiveSource::Sqlite {
+                    path: sqlite.clone(),
+                },
+            ),
+            deadline,
+        )
+        .await
+        .expect("sqlite read");
+        assert!(!sqlite_read.spawned);
+        assert!(sqlite_read.readable_thinking.is_empty());
+    });
+    assert_eq!(std::fs::read(&sqlite).unwrap(), before);
+}

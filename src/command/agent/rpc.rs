@@ -389,9 +389,13 @@ async fn trust_exporter(slug: &str, output: &OutputConfig) -> CliResult<()> {
             .as_ref()
             .map(|launcher| format!(", launched by {}", launcher.display()))
             .unwrap_or_default();
+        let bridge = if slug == crate::internal::ai::observed_agents::trust::HERMES_EXPORTER_SLUG {
+            "the export-job lease can now run it"
+        } else {
+            "the sandboxed export bridge can now use it"
+        };
         println!(
-            "trusted provider exporter '{slug}' at {} (sha256 {}{via}); the sandboxed export \
-             bridge can now use it",
+            "trusted provider exporter '{slug}' at {} (sha256 {}{via}); {bridge}",
             record.path.display(),
             record.sha256
         );

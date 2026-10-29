@@ -28,7 +28,7 @@ use sea_orm::ConnectionTrait;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
-use crate::internal::config::ConfigKv;
+use crate::internal::{config::ConfigKv, db::get_db_conn_instance};
 
 /// Config key prefix for trust records (one JSON value per slug).
 const TRUST_KEY_PREFIX: &str = "agent.trust.";
@@ -317,6 +317,12 @@ pub async fn add_trusted_dir(path: &Path) -> Result<PathBuf> {
 /// Trust-record slug for the OpenCode provider-exporter binary (DR-04b).
 pub const OPENCODE_EXPORTER_SLUG: &str = "opencode";
 
+/// Trust-record slug for the Hermes CLI exporter (HM-08).
+///
+/// This record is only the Hermes executable. It does not authorize OpenCode
+/// and OpenCode trust does not authorize Hermes.
+pub const HERMES_EXPORTER_SLUG: &str = "hermes";
+
 /// Provider-exporter slugs: built-in providers whose OWN CLI binary may be
 /// trusted (under `agent.trust.<slug>`) to power a sandboxed export bridge.
 /// These are deliberately NOT `libra-agent-*` RPC binaries — `agent rpc
@@ -324,7 +330,7 @@ pub const OPENCODE_EXPORTER_SLUG: &str = "opencode";
 /// registered trusted directory instead of scanning `$PATH`, and the
 /// built-in-slug impersonation guard (`LBR-AGENT-006`) does not apply
 /// because the record is FOR the built-in provider itself.
-pub const PROVIDER_EXPORTER_TRUST_SLUGS: &[&str] = &[OPENCODE_EXPORTER_SLUG];
+pub const PROVIDER_EXPORTER_TRUST_SLUGS: &[&str] = &[OPENCODE_EXPORTER_SLUG, HERMES_EXPORTER_SLUG];
 
 /// Whether `slug` names a built-in provider exporter (see
 /// [`PROVIDER_EXPORTER_TRUST_SLUGS`]).
@@ -714,7 +720,25 @@ pub fn provenance_drifted(provenance: &Provenance, record: &TrustRecord) -> bool
 /// immediately before spawn. Any drift (hash, device, inode, mtime or path)
 /// revokes the record and fails closed — the binary returns to quarantine
 /// until the operator re-trusts it (E2 / `LBR-AGENT-005`).
+///
+/// The record and the trusted-directory allowlist are read from the process
+/// repository. Callers that already hold another repository connection must
+/// use [`revalidate_trust_with_conn`] so a refusal cannot revoke a different
+/// checkout.
 pub async fn revalidate_trust(slug: &str, record: &TrustRecord) -> Result<Provenance> {
+    let db = get_db_conn_instance().await;
+    revalidate_trust_with_conn(&db, slug, record).await
+}
+
+/// [`revalidate_trust`] on the caller's connection.
+///
+/// Hashing stays off the runtime. Revocation and the directory allowlist use
+/// `db`, which is the connection that stored the trust record.
+pub async fn revalidate_trust_with_conn<C: ConnectionTrait>(
+    db: &C,
+    slug: &str,
+    record: &TrustRecord,
+) -> Result<Provenance> {
     // Hashing/stat-ing an operator-selected executable may block on a slow
     // filesystem (including FUSE). Keep that synchronous work off Tokio's
     // executor; callers with a stricter operation deadline can cancel their
@@ -725,20 +749,20 @@ pub async fn revalidate_trust(slug: &str, record: &TrustRecord) -> Result<Proven
         match tokio::task::spawn_blocking(move || compute_provenance(&record_path)).await {
             Ok(Ok(provenance)) => provenance,
             Ok(Err(err)) => {
-                let _ = revoke_trust(slug).await;
+                let _ = revoke_trust_with_conn(db, slug).await;
                 return Err(err.context(format!(
                     "trusted binary for '{slug}' is no longer readable; trust revoked"
                 )));
             }
             Err(err) => {
-                let _ = revoke_trust(slug).await;
+                let _ = revoke_trust_with_conn(db, slug).await;
                 return Err(anyhow::Error::new(err).context(format!(
                     "trusted binary for '{slug}' could not complete revalidation; trust revoked"
                 )));
             }
         };
     if provenance_drifted(&provenance, record) {
-        let _ = revoke_trust(slug).await;
+        let _ = revoke_trust_with_conn(db, slug).await;
         bail!(
             "external agent binary for '{slug}' changed since it was trusted \
              (sha256/device/inode/mtime drift); trust revoked — re-run \
@@ -747,9 +771,9 @@ pub async fn revalidate_trust(slug: &str, record: &TrustRecord) -> Result<Proven
     }
     // A0-08 defense-in-depth: if the binary's directory was removed from the
     // trusted allowlist since it was trusted, drop it back to quarantine.
-    let dirs = read_trusted_dirs().await?;
+    let dirs = read_trusted_dirs_with_conn(db).await?;
     if !path_within_trusted_dirs(&provenance.canonical_path, &dirs) {
-        let _ = revoke_trust(slug).await;
+        let _ = revoke_trust_with_conn(db, slug).await;
         bail!(
             "external agent binary for '{slug}' is no longer under a trusted directory; \
              trust revoked — re-register its directory with \

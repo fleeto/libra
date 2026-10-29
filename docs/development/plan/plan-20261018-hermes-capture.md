@@ -631,7 +631,7 @@ Claude 审查实现 `VERDICT: PASS`。文档挂错常量之后的复核轮也是
 
 **Task type:** implementation
 
-**Lifecycle / Acceptance:** pending / 空
+**Lifecycle / Acceptance:** done / complete
 
 **Description:** 承接 ADR-HM-03 选定 source 的 live 读取与既有 snapshot/lease 接线；文件/SQLite 直接走 HM-03 reader，不另造 exporter，只有 exporter 分支使用已有 trust 机制。不借 OpenCode trust 冒充 Hermes 授权。
 
@@ -641,19 +641,21 @@ Claude 审查实现 `VERDICT: PASS`。文档挂错常量之后的复核轮也是
 
 **Acceptance criteria:**
 
-- [ ] 记录所选文件/SQLite/export source 和当前 session；若执行系统 Hermes exporter，按现有机制取得该 executable trust，不要求额外解释器/package 闭包认证。
-- [ ] 只读 reader 不初始化/迁移 provider DB；exporter 分支使用 fixed argv、明确 cwd/PWD 和必要环境，不读取凭据文件作诊断。
-- [ ] 不要求建设专用 Hermes 沙箱才可获取 ordinary 数据；沿现有受信任本地用户边界读取当前会话，不放宽其它 provider profile。
-- [ ] source 读取或 exporter 采用 HM-00 核定的当前 session 和有界策略；live hook 2s 总 deadline，超时 partial 并可显式重试。
-- [ ] 通过既有LiveTranscriptExporter/lease owner运行，未持lease不启动。
-- [ ] 输出仅经授权source关联进入snapshot，stdout/stderr/log不泄露raw内容。
-- [ ] 公开trust/doctor的Hermes分支、Display、EN/zh/网站与compat同卡验证。
-- [ ] 真实 live 数据比对前只算机制 source-qualified；不承诺 native 来源或同 UID 防篡改，缺这些保证不删除已取得 thinking。
+- [x] 记录所选文件/SQLite/export source 和当前 session；若执行系统 Hermes exporter，按现有机制取得该 executable trust，不要求额外解释器/package 闭包认证。
+- [x] 只读 reader 不初始化/迁移 provider DB；exporter 分支使用 fixed argv、明确 cwd/PWD 和必要环境，不读取凭据文件作诊断。
+- [x] 不要求建设专用 Hermes 沙箱才可获取 ordinary 数据；沿现有受信任本地用户边界读取当前会话，不放宽其它 provider profile。
+- [x] source 读取或 exporter 采用 HM-00 核定的当前 session 和有界策略；live hook 2s 总 deadline，超时 partial 并可显式重试。
+- [x] 通过既有LiveTranscriptExporter/lease owner运行，未持lease不启动。
+- [x] 输出仅经授权source关联进入snapshot，stdout/stderr/log不泄露raw内容。
+- [x] 公开trust/doctor的Hermes分支、Display、EN/zh/网站与compat同卡验证。
+- [x] 真实 live 数据比对前只算机制 source-qualified；不承诺 native 来源或同 UID 防篡改，缺这些保证不删除已取得 thinking。
 
 **Verification:**
 
-- [ ] `source .env.test && cargo test --test command_test agent_rpc_trust_test::hermes_exporter_ -- --test-threads=1`（拟新增过滤名；须列出实际匹配并确认非零）
-- [ ] `source .env.test && cargo test --test agent_hook_crash_test hermes_source_bridge_ -- --test-threads=1`（拟新增过滤名；须列出实际匹配并确认非零）
+- [x] `source .env.test && cargo test --test command_test agent_rpc_trust_test::hermes_exporter_ -- --test-threads=1`（拟新增过滤名；须列出实际匹配并确认非零）
+- [x] `source .env.test && cargo test --test agent_hook_crash_test hermes_source_bridge_ -- --test-threads=1`（拟新增过滤名；须列出实际匹配并确认非零）
+
+实现说明：`hermes_export` 只在持有 export-job lease 时启动。argv 固定为 `sessions export --format jsonl --session-id <id> <output-file>`，cwd 与 `PWD` 明确，环境只留 `PATH`。stdout 只用来识别不可用，stderr 丢弃。JSONL 与 SQLite 走 HM-03 reader，`spawned=false`，不迁移 provider 库。启动前在同一条连接上做 `revalidate_trust_with_conn`；漂移或目录不在允许名单时撤销该记录且不启动。session id 与导入相同：非空、最长 64、ASCII 字母数字或 `-`/`_`。超时 2 秒得到 partial，可以再次取得 lease 重试。结果始终 source-qualified，不声称 native。`live_capture_for(Hermes)` 仍是 `None`。`transcript_readable` 与 hook 安装仍关闭，云同步仍拒绝 hermes。`rpc trust hermes` 不借用 OpenCode trust。`hermes_exporter_` 匹配 1 条，`hermes_source_bridge_` 匹配 5 条，全部通过。Claude R1 `VERDICT: FAIL`（启动前未复核信任、session id 被收成 32 位十六进制）。R2 `VERDICT: PASS`，正文 SHA-256 `746fdc4478b3a22ad5d3a982d51bf0daef93bdc186f1b4f2eaff7a0df3a441dd`。无 P0/P1。发布窗口 `v0.30.99`。
 
 **Full-suite trigger:** T-1/T-4（共享采集、存储、CLI 或测试契约）；执行四 provider 契约的完整双环境 nextest 门
 

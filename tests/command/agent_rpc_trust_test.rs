@@ -874,3 +874,93 @@ fn provider_exporter_trust_accepts_large_single_file_binary_and_list_keeps_it() 
         String::from_utf8_lossy(&untrust.stdout)
     );
 }
+
+/// HM-08: `rpc trust hermes` pins the Hermes executable itself. OpenCode trust
+/// does not satisfy it, and the slug stays uninvokable as an RPC agent.
+#[test]
+fn hermes_exporter_trust_is_not_opencode_trust() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let temp = tempfile::tempdir().expect("tempdir");
+    let repo = temp.path().join("repo");
+    init_repo_via_cli(&repo);
+    let fixtures = temp.path().join("bin");
+    std::fs::create_dir_all(&fixtures).unwrap();
+    for name in ["hermes", "opencode"] {
+        let path = fixtures.join(name);
+        std::fs::write(&path, "#!/bin/sh\nexit 0\n").unwrap();
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
+    }
+    let trust_dir = run_with_path(
+        &["agent", "rpc", "trust", "--dir", fixtures.to_str().unwrap()],
+        &repo,
+        &fixtures,
+    );
+    assert!(
+        trust_dir.status.success(),
+        "{}",
+        describe_output(&trust_dir)
+    );
+
+    let before = run_with_path(&["agent", "doctor"], &repo, &fixtures);
+    assert!(before.status.success(), "{}", describe_output(&before));
+    let before_out = String::from_utf8_lossy(&before.stdout);
+    assert!(
+        before_out.contains("Hermes export bridge: trusted=no")
+            && before_out.contains("native origin is not claimed"),
+        "{before_out}"
+    );
+
+    let opencode = run_with_path(&["agent", "rpc", "trust", "opencode"], &repo, &fixtures);
+    assert!(opencode.status.success(), "{}", describe_output(&opencode));
+    let still = run_with_path(&["agent", "doctor"], &repo, &fixtures);
+    assert!(
+        String::from_utf8_lossy(&still.stdout).contains("Hermes export bridge: trusted=no"),
+        "{}",
+        String::from_utf8_lossy(&still.stdout)
+    );
+
+    let trusted = run_with_path(&["agent", "rpc", "trust", "hermes"], &repo, &fixtures);
+    assert!(trusted.status.success(), "{}", describe_output(&trusted));
+    let stdout = String::from_utf8_lossy(&trusted.stdout);
+    assert!(
+        stdout.contains("provider exporter 'hermes'") && stdout.contains("sha256"),
+        "{stdout}"
+    );
+    let after = run_with_path(&["agent", "doctor"], &repo, &fixtures);
+    let after_out = String::from_utf8_lossy(&after.stdout);
+    assert!(
+        after_out.contains("Hermes export bridge: trusted=yes")
+            && after_out.contains("hook install remains disabled"),
+        "{after_out}"
+    );
+
+    let invoke = run_with_path(
+        &["agent", "rpc", "invoke", "hermes", "provider_kind"],
+        &repo,
+        &fixtures,
+    );
+    assert!(!invoke.status.success());
+    assert!(
+        String::from_utf8_lossy(&invoke.stderr).contains("LBR-AGENT-002"),
+        "{}",
+        String::from_utf8_lossy(&invoke.stderr)
+    );
+    let untrust = run_with_path(&["agent", "rpc", "untrust", "hermes"], &repo, &fixtures);
+    assert!(untrust.status.success(), "{}", describe_output(&untrust));
+    let untrust_out = String::from_utf8_lossy(&untrust.stdout);
+    assert!(
+        untrust_out.contains("provider exporter 'hermes'")
+            && !untrust_out.contains("native issuers"),
+        "{untrust_out}"
+    );
+}
+
+fn describe_output(output: &std::process::Output) -> String {
+    format!(
+        "status={:?} stdout={} stderr={}",
+        output.status,
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    )
+}

@@ -1093,7 +1093,7 @@ FIX08采纳候选待双审；Mega109/活动108、Libra26/活动25、联合135/�
 | [`plan-20260906.md`](plan-20260906.md) | SC-01..SC-07、SC-CLOSE | — |
 | [`plan-20260907.md`](plan-20260907.md) | B3-00..B3-17 | **已收口**（B3-00..B3-17 全部 `done`/`complete`；`DEP-B3-05` 已满足，不再阻塞 plan-20260913） |
 | [`plan-20260911.md`](plan-20260911.md) | PI-00..24（25卡未完成：PI-00、PI-24、PI-20、PI-21、PI-22、PI-18 locally-accepted，其余19卡pending） | 审计五卡 PI-00/24/20/21/22 locally-accepted（Codex PASS）；PI-18 locally-accepted（Codex R3 PASS、rebase 后完整门 10831/10831 通过、发布 v0.30.96，D 组 remote-pending，2026-10-29 21:13:00 UTC；候选pin v1.4.0 `4a08025`）；10-18双规划审查PASS，10-29的1.4.0修订Codex R13 PASS；PI-05围栏先于row writer，旧429历史不授本轮PASS |
-| [`plan-20261018-hermes-capture.md`](plan-20261018-hermes-capture.md) | HM-00、HM-02、HM-01、HM-03、HM-04 done/complete；HM-07 起 pending | HM-01 已发布 v0.30.93。HM-03 已发布 v0.30.94（run 40938239386 success）。HM-04 版本面 0.30.95。两张审计/围栏卡都无版本。本机 binary 为 v0.22.5 |
+| [`plan-20261018-hermes-capture.md`](plan-20261018-hermes-capture.md) | HM-00、HM-02、HM-01、HM-03、HM-04 done/complete；HM-07 起 pending | HM-01 已发布 v0.30.93。HM-03 已发布 v0.30.94（run 40938239386 success）。HM-04 已发布 v0.30.95（run 40951545332 success）。两张审计/围栏卡都无版本。本机 binary 为 v0.22.5 |
 | [`plan-20261018-grok-capture.md`](plan-20261018-grok-capture.md) | GK-06本机通过；功能暂停 | GK-00字段审计保留；GK-07交给`/root/grok_continue`，GK-08仍暂停；旧GO不覆盖当前生产接入 |
 | [`plan-20260912.md`](plan-20260912.md) | MB-01..05、MB-07/08/10/11（MB-06/09/12 已取消） | 依赖 CAP（plan-20260916）等 |
 | [`plan-20260913.md`](plan-20260913.md) | FL-00..FL-07 | **前置 plan-20260907 已完整收口（DEP-FL-04 满足）**；FL-00/01/07/02/06/03/04/05 已全部 `done`/`complete`，仅剩计划级收口门 |

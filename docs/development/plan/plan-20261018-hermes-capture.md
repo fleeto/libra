@@ -422,7 +422,7 @@ Claude 审查实现 `VERDICT: PASS`。文档挂错常量之后的复核轮也是
 
 - [x] `source .env.test && cargo test --test agent_capture_migration_test hermes_role_ -- --test-threads=1`（拟新增过滤名；须列出实际匹配并确认非零）
 
-实现说明：迁移 `2026103001_agent_kind_hermes` 高于当时 tip `2026102201`。CHECK 在当时完整八值（含 `grok` 与 `opencode`）上增加 `hermes`。`pi` 不是当时集合的一员，PI-01 尚未落地，继续拒绝。stub 关闭 capture、安装和 launch。云白名单与 D1 CHECK 未加入 `hermes`。`hermes_role_` 匹配 2 条并全部通过。Claude 实现审查 `VERDICT: PASS`，正文 SHA-256 `5ac91d5378ef0eadad7002bda5fb90be57bc4b616df22d3477c825f62db6804c`。无 P0/P1。P2：侧库夹具是字节文件；future receipt 用 `2099010101`；allowlist 断言是源码窗口。发布为独立 patch。
+实现说明：迁移 `2026103001_agent_kind_hermes` 高于当时 tip `2026102201`。CHECK 在当时完整八值（含 `grok` 与 `opencode`）上增加 `hermes`。`pi` 不是当时集合的一员，PI-01 尚未落地，继续拒绝。stub 关闭 capture、安装和 launch。云白名单与 D1 CHECK 未加入 `hermes`。`hermes_role_` 匹配 2 条并全部通过。Claude 实现审查 `VERDICT: PASS`，正文 SHA-256 `5ac91d5378ef0eadad7002bda5fb90be57bc4b616df22d3477c825f62db6804c`。无 P0/P1。P2：侧库夹具是字节文件；future receipt 用 `2099010101`；allowlist 断言是源码窗口。发布 `v0.30.93`，commit `55fe7bbb83844ac8a158dafdd2891ffec6f0e4c3`，release.yml run `40927750879` conclusion success。
 
 **Full-suite trigger:** T-1/T-4（共享采集、存储、CLI 或测试契约）；执行四 provider 契约的完整双环境 nextest 门
 

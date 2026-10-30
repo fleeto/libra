@@ -4921,6 +4921,7 @@ fn hermes_source_jsonl_accepts_the_local_transport_label() {
     ));
 }
 
+#[cfg(unix)]
 #[test]
 fn hermes_source_jsonl_accepts_only_the_local_uid_subject() {
     let repo = std::path::PathBuf::from("/work/repo");

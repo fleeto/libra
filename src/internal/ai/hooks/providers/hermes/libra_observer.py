@@ -70,10 +70,13 @@ def _local_user(user) -> bool:
         return True
     if not isinstance(user, str) or not user.startswith("uid:"):
         return False
+    geteuid = getattr(os, "geteuid", None)
+    if geteuid is None:
+        return False
     rest = user[4:]
     if rest == "" or not rest.isdigit():
         return False
-    return int(rest) == os.geteuid()
+    return int(rest) == geteuid()
 
 
 ALLOWLIST = (

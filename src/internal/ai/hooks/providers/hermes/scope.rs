@@ -115,8 +115,17 @@ pub(crate) fn hermes_local_operator_user(user: Option<&str>) -> bool {
             let Ok(parsed) = rest.parse::<u32>() else {
                 return false;
             };
-            // SAFETY: geteuid only reads the process credential and takes no pointer.
-            parsed == unsafe { libc::geteuid() }
+            // libc is a Unix dependency. Windows has no euid to compare.
+            #[cfg(unix)]
+            {
+                // SAFETY: geteuid only reads the process credential and takes no pointer.
+                parsed == unsafe { libc::geteuid() }
+            }
+            #[cfg(not(unix))]
+            {
+                let _ = parsed;
+                false
+            }
         }
     }
 }
@@ -535,6 +544,7 @@ mod tests {
             .expect("count")
     }
 
+    #[cfg(unix)]
     #[test]
     fn hermes_scope_local_transport_keeps_the_real_user() {
         let root = std::env::temp_dir().join("libra-hermes-local-root");

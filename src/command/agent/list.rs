@@ -164,9 +164,9 @@ pub async fn execute_safe(args: ListArgs, output: &OutputConfig) -> CliResult<()
     for kind in AgentKind::all() {
         let row = registration_for(*kind);
         // Only supported agents are surfaced. `grok` uses support_wave
-        // `grok`, not `first_batch`. Unsupported agents stay in the static
-        // registry so historical sessions remain readable, but they are
-        // omitted from this listing.
+        // `grok` and `hermes` uses `hermes`, not `first_batch`. Unsupported
+        // agents stay in the static registry so historical sessions remain
+        // readable, but they are omitted from this listing.
         if !row.supported {
             continue;
         }

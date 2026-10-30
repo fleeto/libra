@@ -430,7 +430,7 @@ impl std::fmt::Display for HermesBridgeStatus {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(
             formatter,
-            "Hermes export bridge: trusted={}; source-qualified; native origin is not claimed; hook install remains disabled",
+            "Hermes export bridge: trusted={}; source-qualified; native origin is not claimed; review and investigate stay closed; cloud sync stays refused",
             if self.trusted { "yes" } else { "no" }
         )
     }

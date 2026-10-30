@@ -1,8 +1,9 @@
 //! Local CLI scope admission and the observe-only Hermes hook.
 //!
 //! HM-09 exposes the pure parser and scope API. HM-05 accepts the proven
-//! observers through `libra agent hooks hermes observe`. Hook installation
-//! stays disabled, and `as_hooks()` stays empty, until capture is public.
+//! observers through `libra agent hooks hermes observe`. HM-06 installs the
+//! Libra-owned plugin when the marker and sha256 match. Review and
+//! investigate launch stay closed.
 
 pub mod parser;
 pub mod scope;

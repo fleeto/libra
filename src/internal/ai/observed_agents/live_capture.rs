@@ -759,6 +759,12 @@ pub(super) struct GrokLiveCapture;
 
 impl LiveCaptureProvider for GrokLiveCapture {}
 
+/// Hermes is hook-installable, so the live lookup must be `Some`. Thinking
+/// text arrives through the JSONL export reader, not through this policy.
+pub(super) struct HermesLiveCapture;
+
+impl LiveCaptureProvider for HermesLiveCapture {}
+
 impl LiveCaptureProvider for OpenCodeLiveCapture {
     fn missing_host_capture_budget(&self) -> Option<Duration> {
         Some(ExportLimits::default().deadline)

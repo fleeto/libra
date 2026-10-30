@@ -60,17 +60,13 @@ pub fn admit_hermes_scope(
     verified: &HermesVerifiedWorktree,
     candidate: &HermesScopeCandidate,
 ) -> HermesScopeDecision {
-    if !is_local_cli(candidate.platform.as_deref()) {
+    if !hermes_local_cli_transport(
+        candidate.platform.as_deref(),
+        candidate.created_source.as_deref(),
+    ) {
         return HermesScopeDecision::Refuse("hermes scope platform is not the local cli");
     }
-    if !created_source_is_local_cli(candidate.created_source.as_deref()) {
-        return HermesScopeDecision::Refuse("hermes scope created source is not the local cli");
-    }
-    if candidate
-        .user_id
-        .as_deref()
-        .is_some_and(|user| !user.is_empty())
-    {
+    if !hermes_local_operator_user(candidate.user_id.as_deref()) {
         return HermesScopeDecision::Refuse("hermes scope user is not the local session");
     }
     let Some(cwd) = candidate.cwd.as_deref().filter(|cwd| !cwd.is_empty()) else {
@@ -87,14 +83,41 @@ pub fn admit_hermes_scope(
     HermesScopeDecision::Admit
 }
 
-fn is_local_cli(platform: Option<&str>) -> bool {
-    platform.is_some_and(|value| value.eq_ignore_ascii_case("cli"))
-}
-
-fn created_source_is_local_cli(created: Option<&str>) -> bool {
-    match created {
+/// `source=cli` is the explicit CLI label. Hermes v0.22.5 also stores the
+/// CLI transport as `source=local` with `created_source=cli`. A missing
+/// platform, or `local` without that creator, stays out.
+pub(crate) fn hermes_local_cli_transport(source: Option<&str>, created: Option<&str>) -> bool {
+    let created_ok = match created {
         None | Some("") => true,
         Some(value) => value.eq_ignore_ascii_case("cli"),
+    };
+    match source {
+        Some(value) if value.eq_ignore_ascii_case("cli") => created_ok,
+        Some(value) if value.eq_ignore_ascii_case("local") => {
+            created.is_some_and(|value| value.eq_ignore_ascii_case("cli"))
+        }
+        _ => false,
+    }
+}
+
+/// Empty means the hook or export omitted a user. `uid:<current euid>` is
+/// the local CLI peer subject. Any other non-empty value stays out.
+pub(crate) fn hermes_local_operator_user(user: Option<&str>) -> bool {
+    match user {
+        None | Some("") => true,
+        Some(value) => {
+            let Some(rest) = value.strip_prefix("uid:") else {
+                return false;
+            };
+            if rest.is_empty() || !rest.bytes().all(|byte| byte.is_ascii_digit()) {
+                return false;
+            }
+            let Ok(parsed) = rest.parse::<u32>() else {
+                return false;
+            };
+            // SAFETY: geteuid only reads the process credential and takes no pointer.
+            parsed == unsafe { libc::geteuid() }
+        }
     }
 }
 
@@ -513,14 +536,44 @@ mod tests {
     }
 
     #[test]
-    fn hermes_scope_admission_does_not_promote_the_roster() {
+    fn hermes_scope_local_transport_keeps_the_real_user() {
+        let root = std::env::temp_dir().join("libra-hermes-local-root");
+        let verified = HermesVerifiedWorktree {
+            root: root.clone(),
+            profile: "default".to_string(),
+        };
+        // SAFETY: geteuid only reads the process credential.
+        let uid = unsafe { libc::geteuid() };
+        let local = HermesScopeCandidate {
+            platform: Some("local".to_string()),
+            created_source: Some("cli".to_string()),
+            user_id: Some(format!("uid:{uid}")),
+            cwd: Some(root.display().to_string()),
+            recorded_profile: Some("default".to_string()),
+        };
+        assert!(admit_hermes_scope(&verified, &local).is_admit());
+        let missing_creator = HermesScopeCandidate {
+            created_source: None,
+            user_id: Some(format!("uid:{uid}")),
+            ..local.clone()
+        };
+        assert!(!admit_hermes_scope(&verified, &missing_creator).is_admit());
+        let foreign = HermesScopeCandidate {
+            user_id: Some("telegram-user".to_string()),
+            ..local
+        };
+        assert!(!admit_hermes_scope(&verified, &foreign).is_admit());
+    }
+
+    #[test]
+    fn hermes_scope_admission_keeps_launchers_closed() {
         let row = registration_for(AgentKind::Hermes);
-        assert!(!row.supported);
-        assert!(!row.hook_installable);
-        assert!(!row.transcript_readable);
+        assert!(row.supported);
+        assert!(row.hook_installable);
+        assert!(row.transcript_readable);
         assert!(!row.launchable_review);
         assert!(!row.launchable_investigate);
-        assert!(agent_for(AgentKind::Hermes).as_hooks().is_none());
+        assert!(agent_for(AgentKind::Hermes).as_hooks().is_some());
         assert!(live_capture_matches_hook_installable(AgentKind::Hermes));
     }
 }

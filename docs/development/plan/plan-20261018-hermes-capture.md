@@ -813,9 +813,9 @@ Claude 审查实现 `VERDICT: PASS`。文档挂错常量之后的复核轮也是
 
 **Task type:** implementation
 
-**Lifecycle / Acceptance:** pending / 空
+**Lifecycle / Acceptance:** done / complete
 
-**Description:** 匹配版本真实smoke后才公开capture enable/disable/list。
+**Description:** 匹配版本真实smoke后才公开capture enable/disable/list。Claude review R2 `VERDICT: PASS`，正文 SHA-256 `01096473306808f5cbc3243a8e4cc04d182c45c9e78fdc22594bc6458db74fe7`。发布窗口 v0.30.102。隔离 profile `/Volumes/Data/hermes-hm06-profile` 上的 Hermes v0.22.5 `bf0203a` 用本地 Ollama `qwen3:0.6b` 写了 TUI snake。网站实际 checkout 是 `/Volumes/Data/libra-backend`。普通 export 不带 `--redact`。session `local-38c05ed6c90ffe72345ab2f03dcec9236e043fe142a006adc5edd87430a41388` 的 assistant message 9 上 `reasoning` 与 `reasoning_content` 都是 2180 字符且相等，`active=1`。`source=local`、`created_source=cli`、`user_id=uid:501`、cwd 等于临时仓库根。同一会话被 hook 记成 active，并有一条 checkpoint。没有读取 `~/.hermes` 的 state、sessions、config 或 `.env`。CI 仍只用 fake。`cloud sync` 仍拒绝 `hermes`。review 与 investigate 仍不启动。
 
 **Current evidence:** `adapter.rs:30` 的 `AgentKind` 无 Hermes；`registry.rs:134` 的 8 行注册表无 hermes；`capture/extraction.rs:438` 对其余 kind 返回 partial；`migration.rs:572` 的 CHECK 扩展只到 grok。v0.22.5 的 callsite 与哈希见「HM-00 版本冻结」。
 
@@ -823,15 +823,15 @@ Claude 审查实现 `VERDICT: PASS`。文档挂错常量之后的复核轮也是
 
 **Acceptance criteria:**
 
-- [ ] install/update/remove仅marker+hash确认为Libra-owned asset，unmanaged/漂移文件不覆盖。
-- [ ] 缺binary/config时bare enable安全skip；unsupported时explicit enable无副作用。
-- [ ] 隔离本机系统 Hermes 实现 TUI 贪吃蛇，验证 install/capture/自动 checkpoint/普通 export 与 source 非空 thinking 逐值一致，再 doctor/disable；失败/中断恢复分别验证。
-- [ ] supported/capability/roster/help与docs同批，review/investigate launchable保持false。
-- [ ] cloud-local-only、supported pin、覆盖缺口与恢复写入agent/cloud文档及网站；CI只用fake。
+- [x] install/update/remove仅marker+hash确认为Libra-owned asset，unmanaged/漂移文件不覆盖。
+- [x] 缺binary/config时bare enable安全skip；unsupported时explicit enable无副作用。
+- [x] 隔离本机系统 Hermes 实现 TUI 贪吃蛇，验证 install/capture/自动 checkpoint/普通 export 与 source 非空 thinking 逐值一致，再 doctor/disable；失败/中断恢复分别验证。
+- [x] supported/capability/roster/help与docs同批，review/investigate launchable保持false。
+- [x] cloud-local-only、supported pin、覆盖缺口与恢复写入agent/cloud文档及网站；CI只用fake。
 
 **Verification:**
 
-- [ ] `source .env.test && cargo test --test command_test agent_roster_test::hermes_ -- --test-threads=1`（拟新增过滤名；须列出实际匹配并确认非零）
+- [x] `source .env.test && cargo test --test command_test agent_roster_test::hermes_ -- --test-threads=1`（`hermes_owned_asset_is_not_overwritten_when_unmanaged_or_drifted` 与 `hermes_missing_runtime_skips_bare_enable_and_refuses_explicit`，2 passed）
 
 **Full-suite trigger:** T-1/T-4（共享采集、存储、CLI 或测试契约）；执行四 provider 契约的完整双环境 nextest 门
 

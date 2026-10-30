@@ -307,6 +307,10 @@ impl ObservedAgent for HermesObservedAgent {
     fn protected_dirs(&self) -> &'static [&'static str] {
         &[".hermes"]
     }
+
+    fn as_hooks(&self) -> Option<&dyn crate::internal::ai::hooks::provider::HookProvider> {
+        Some(crate::internal::ai::hooks::providers::hermes_provider())
+    }
 }
 
 fn project_messages(messages: &[Value], limits: &HermesReadLimits) -> HermesSourceStatus {
@@ -372,16 +376,15 @@ fn session_scope_matches(session: &serde_json::Map<String, Value>, scope: &Herme
     if session.get("id").and_then(Value::as_str) != Some(scope.session_id.as_str()) {
         return false;
     }
-    let source = session.get("source").and_then(Value::as_str);
-    let created = session.get("created_source").and_then(Value::as_str);
-    if !source.is_some_and(cli_source) || created.is_some_and(|value| !cli_source(value)) {
+    if !crate::internal::ai::hooks::providers::hermes::scope::hermes_local_cli_transport(
+        session.get("source").and_then(Value::as_str),
+        session.get("created_source").and_then(Value::as_str),
+    ) {
         return false;
     }
-    if session
-        .get("user_id")
-        .and_then(Value::as_str)
-        .is_some_and(|user| !user.is_empty())
-    {
+    if !crate::internal::ai::hooks::providers::hermes::scope::hermes_local_operator_user(
+        session.get("user_id").and_then(Value::as_str),
+    ) {
         return false;
     }
     let profile = session.get("profile_name").and_then(Value::as_str);
@@ -396,10 +399,6 @@ fn session_scope_matches(session: &serde_json::Map<String, Value>, scope: &Herme
         return false;
     };
     cwd_inside_repo(Path::new(cwd), &scope.repo_root)
-}
-
-fn cli_source(source: &str) -> bool {
-    source.eq_ignore_ascii_case("cli")
 }
 
 fn cwd_inside_repo(cwd: &Path, repo_root: &Path) -> bool {

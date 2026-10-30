@@ -8642,7 +8642,10 @@ async fn agent_kind_enum_sql_check_and_doc_roster_stay_in_sync() {
         .filter(|row| row.supported)
         .map(|row| row.slug)
         .collect();
-    assert_eq!(supported, ["claude-code", "codex", "opencode", "grok"]);
+    assert_eq!(
+        supported,
+        ["claude-code", "codex", "opencode", "grok", "hermes"]
+    );
     let first_batch: Vec<_> = registry()
         .iter()
         .filter(|row| row.supported && row.support_wave == Some("first_batch"))

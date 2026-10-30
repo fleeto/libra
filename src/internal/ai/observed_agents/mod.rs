@@ -104,8 +104,9 @@ pub use redaction::{
     RedactionRule, Redactor,
 };
 pub use registry::{
-    AgentRegistration, FIRST_BATCH_WAVE, GROK_WAVE, SlugLookup, launchable_investigate_slugs,
-    launchable_review_slugs, lookup_cli_slug, registration_for, registry, supported_slugs,
+    AgentRegistration, FIRST_BATCH_WAVE, GROK_WAVE, HERMES_WAVE, SlugLookup,
+    launchable_investigate_slugs, launchable_review_slugs, lookup_cli_slug, registration_for,
+    registry, supported_slugs,
 };
 pub use rpc::{
     AgentInfo, RPC_BINARY_PREFIX, RPC_DEFAULT_TIMEOUT, RPC_MAX_STDERR_BYTES, RPC_PROTOCOL_VERSION,
@@ -233,6 +234,7 @@ pub(crate) fn live_capture_for(
     static CODEX_POLICY: live_capture::CodexLiveCapture = live_capture::CodexLiveCapture;
     static OPENCODE_POLICY: live_capture::OpenCodeLiveCapture = live_capture::OpenCodeLiveCapture;
     static GROK_POLICY: live_capture::GrokLiveCapture = live_capture::GrokLiveCapture;
+    static HERMES_POLICY: live_capture::HermesLiveCapture = live_capture::HermesLiveCapture;
     static CLAUDE_CODE_LIVE: LiveCaptureRegistration<dyn LiveCaptureProvider> =
         LiveCaptureRegistration {
             policy: &CLAUDE_POLICY,
@@ -251,13 +253,18 @@ pub(crate) fn live_capture_for(
         policy: &GROK_POLICY,
         locator: None,
     };
+    static HERMES_LIVE: LiveCaptureRegistration<dyn LiveCaptureProvider> =
+        LiveCaptureRegistration {
+            policy: &HERMES_POLICY,
+            locator: None,
+        };
     match kind {
         AgentKind::ClaudeCode => Some(&CLAUDE_CODE_LIVE),
         AgentKind::Codex => Some(&CODEX_LIVE),
         AgentKind::OpenCode => Some(&OPENCODE_LIVE),
         AgentKind::Cursor | AgentKind::Gemini | AgentKind::Copilot | AgentKind::FactoryAi => None,
         AgentKind::Grok => Some(&GROK_LIVE),
-        AgentKind::Hermes => None,
+        AgentKind::Hermes => Some(&HERMES_LIVE),
     }
 }
 

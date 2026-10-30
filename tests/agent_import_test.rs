@@ -4886,6 +4886,94 @@ fn hermes_source_jsonl_keeps_thinking_and_drops_revoked_rows() {
 }
 
 #[test]
+fn hermes_source_jsonl_accepts_the_local_transport_label() {
+    let repo = std::path::PathBuf::from("/work/repo");
+    let mut local = serde_json::from_str::<serde_json::Value>(&hermes_source_session(
+        &repo,
+        serde_json::json!([
+            {"active": 1, "compacted": 0, "reasoning": "snake-thought", "reasoning_content": "snake-thought"}
+        ]),
+    ))
+    .expect("json");
+    local["source"] = serde_json::json!("local");
+    local["created_source"] = serde_json::json!("cli");
+    let status = libra::internal::ai::observed_agents::read_hermes_jsonl(
+        local.to_string().as_bytes(),
+        &hermes_source_scope(&repo),
+        &libra::internal::ai::observed_agents::HermesReadLimits::default(),
+    );
+    let libra::internal::ai::observed_agents::HermesSourceStatus::Read(transcript) = status else {
+        panic!("source=local created_source=cli must stay readable: {status}");
+    };
+    assert_eq!(
+        transcript.messages[0].readable_thinking(),
+        Some("snake-thought")
+    );
+    local["created_source"] = serde_json::json!("telegram");
+    let status = libra::internal::ai::observed_agents::read_hermes_jsonl(
+        local.to_string().as_bytes(),
+        &hermes_source_scope(&repo),
+        &libra::internal::ai::observed_agents::HermesReadLimits::default(),
+    );
+    assert!(matches!(
+        status,
+        libra::internal::ai::observed_agents::HermesSourceStatus::Unavailable
+    ));
+}
+
+#[test]
+fn hermes_source_jsonl_accepts_only_the_local_uid_subject() {
+    let repo = std::path::PathBuf::from("/work/repo");
+    let mut local = serde_json::from_str::<serde_json::Value>(&hermes_source_session(
+        &repo,
+        serde_json::json!([
+            {"active": 1, "compacted": 0, "reasoning": "local-thought", "reasoning_content": "local-thought"}
+        ]),
+    ))
+    .expect("json");
+    // SAFETY: geteuid only reads the process credential.
+    let uid = unsafe { libc::geteuid() };
+    local["user_id"] = serde_json::json!(format!("uid:{uid}"));
+    let status = libra::internal::ai::observed_agents::read_hermes_jsonl(
+        local.to_string().as_bytes(),
+        &hermes_source_scope(&repo),
+        &libra::internal::ai::observed_agents::HermesReadLimits::default(),
+    );
+    let libra::internal::ai::observed_agents::HermesSourceStatus::Read(transcript) = status else {
+        panic!("local uid must stay readable: {status}");
+    };
+    assert_eq!(
+        transcript.messages[0].readable_thinking(),
+        Some("local-thought")
+    );
+
+    local["user_id"] = serde_json::json!("uid:0");
+    if uid == 0 {
+        local["user_id"] = serde_json::json!("uid:1");
+    }
+    let status = libra::internal::ai::observed_agents::read_hermes_jsonl(
+        local.to_string().as_bytes(),
+        &hermes_source_scope(&repo),
+        &libra::internal::ai::observed_agents::HermesReadLimits::default(),
+    );
+    assert!(matches!(
+        status,
+        libra::internal::ai::observed_agents::HermesSourceStatus::Unavailable
+    ));
+    local["user_id"] = serde_json::json!("telegram-user");
+    let status = libra::internal::ai::observed_agents::read_hermes_jsonl(
+        local.to_string().as_bytes(),
+        &hermes_source_scope(&repo),
+        &libra::internal::ai::observed_agents::HermesReadLimits::default(),
+    );
+    assert!(matches!(
+        status,
+        libra::internal::ai::observed_agents::HermesSourceStatus::Unavailable
+    ));
+    assert!(!status.to_string().contains("local-thought"));
+}
+
+#[test]
 fn hermes_source_jsonl_rejects_gateway_outside_cwd_and_symlink() {
     let root = tempfile::tempdir().expect("root");
     let repo = root.path().join("repo");

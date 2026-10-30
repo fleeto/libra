@@ -931,7 +931,7 @@ fn hermes_exporter_trust_is_not_opencode_trust() {
     let after_out = String::from_utf8_lossy(&after.stdout);
     assert!(
         after_out.contains("Hermes export bridge: trusted=yes")
-            && after_out.contains("hook install remains disabled"),
+            && after_out.contains("cloud sync stays refused"),
         "{after_out}"
     );
 

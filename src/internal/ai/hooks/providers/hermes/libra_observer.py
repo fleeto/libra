@@ -9,6 +9,7 @@ tool or message control value. Hook installation belongs to a later card.
 from __future__ import annotations
 
 import json
+import os
 import sys
 from pathlib import Path
 from typing import Optional
@@ -16,13 +17,11 @@ from typing import Optional
 
 def admit(payload: dict) -> str:
     platform = payload.get("platform")
-    if not isinstance(platform, str) or platform.lower() != "cli":
-        return "refuse"
     created = payload.get("created_source")
-    if isinstance(created, str) and created != "" and created.lower() != "cli":
+    if not _local_transport(platform, created):
         return "refuse"
     user = payload.get("user_id")
-    if isinstance(user, str) and user != "":
+    if not _local_user(user):
         return "refuse"
     cwd = payload.get("cwd")
     root = payload.get("verified_root")
@@ -48,6 +47,33 @@ def admit(payload: dict) -> str:
 
 def _has_dot(path: Path) -> bool:
     return any(part in {".", ".."} for part in path.parts)
+
+
+def _local_transport(platform, created) -> bool:
+    if not isinstance(platform, str) or platform == "":
+        return False
+    label = platform.lower()
+    created_ok = (
+        created is None
+        or created == ""
+        or (isinstance(created, str) and created.lower() == "cli")
+    )
+    if label == "cli":
+        return created_ok
+    if label == "local":
+        return isinstance(created, str) and created.lower() == "cli"
+    return False
+
+
+def _local_user(user) -> bool:
+    if user is None or user == "":
+        return True
+    if not isinstance(user, str) or not user.startswith("uid:"):
+        return False
+    rest = user[4:]
+    if rest == "" or not rest.isdigit():
+        return False
+    return int(rest) == os.geteuid()
 
 
 ALLOWLIST = (

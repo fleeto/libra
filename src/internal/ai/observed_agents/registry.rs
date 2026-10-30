@@ -32,6 +32,8 @@ use super::{adapter::AgentKind, capability::DeclaredAgentCaps};
 pub const FIRST_BATCH_WAVE: &str = "first_batch";
 /// GK-05 support wave. It is not `first_batch`.
 pub const GROK_WAVE: &str = "grok";
+/// HM-06 support wave. It is not `first_batch`.
+pub const HERMES_WAVE: &str = "hermes";
 
 /// One frozen capability-matrix row (AG-16 field set).
 ///
@@ -283,19 +285,20 @@ static REGISTRY: [AgentRegistration; 9] = [
         slug: "hermes",
         agent_kind: "hermes",
         db_value: "hermes",
-        // HM-01: repository identity only. Capture, hook install, and
-        // review/investigate launch stay closed until a later card.
-        supported: false,
-        support_wave: None,
+        // HM-06: supported after a real isolated session emitted non-empty
+        // reasoning. Review and investigate stay closed. Cloud sync stays
+        // refused by the capture allowlist.
+        supported: true,
+        support_wave: Some(HERMES_WAVE),
         registered: true,
-        transcript_readable: false,
-        hook_installable: false,
+        transcript_readable: true,
+        hook_installable: true,
         installed: false,
         launchable_review: false,
         launchable_investigate: false,
         external_binary: false,
-        config_paths: &[],
-        capabilities: NO_CAPS,
+        config_paths: &["plugins/libra-hermes-capture"],
+        capabilities: HOOKS_ONLY,
     },
 ];
 
@@ -398,13 +401,18 @@ mod tests {
         assert_eq!(first_batch, ["claude-code", "codex", "opencode"]);
         assert_eq!(
             supported_slugs(),
-            ["claude-code", "codex", "opencode", "grok"]
+            ["claude-code", "codex", "opencode", "grok", "hermes"]
         );
         let grok = registration_for(AgentKind::Grok);
         assert_eq!(grok.support_wave, Some(GROK_WAVE));
         assert_ne!(grok.support_wave, Some(FIRST_BATCH_WAVE));
+        let hermes = registration_for(AgentKind::Hermes);
+        assert_eq!(hermes.support_wave, Some(HERMES_WAVE));
+        assert_ne!(hermes.support_wave, Some(FIRST_BATCH_WAVE));
+        assert!(!hermes.launchable_review);
+        assert!(!hermes.launchable_investigate);
         for row in registry() {
-            if row.slug == "grok" {
+            if row.slug == "grok" || row.slug == "hermes" {
                 continue;
             }
             if row.supported {

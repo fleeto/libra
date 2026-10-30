@@ -5960,9 +5960,14 @@ fn hermes_observe_plugin_forwards_only_the_allowlist() {
     std::fs::create_dir_all(root.join(".libra")).expect("plugin worktree marker");
     let script = root.join("libra-stub");
     let captured = root.join("stdin.json");
+    let env_log = root.join("child-env.txt");
     std::fs::write(
         &script,
-        format!("#!/bin/sh\ncat > '{}'\nexit 0\n", captured.display()),
+        format!(
+            "#!/bin/sh\ncat > '{}'\nenv > '{}'\nexit 0\n",
+            captured.display(),
+            env_log.display()
+        ),
     )
     .unwrap();
     std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
@@ -5987,6 +5992,8 @@ fn hermes_observe_plugin_forwards_only_the_allowlist() {
         .arg("--hook")
         .env("LIBRA_BIN", &script)
         .env("PATH", "/usr/bin:/bin")
+        .env("HERMES_HOME", root.as_os_str())
+        .env("OPENAI_API_KEY", "parent-secret")
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
@@ -6021,4 +6028,14 @@ fn hermes_observe_plugin_forwards_only_the_allowlist() {
     }
     assert_eq!(frame["hook_event_name"], json!("on_session_end"));
     assert_eq!(frame["source"], json!("cli"));
+    let child_env = std::fs::read_to_string(&env_log).expect("child env");
+    let home = root.display().to_string();
+    assert!(
+        child_env.contains(&format!("HERMES_HOME={home}")),
+        "plugin dropped HERMES_HOME: {child_env}"
+    );
+    assert!(
+        !child_env.contains("OPENAI_API_KEY") && !child_env.contains("parent-secret"),
+        "plugin forwarded a parent secret: {child_env}"
+    );
 }

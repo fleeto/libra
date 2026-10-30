@@ -29,7 +29,10 @@ use crate::internal::ai::{
 
 /// Live hook budget from the four-provider contract. A later explicit retry
 /// uses a new deadline; this one is not extended in place.
-pub const HERMES_LIVE_DEADLINE: Duration = Duration::from_secs(2);
+/// Child budget for `hermes sessions export`. A v0.22.5 export of one local
+/// session measured about 12s, so the old 2s budget killed the process
+/// before it wrote JSONL. 20s stays inside the 30s capture wrapper.
+pub const HERMES_LIVE_DEADLINE: Duration = Duration::from_secs(20);
 
 const EXPORT_ARGV: [&str; 5] = ["sessions", "export", "--format", "jsonl", "--session-id"];
 
@@ -244,7 +247,13 @@ async fn export_under_lease(
         .current_dir(&request.cwd)
         .env_clear()
         .env("PWD", &request.cwd)
-        .env("PATH", "/usr/bin:/bin")
+        .env("PATH", "/usr/bin:/bin");
+    // The account default profile is a different database. Forward only an
+    // absolute HERMES_HOME so an isolated profile is the one that is read.
+    if let Some(home) = forwarded_hermes_home() {
+        child.env("HERMES_HOME", home);
+    }
+    child
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
@@ -378,12 +387,24 @@ fn request_is_safe(request: &HermesLiveRequest) -> bool {
 }
 
 fn session_id_is_safe(session_id: &str) -> bool {
-    // Same component rule as Hermes import: one argv token, not a 32-hex pin.
+    // One argv token. Hook admission allows 128 characters. A Hermes local
+    // id is `local-` plus 64 hex digits, which is 70 characters.
     !session_id.is_empty()
-        && session_id.len() <= 64
+        && session_id.len() <= 128
         && session_id
             .chars()
             .all(|character| character.is_ascii_alphanumeric() || matches!(character, '-' | '_'))
+}
+
+/// Absolute `HERMES_HOME` only. A missing or relative value is not forwarded,
+/// so the child cannot be pointed at a path the operator did not name.
+fn forwarded_hermes_home() -> Option<std::ffi::OsString> {
+    let value = std::env::var_os("HERMES_HOME")?;
+    let text = value.to_str()?;
+    if text.is_empty() || text.contains(['\0', '\n', '\r']) || !Path::new(text).is_absolute() {
+        return None;
+    }
+    Some(value)
 }
 
 fn stdout_signals_unavailable(stdout: &str) -> bool {

@@ -433,6 +433,23 @@ def _callback(event: str):
     return run
 
 
+def _observer_env() -> dict:
+    env = {
+        "PATH": os.environ.get("PATH", ""),
+        "HOME": os.environ.get("HOME", ""),
+    }
+    home = os.environ.get("HERMES_HOME", "")
+    if (
+        home
+        and "\x00" not in home
+        and "\n" not in home
+        and "\r" not in home
+        and (home.startswith("/") or (len(home) >= 3 and home[1] == ":" and home[2] in "\\/"))
+    ):
+        env["HERMES_HOME"] = home
+    return env
+
+
 def _forward(event: str, kwargs: dict) -> None:
     if event not in _OBSERVERS or event == "on_session_reset":
         return
@@ -444,8 +461,8 @@ def _forward(event: str, kwargs: dict) -> None:
             [LIBRA_BINARY, "agent", "hooks", "hermes", "observe"],
             input=json.dumps(frame).encode("utf-8"),
             cwd=frame["cwd"],
-            env={"PATH": os.environ.get("PATH", ""), "HOME": os.environ.get("HOME", "")},
-            timeout=2,
+            env=_observer_env(),
+            timeout=30,
             check=False,
         )
     except (OSError, subprocess.TimeoutExpired):

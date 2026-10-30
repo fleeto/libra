@@ -83,6 +83,8 @@ pub struct HermesLiveRead {
     pub source_state: &'static str,
     pub spawned: bool,
     pub readable_thinking: Vec<String>,
+    /// Original selected export bytes. Empty when the read did not keep a frame.
+    pub transcript: Vec<u8>,
 }
 
 impl HermesLiveRead {
@@ -94,6 +96,7 @@ impl HermesLiveRead {
             source_state: "unproven",
             spawned,
             readable_thinking: Vec::new(),
+            transcript: Vec::new(),
         }
     }
 }
@@ -333,6 +336,7 @@ fn finish_bytes(
             .iter()
             .filter_map(|item| item.readable_thinking().map(str::to_string))
             .collect(),
+        transcript: bytes.to_vec(),
     })
 }
 
@@ -351,6 +355,7 @@ fn finish_transcript(
             .iter()
             .filter_map(|message| message.readable_thinking().map(str::to_string))
             .collect(),
+        transcript: Vec::new(),
     })
 }
 
@@ -439,4 +444,39 @@ impl std::fmt::Display for HermesBridgeStatus {
 /// The fixed exporter arguments, without the session id or output path.
 pub fn hermes_export_argv() -> &'static [&'static str] {
     &EXPORT_ARGV
+}
+
+/// Live snapshot entry. The capture layer calls this before it admits its own
+/// export runner, so this function can take the export-job lease itself.
+pub async fn export_for_live_capture(
+    session_id: &str,
+    cwd: &Path,
+    deadline: Instant,
+) -> Result<HermesLiveRead, HermesLiveError> {
+    if !session_id_is_safe(session_id) || !cwd.is_absolute() || Instant::now() >= deadline {
+        return Err(HermesLiveError::BadRequest);
+    }
+    let storage = crate::utils::util::try_get_storage_path(Some(cwd.to_path_buf()))
+        .map_err(|_| HermesLiveError::Unavailable)?;
+    let database = storage.join(crate::utils::util::DATABASE);
+    let conn = crate::internal::db::get_db_conn_instance_for_path(&database)
+        .await
+        .map_err(|_| HermesLiveError::Unavailable)?;
+    let scope = CaptureScope::resolve(&conn, cwd)
+        .await
+        .map_err(|_| HermesLiveError::Unavailable)?;
+    let trust = HermesExporterTrust::load(&conn)
+        .await
+        .map_err(|_| HermesLiveError::Unavailable)?;
+    let Some(trust) = trust else {
+        return Err(HermesLiveError::Unavailable);
+    };
+    let request = HermesLiveRequest {
+        session_id: session_id.to_string(),
+        profile: "default".to_string(),
+        cwd: cwd.to_path_buf(),
+        source: HermesLiveSource::Export,
+    };
+    let lease = acquire_hermes_export_lease(&conn, &scope, session_id, deadline).await?;
+    read_hermes_live_source(&conn, &scope, lease, Some(&trust), &request, deadline).await
 }

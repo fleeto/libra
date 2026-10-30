@@ -1805,6 +1805,27 @@ pub(super) async fn run_export_stage<'a, P: LiveExportLeasePort>(
     // second execution window.
     let export_deadline = capture_deadline
         .context("export capture deadline was not established at runtime ingress")?;
+    // Hermes acquires the export-job lease inside `read_hermes_live_source`.
+    // That has to finish, including the release, before this stage admits
+    // its own runner for the same session.
+    let managed_source = if exporter.manages_export_lease() {
+        let exported = match tokio::time::timeout_at(
+            tokio::time::Instant::from_std(export_deadline.monotonic()),
+            exporter.export(context, export_deadline.monotonic()),
+        )
+        .await
+        {
+            Ok(Ok(source)) => source,
+            Ok(Err(_)) | Err(_) => {
+                return Ok(ExportStage::MetadataOnly {
+                    catalog_reservation: Box::new(catalog_reservation),
+                });
+            }
+        };
+        Some(exported)
+    } else {
+        None
+    };
     let target = LiveExportTarget {
         agent_kind: binding.agent_kind_db(),
         provider_session_id: context.provider_session_id,
@@ -1841,21 +1862,25 @@ pub(super) async fn run_export_stage<'a, P: LiveExportLeasePort>(
         // Only source acquisition is cancellable here. Keep the original
         // paired deadline; runner settlement and dispatched SQL/ref COMMIT
         // acknowledgements below must still be awaited without cancellation.
-        let exported = match tokio::time::timeout_at(
-            tokio::time::Instant::from_std(export_deadline.monotonic()),
-            exporter.export(context, export_deadline.monotonic()),
-        )
-        .await
-        {
-            Ok(Ok(source)) => source,
-            Ok(Err(_)) => return Err(ExportStageExit::BridgeUnavailable),
-            Err(_) => {
-                tracing::info!(
-                    session_id = %redact_session_id(libra_session_id),
-                    reason = "export_deadline_elapsed",
-                    "export source cancelled at capture deadline"
-                );
-                return Err(ExportStageExit::BridgeUnavailable);
+        let exported = if let Some(source) = managed_source {
+            source
+        } else {
+            match tokio::time::timeout_at(
+                tokio::time::Instant::from_std(export_deadline.monotonic()),
+                exporter.export(context, export_deadline.monotonic()),
+            )
+            .await
+            {
+                Ok(Ok(source)) => source,
+                Ok(Err(_)) => return Err(ExportStageExit::BridgeUnavailable),
+                Err(_) => {
+                    tracing::info!(
+                        session_id = %redact_session_id(libra_session_id),
+                        reason = "export_deadline_elapsed",
+                        "export source cancelled at capture deadline"
+                    );
+                    return Err(ExportStageExit::BridgeUnavailable);
+                }
             }
         };
         let source = match exported {

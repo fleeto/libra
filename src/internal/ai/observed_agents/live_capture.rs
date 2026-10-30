@@ -334,15 +334,21 @@ pub(crate) trait LiveSubagentDiscovery: Send + Sync {
 }
 
 /// Trusted export of one provider session's transcript (ADR-ACF-10, ACF-20).
-/// It is called only while the capture layer holds the export-job runner
-/// lease, and it never receives the lease, a store or a capture scope.
+/// The default is that the capture layer already holds the export-job runner
+/// lease, and this trait never receives that lease.
 ///
-/// Hermes uses the same rule from `hermes_export`: the export-job lease is
-/// acquired first, and the fixed `hermes sessions export` argv runs only
-/// after that. Hermes stays out of `live_capture_for` until it is
-/// hook-installable.
+/// Hermes is the exception: [`LiveTranscriptExporter::manages_export_lease`]
+/// is true, so the capture layer calls `export` before admitting its own
+/// runner. That call uses `hermes_export::read_hermes_live_source`, which
+/// acquires the same export-job lease, runs the fixed argv, and releases it.
 #[async_trait]
 pub(crate) trait LiveTranscriptExporter: Send + Sync {
+    /// When true, `export` acquires and releases the export-job lease itself.
+    /// The capture layer must call it before admitting its own runner.
+    fn manages_export_lease(&self) -> bool {
+        false
+    }
+
     /// Export the session transcript before `deadline`. A successful export
     /// is an authorized `TranscriptSource::Bytes`; an unavailable bridge
     /// reports its own content-free `reason=` before returning `Err`.
@@ -760,10 +766,61 @@ pub(super) struct GrokLiveCapture;
 impl LiveCaptureProvider for GrokLiveCapture {}
 
 /// Hermes is hook-installable, so the live lookup must be `Some`. Thinking
-/// text arrives through the JSONL export reader, not through this policy.
+/// text arrives through the JSONL export reader on the live snapshot path.
 pub(super) struct HermesLiveCapture;
 
-impl LiveCaptureProvider for HermesLiveCapture {}
+impl LiveCaptureProvider for HermesLiveCapture {
+    fn missing_host_capture_budget(&self) -> Option<Duration> {
+        // The subprocess itself stays inside `HERMES_LIVE_DEADLINE`. The
+        // capture wrapper needs the same room as the other export bridge so
+        // the checkpoint write is not cancelled after a fast export.
+        Some(super::opencode_export::ExportLimits::default().deadline)
+    }
+
+    fn transcript_exporter(&self) -> Option<&dyn LiveTranscriptExporter> {
+        Some(self)
+    }
+}
+
+#[async_trait]
+impl LiveTranscriptExporter for HermesLiveCapture {
+    fn manages_export_lease(&self) -> bool {
+        true
+    }
+
+    async fn export(
+        &self,
+        context: &LiveCaptureContext<'_>,
+        deadline: Instant,
+    ) -> Result<TranscriptSource> {
+        let read = super::hermes_export::export_for_live_capture(
+            context.provider_session_id,
+            context.verified_cwd,
+            deadline,
+        )
+        .await?;
+        if read.readable_thinking.is_empty() || read.transcript.is_empty() {
+            anyhow::bail!("hermes export bridge unavailable");
+        }
+        Ok(TranscriptSource::from_hermes_projection(
+            context.libra_session_id,
+            read.transcript,
+        ))
+    }
+
+    fn export_coverage_normalizer(&self) -> LiveCoverageNormalizer {
+        hermes_export_coverage
+    }
+}
+
+fn hermes_export_coverage(transcript: &RedactedBytes) -> Vec<NormalizedTurn> {
+    // Ordinary turns come from the selected export. Thinking stays in the
+    // retained JSONL and is not copied into the turn prompt.
+    match super::builtin::hermes::hermes_worker_frame_authorized(transcript.bytes(), None) {
+        Ok(frame) => frame.ordinary,
+        Err(_) => Vec::new(),
+    }
+}
 
 impl LiveCaptureProvider for OpenCodeLiveCapture {
     fn missing_host_capture_budget(&self) -> Option<Duration> {
@@ -1250,8 +1307,10 @@ mod tests {
             );
             let binding = LiveCaptureBinding::for_kind(db, kind);
 
-            // effective_agent_capture_deadline: `provider_kind != "opencode"`.
-            let legacy_budget = (db == "opencode").then(|| ExportLimits::default().deadline);
+            let legacy_budget = match db {
+                "opencode" | "hermes" => Some(ExportLimits::default().deadline),
+                _ => None,
+            };
             assert_eq!(binding.missing_host_capture_budget(), legacy_budget, "{db}");
 
             // write_committed_checkpoint: `agent_kind == "claude_code"`
@@ -1308,23 +1367,35 @@ mod tests {
                 "{db}"
             );
 
-            // write_committed_checkpoint: only `agent_kind == "opencode"`
-            // entered the trusted export bridge, normalizing its bytes with
-            // the OpenCode export normalizer.
             match binding.transcript_exporter() {
                 Some(exporter) => {
-                    assert_eq!(db, "opencode", "{db}: unexpected transcript exporter");
-                    let fixture =
-                        RedactedBytes::new_unchecked(OPENCODE_FIXTURE.as_bytes().to_vec());
-                    let normalize = exporter.export_coverage_normalizer();
-                    assert_eq!(normalize(&fixture).len(), 1, "{db}");
-                    assert_eq!(
-                        normalize(&fixture),
-                        normalize_opencode_export(fixture.bytes()),
-                        "{db}"
+                    assert!(
+                        matches!(db, "opencode" | "hermes"),
+                        "{db}: unexpected transcript exporter"
                     );
+                    let normalize = exporter.export_coverage_normalizer();
+                    if db == "opencode" {
+                        let fixture =
+                            RedactedBytes::new_unchecked(OPENCODE_FIXTURE.as_bytes().to_vec());
+                        assert_eq!(normalize(&fixture).len(), 1, "{db}");
+                        assert_eq!(
+                            normalize(&fixture),
+                            normalize_opencode_export(fixture.bytes()),
+                            "{db}"
+                        );
+                    } else {
+                        assert!(
+                            exporter.manages_export_lease(),
+                            "{db}: hermes export must take the export-job lease itself"
+                        );
+                        let fixture = RedactedBytes::new_unchecked(Vec::new());
+                        assert!(normalize(&fixture).is_empty(), "{db}");
+                    }
                 }
-                None => assert_ne!(db, "opencode", "{db}: missing transcript exporter"),
+                None => assert!(
+                    !matches!(db, "opencode" | "hermes"),
+                    "{db}: missing transcript exporter"
+                ),
             }
             // The live checkpoint writer runs live coverage and the export
             // stage as alternatives; one provider must never expose both.

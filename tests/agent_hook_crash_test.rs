@@ -3552,6 +3552,112 @@ fn hermes_source_bridge_runs_fixed_argv_under_the_export_lease() {
     });
 }
 
+/// A hook checkpoint loads thinking through the live export reader. The
+/// ordinary checkpoint export keeps the source `reasoning` field.
+#[test]
+fn hermes_observe_checkpoint_exports_nonempty_reasoning() {
+    let repo = HookRepo::init();
+    let bin_dir = repo.home.join("bin");
+    let binary = bin_dir.join("hermes");
+    let argv = repo.home.join("argv.txt");
+    let session = "hermes-live-1";
+    let script = format!(
+        "#!/bin/sh\nif [ \"$1\" = \"--version\" ]; then\n  echo 'Hermes Agent v0.22.5 (2026.9.24) · stable · local bf0203a794a0'\n  exit 0\nfi\nprintf '%s\\n' \"$@\" > '{argv}'\nout=\nfor arg in \"$@\"; do out=\"$arg\"; done\ncat > \"$out\" <<EOF\n{{\"id\":\"{session}\",\"source\":\"cli\",\"cwd\":\"{cwd}\",\"messages\":[{{\"id\":1,\"role\":\"assistant\",\"content\":\"answer\",\"active\":1,\"compacted\":0,\"timestamp\":1,\"reasoning\":\"kept-thinking\",\"reasoning_content\":\"kept-thinking\",\"finish_reason\":\"stop\"}}]}}\nEOF\nexit 0\n",
+        argv = argv.display(),
+        session = session,
+        cwd = repo.repo.display(),
+    );
+    write_hermes_exporter(&binary, &script);
+    let path = format!("{}:/usr/bin:/bin", bin_dir.display());
+    let hermes_home = repo.home.join("hermes-profile");
+    std::fs::create_dir_all(&hermes_home).expect("hermes profile");
+    let envs = [
+        ("PATH", path.as_str()),
+        ("HERMES_HOME", hermes_home.to_str().expect("utf-8 home")),
+    ];
+    let enabled = repo.run(&["agent", "enable", "--agent", "hermes"], None, &envs);
+    assert!(enabled.status.success(), "enable: {}", describe(&enabled));
+    let listed = repo.run(&["agent", "list"], None, &envs);
+    assert!(listed.status.success(), "list: {}", describe(&listed));
+    let list_text = String::from_utf8_lossy(&listed.stdout);
+    assert!(
+        list_text.contains("hermes"),
+        "list did not show hermes: {list_text}"
+    );
+    let doctor = repo.run(&["agent", "doctor"], None, &envs);
+    assert!(doctor.status.success(), "doctor: {}", describe(&doctor));
+    let trust_dir = repo.run(
+        &["agent", "rpc", "trust", "--dir", bin_dir.to_str().unwrap()],
+        None,
+        &envs,
+    );
+    assert!(
+        trust_dir.status.success(),
+        "trust dir: {}",
+        describe(&trust_dir)
+    );
+    let trusted = repo.run(&["agent", "rpc", "trust", "hermes"], None, &envs);
+    assert!(
+        trusted.status.success(),
+        "trust hermes: {}",
+        describe(&trusted)
+    );
+
+    let frame = format!(
+        "{{\"hook_event_name\":\"on_session_end\",\"session_id\":\"{session}\",\"cwd\":\"{cwd}\",\"source\":\"cli\",\"profile_name\":\"default\",\"turn_id\":\"turn-1\",\"message_id\":\"msg-1\",\"phase\":\"turn\",\"outcome\":\"completed\",\"event_id\":\"{session}|turn-1|msg-1|turn\"}}",
+        cwd = repo.repo.display(),
+    );
+    let observed = repo.run(
+        &["agent", "hooks", "hermes", "observe"],
+        Some(&frame),
+        &envs,
+    );
+    assert!(
+        observed.status.success(),
+        "observe: {}",
+        describe(&observed)
+    );
+    let checkpoints = repo.checkpoints();
+    assert!(
+        !checkpoints.is_empty(),
+        "observe wrote no checkpoint: {}",
+        describe(&observed)
+    );
+    let checkpoint_id = checkpoints[0]["checkpoint_id"]
+        .as_str()
+        .expect("checkpoint id");
+    let exported = repo.run(
+        &["agent", "checkpoint", "export", checkpoint_id],
+        None,
+        &envs,
+    );
+    assert!(exported.status.success(), "export: {}", describe(&exported));
+    let export_text = String::from_utf8_lossy(&exported.stdout);
+    assert!(
+        export_text.contains("\"reasoning\":\"kept-thinking\"")
+            && export_text.contains("\"reasoning_content\":\"kept-thinking\""),
+        "ordinary export dropped thinking: {export_text}"
+    );
+    assert!(
+        !export_text.contains("[REDACTED]"),
+        "thinking was redacted: {export_text}"
+    );
+    let cloud = repo.run(&["cloud", "sync"], None, &envs);
+    let cloud_text = format!(
+        "{}{}",
+        String::from_utf8_lossy(&cloud.stdout),
+        String::from_utf8_lossy(&cloud.stderr)
+    );
+    assert!(
+        !cloud.status.success(),
+        "cloud sync mirrored hermes: {cloud_text}"
+    );
+    assert!(
+        cloud_text.contains("outside the cloud capture allowlist"),
+        "cloud sync did not refuse hermes locally: {cloud_text}"
+    );
+}
+
 /// HM-08: a selected JSONL file is read through the HM-03 reader. No exporter
 /// starts, and the thinking stays on the authorized read.
 #[test]

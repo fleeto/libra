@@ -71,6 +71,12 @@ pub(super) struct SnapshotTuning {
     /// Fail the removal of this run's spool.
     #[cfg(test)]
     pub(super) fail_spool_release: bool,
+    /// Fail removing a leftover run directory whose owner exited.
+    #[cfg(test)]
+    pub(super) fail_residue_removal: bool,
+    /// Fail listing the leftover run directories part-way.
+    #[cfg(test)]
+    pub(super) fail_residue_listing: bool,
     /// Fail writing the owner marker.
     #[cfg(test)]
     pub(super) fail_marker_write: bool,
@@ -339,7 +345,7 @@ pub(super) fn boot_id() -> Option<String> {
 }
 
 #[cfg(unix)]
-fn host_name() -> String {
+pub(super) fn host_name() -> String {
     let mut buffer = [0u8; 256];
     // SAFETY: the buffer is valid for `buffer.len()` bytes; gethostname
     // writes at most that many bytes.
@@ -354,9 +360,34 @@ fn host_name() -> String {
     String::from_utf8_lossy(&buffer[..end]).into_owned()
 }
 
-#[cfg(not(unix))]
-fn host_name() -> String {
-    std::env::var("COMPUTERNAME").unwrap_or_default()
+/// The computer's NetBIOS name from the operating system, never from the
+/// `COMPUTERNAME` environment variable (PI-25).
+#[cfg(windows)]
+pub(super) fn host_name() -> String {
+    use windows_sys::Win32::System::SystemInformation::{ComputerNameNetBIOS, GetComputerNameExW};
+
+    let mut size = 0u32;
+    // SAFETY: a null buffer with size 0 only asks for the size required,
+    // which the call writes to `size`.
+    unsafe { GetComputerNameExW(ComputerNameNetBIOS, std::ptr::null_mut(), &mut size) };
+    if size == 0 {
+        return String::new();
+    }
+    let mut buffer = vec![0u16; size as usize];
+    // SAFETY: `buffer` holds `size` UTF-16 units; on success the call writes
+    // the name and stores its length (without the terminator) in `size`.
+    let written =
+        unsafe { GetComputerNameExW(ComputerNameNetBIOS, buffer.as_mut_ptr(), &mut size) };
+    if written == 0 {
+        return String::new();
+    }
+    buffer.truncate(size as usize);
+    String::from_utf16_lossy(&buffer)
+}
+
+#[cfg(not(any(unix, windows)))]
+pub(super) fn host_name() -> String {
+    String::new()
 }
 
 /// Repository metadata frozen with the snapshot: the project name to
@@ -559,13 +590,16 @@ fn ensure_raw_root_not_linked(raw_root: &Path) -> CloudResult<()> {
 }
 
 /// The `icacls` commands, each in backticks, that make `dir` private:
-/// inheritance removed with full control for the current user (resolved now,
-/// so it runs in any shell) and SYSTEM only, then the current user as owner.
-/// The check also requires that owner, and an elevated administrator's new
-/// files are owned by the Administrators group instead.
+/// inheritance removed with full control for the current user and SYSTEM
+/// only, then the current user as owner. The check also requires that
+/// owner, and an elevated administrator's new files are owned by the
+/// Administrators group instead. The account is the process token's user
+/// SID (`*S-1-5-...`), never the `USERNAME` environment variable (PI-25).
 #[cfg(windows)]
-fn icacls_private_commands(dir: &Path) -> String {
-    let user = std::env::var("USERNAME").unwrap_or_else(|_| "<your user name>".to_string());
+pub(super) fn icacls_private_commands(dir: &Path) -> String {
+    let user = crate::utils::windows_fs::current_user_sid_string()
+        .map(|sid| format!("*{sid}"))
+        .unwrap_or_else(|_| "<your account>".to_string());
     format!(
         "`icacls \"{path}\" /inheritance:r /grant:r \"{user}:(OI)(CI)F\" \"SYSTEM:(OI)(CI)F\"` and then `icacls \"{path}\" /setowner \"{user}\"` (if `icacls \"{path}\"` still lists another account, remove it with `icacls \"{path}\" /remove \"<account>\"`)",
         path = dir.display()
@@ -679,15 +713,33 @@ pub(super) fn create_private_dir(dir: &Path) -> std::io::Result<()> {
 
 /// Create a new file that must not exist yet, owner-only (Unix mode 0600;
 /// on Windows it inherits the private run directory's DACL).
-fn create_private_file(path: &Path) -> std::io::Result<File> {
-    let mut options = OpenOptions::new();
-    options.write(true).create_new(true);
-    #[cfg(unix)]
+pub(super) fn create_private_file(path: &Path) -> std::io::Result<File> {
+    #[cfg(windows)]
     {
-        use std::os::unix::fs::OpenOptionsExt;
-        options.mode(0o600);
+        // A file created by path takes the token's default owner, which for
+        // an elevated administrator is the Administrators group. Create it
+        // relative to the private directory with the current user as owner,
+        // so the owner-only check on a marker holds on Windows too (PI-25).
+        let parent = path
+            .parent()
+            .ok_or_else(|| std::io::Error::other("a spool file needs a parent directory"))?;
+        let name = path
+            .file_name()
+            .ok_or_else(|| std::io::Error::other("a spool file needs a name"))?;
+        let dir = crate::utils::windows_fs::open_private_directory(parent)?;
+        crate::utils::windows_fs::create_private_file_at(&dir, name)
     }
-    options.open(path)
+    #[cfg(not(windows))]
+    {
+        let mut options = OpenOptions::new();
+        options.write(true).create_new(true);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::OpenOptionsExt;
+            options.mode(0o600);
+        }
+        options.open(path)
+    }
 }
 
 impl SnapshotSpool {
@@ -1253,6 +1305,420 @@ impl SnapshotSpool {
             "cloud sync could not remove its snapshot spool {}: {error}. It holds this run's object identities (id, type, size, repository id, timestamp), refs, project name and owner marker (pid, host, boot id); it is never reused, so delete that directory manually",
             self.dir.display()
         ))
+    }
+}
+
+/// Name prefix of the run directories under the `snapshots` directory.
+const RUN_DIR_PREFIX: &str = "run-";
+/// The most bytes of an owner marker cleanup reads.
+const MAX_OWNER_MARKER_BYTES: u64 = 64 * 1024;
+
+/// Remove the leftover run directories of earlier syncs whose owner provably
+/// exited, and describe every leftover kept (PI-25). Runs at the start of
+/// `cloud sync`, before this run creates its own directory, and returns one
+/// note per directory kept, not inspected, or not removable, for the caller
+/// to report.
+///
+/// Fail-closed: a directory is removed only when its owner marker is a
+/// private regular file naming this tool, this host, this boot and (on Linux)
+/// this PID namespace, and signal 0 to its pid reports no such process.
+/// Nothing is followed through a link, nothing outside `snapshots` is
+/// touched, and only the marker of a run is ever read.
+pub(super) fn clean_residues(
+    storage: &Path,
+    raw_root: &Path,
+    tuning: &SnapshotTuning,
+) -> Vec<String> {
+    #[cfg(not(test))]
+    let _ = tuning;
+    let snapshots = storage.join(SPOOL_ROOT_DIR).join(SPOOL_SNAPSHOTS_DIR);
+    let mut notes = Vec::new();
+    // `.libra` itself goes through PI-09's checks — first the raw entry in
+    // the working directory (repository discovery resolves a link), then its
+    // ownership; the spool parents may simply not exist yet.
+    if let Err(error) =
+        ensure_raw_root_not_linked(raw_root).and_then(|()| ensure_trusted_root(storage))
+    {
+        notes.push(format!(
+            "cloud sync did not look for leftover snapshot directories: {error}"
+        ));
+        return notes;
+    }
+    for dir in [storage.join(SPOOL_ROOT_DIR), snapshots.clone()] {
+        match check_private_dir(&dir, PARENT_PERMISSION_BITS) {
+            Ok(true) => {}
+            Ok(false) => return notes,
+            Err(reason) => {
+                notes.push(format!(
+                    "cloud sync did not look for leftover snapshot directories under {}: {reason}; nothing there was read or deleted",
+                    dir.display()
+                ));
+                return notes;
+            }
+        }
+    }
+    let entries = match fs::read_dir(&snapshots) {
+        Ok(entries) => entries,
+        Err(error) => {
+            notes.push(format!(
+                "cloud sync could not list leftover snapshot directories in {}: {error}",
+                snapshots.display()
+            ));
+            return notes;
+        }
+    };
+    let mut candidates = Vec::new();
+    let mut listing_error = None;
+    for entry in entries {
+        match entry {
+            Ok(entry)
+                if entry
+                    .file_name()
+                    .to_string_lossy()
+                    .starts_with(RUN_DIR_PREFIX) =>
+            {
+                candidates.push(entry.path());
+            }
+            Ok(_) => {}
+            Err(error) => listing_error = Some(error),
+        }
+    }
+    #[cfg(test)]
+    if tuning.fail_residue_listing {
+        listing_error = Some(std::io::Error::other("injected listing failure"));
+    }
+    if let Some(error) = listing_error {
+        notes.push(format!(
+            "cloud sync could not list every leftover snapshot directory in {}: {error}; the ones it could not list were not inspected",
+            snapshots.display()
+        ));
+    }
+    candidates.sort();
+    let me = ProcessIdentity::current();
+    for run in candidates {
+        if let Some(note) = clean_residue(&run, &me, tuning) {
+            notes.push(note);
+        }
+    }
+    notes
+}
+
+/// This process's identity, which an owner marker must match before its run
+/// can be proven gone (PI-25).
+#[derive(Debug, Clone)]
+pub(super) struct ProcessIdentity {
+    pub(super) host: String,
+    pub(super) boot_id: Option<String>,
+    pub(super) pid_namespace: Option<String>,
+    pub(super) pid: u32,
+}
+
+impl ProcessIdentity {
+    pub(super) fn current() -> Self {
+        Self {
+            host: host_name(),
+            boot_id: boot_id(),
+            pid_namespace: pid_namespace(),
+            pid: std::process::id(),
+        }
+    }
+}
+
+/// Signal 0 to a process: `Ok(())` when it exists and may be signalled,
+/// otherwise the OS error (`ESRCH`: no such process).
+pub(super) type SignalProbe = fn(i32) -> std::io::Result<()>;
+
+/// [`SignalProbe`] through `kill(pid, 0)`.
+pub(super) fn signal_zero(pid: i32) -> std::io::Result<()> {
+    #[cfg(unix)]
+    {
+        // SAFETY: signal 0 only checks that `pid` exists and may be
+        // signalled; callers pass a positive pid, which names exactly one
+        // process.
+        if unsafe { libc::kill(pid, 0) } == 0 {
+            Ok(())
+        } else {
+            Err(std::io::Error::last_os_error())
+        }
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = pid;
+        Err(std::io::Error::from(std::io::ErrorKind::Unsupported))
+    }
+}
+
+/// Group/other permission bits a spool parent must not have (it may be
+/// readable, never writable by others).
+const PARENT_PERMISSION_BITS: u32 = 0o022;
+/// Group/other permission bits a run directory or owner marker must not
+/// have: PI-09 creates them owner-only.
+const PRIVATE_PERMISSION_BITS: u32 = 0o077;
+
+/// Judge one leftover run directory; `None` when it was removed.
+fn clean_residue(run: &Path, me: &ProcessIdentity, tuning: &SnapshotTuning) -> Option<String> {
+    #[cfg(not(test))]
+    let _ = tuning;
+    let uninspected = |reason: String| {
+        Some(format!(
+            "cloud sync did not inspect the leftover snapshot directory {}: {reason}; nothing in it was read or deleted. Check who created it before deleting it by hand",
+            run.display()
+        ))
+    };
+    if let Err(reason) = check_private_dir(run, PRIVATE_PERMISSION_BITS).and_then(|present| {
+        present
+            .then_some(())
+            .ok_or_else(|| "it disappeared while cloud sync looked at it".to_string())
+    }) {
+        return uninspected(reason);
+    }
+    let marker = match read_private_marker(run) {
+        Ok(marker) => marker,
+        Err(reason) => return uninspected(reason),
+    };
+    let kept = |reason: String| {
+        Some(format!(
+            "cloud sync kept the leftover snapshot directory {} of an earlier run: {reason}. It holds that run's object identities, refs, project name and owner marker; delete it by hand once you have confirmed that run has stopped (no `libra cloud sync` for this repository is still running on that host)",
+            run.display()
+        ))
+    };
+    let marker = match marker {
+        None => {
+            return kept(
+                "its owner marker is missing, so its owner cannot be identified".to_string(),
+            );
+        }
+        Some(bytes) => match serde_json::from_slice::<OwnerMarker>(&bytes) {
+            Ok(marker) => marker,
+            Err(error) => return kept(format!("its owner marker is not valid ({error})")),
+        },
+    };
+    if let Err(reason) = owner_exited(&marker, me, signal_zero) {
+        return kept(reason);
+    }
+    #[cfg(test)]
+    let removed = if tuning.fail_residue_removal {
+        Err(std::io::Error::other("injected removal failure"))
+    } else {
+        fs::remove_dir_all(run)
+    };
+    #[cfg(not(test))]
+    let removed = fs::remove_dir_all(run);
+    removed.err().map(|error| {
+        format!(
+            "cloud sync could not remove the leftover snapshot directory {} of a run that has exited: {error}; delete that directory by hand",
+            run.display()
+        )
+    })
+}
+
+/// Whether `dir` is a real directory (never followed through a link) owned
+/// by the current user without any of `forbidden` permission bits (on
+/// Windows: a protected DACL granting only the current user and SYSTEM).
+/// `Ok(false)` when it does not exist.
+fn check_private_dir(dir: &Path, forbidden: u32) -> Result<bool, String> {
+    let meta = match fs::symlink_metadata(dir) {
+        Ok(meta) => meta,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(false),
+        Err(error) => return Err(format!("it cannot be inspected ({error})")),
+    };
+    if meta.file_type().is_symlink() {
+        return Err("it is a symbolic link, which cloud sync does not follow".to_string());
+    }
+    if !meta.is_dir() {
+        return Err("it is not a directory".to_string());
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::MetadataExt;
+        // SAFETY: geteuid only reads the process credential.
+        let euid = unsafe { libc::geteuid() };
+        if meta.uid() != euid {
+            return Err("it belongs to another user".to_string());
+        }
+        if meta.mode() & forbidden != 0 {
+            return Err(format!(
+                "it is accessible to group or others (mode {:o})",
+                meta.mode() & 0o777
+            ));
+        }
+    }
+    #[cfg(windows)]
+    {
+        let _ = forbidden;
+        crate::utils::windows_fs::open_private_directory(dir).map_err(|error| {
+            format!(
+                "{error}; make it private with {}",
+                icacls_private_commands(dir)
+            )
+        })?;
+    }
+    #[cfg(not(any(unix, windows)))]
+    let _ = forbidden;
+    Ok(true)
+}
+
+/// Read the owner marker of `run` without following a link: `None` when
+/// there is none; an error when it is not a private regular file of the
+/// current user (another user could have forged it).
+fn read_private_marker(run: &Path) -> Result<Option<Vec<u8>>, String> {
+    use std::io::Read;
+
+    #[cfg(unix)]
+    let file = {
+        use std::os::unix::fs::{MetadataExt, OpenOptionsExt};
+
+        let path = run.join(OWNER_MARKER_FILE);
+        let file = match OpenOptions::new()
+            .read(true)
+            .custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK)
+            .open(&path)
+        {
+            Ok(file) => file,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+            Err(error) if error.raw_os_error() == Some(libc::ELOOP) => {
+                return Err(format!(
+                    "its owner marker {} is a symbolic link, which cloud sync does not follow",
+                    path.display()
+                ));
+            }
+            Err(error) => {
+                return Err(format!(
+                    "its owner marker {} cannot be opened ({error})",
+                    path.display()
+                ));
+            }
+        };
+        let meta = file
+            .metadata()
+            .map_err(|error| format!("its owner marker cannot be inspected ({error})"))?;
+        // SAFETY: geteuid only reads the process credential.
+        let euid = unsafe { libc::geteuid() };
+        if !meta.is_file() {
+            return Err("its owner marker is not a regular file".to_string());
+        }
+        if meta.uid() != euid {
+            return Err("its owner marker belongs to another user".to_string());
+        }
+        if meta.mode() & PRIVATE_PERMISSION_BITS != 0 {
+            return Err(format!(
+                "its owner marker is accessible to group or others (mode {:o}), so it could have been written by someone else",
+                meta.mode() & 0o777
+            ));
+        }
+        file
+    };
+    #[cfg(windows)]
+    let file = {
+        let dir = crate::utils::windows_fs::open_private_directory(run)
+            .map_err(|error| format!("it cannot be opened privately ({error})"))?;
+        let file = match crate::utils::windows_fs::open_at(
+            &dir,
+            std::ffi::OsStr::new(OWNER_MARKER_FILE),
+            false,
+        ) {
+            Ok(file) => file,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+            Err(error) => {
+                return Err(format!(
+                    "its owner marker cannot be opened without following a link ({error})"
+                ));
+            }
+        };
+        crate::utils::windows_fs::validate_private(&file).map_err(|error| {
+            format!("its owner marker is not private ({error}), so it could have been written by someone else")
+        })?;
+        file
+    };
+    #[cfg(not(any(unix, windows)))]
+    let file: File = return Err("this platform cannot check an owner marker privately".to_string());
+    let mut bytes = Vec::new();
+    file.take(MAX_OWNER_MARKER_BYTES + 1)
+        .read_to_end(&mut bytes)
+        .map_err(|error| format!("its owner marker cannot be read ({error})"))?;
+    if bytes.len() as u64 > MAX_OWNER_MARKER_BYTES {
+        return Err("its owner marker is larger than any marker cloud sync writes".to_string());
+    }
+    Ok(Some(bytes))
+}
+
+/// `Ok` only when `marker` proves its run's process has exited: written by
+/// this tool, on this host, in this boot and (on Linux) this PID namespace —
+/// all as recorded in `me` — for a pid that is not this process and that
+/// `probe` (signal 0) reports as gone. Otherwise the reason it cannot be
+/// proven.
+pub(super) fn owner_exited(
+    marker: &OwnerMarker,
+    me: &ProcessIdentity,
+    probe: SignalProbe,
+) -> Result<(), String> {
+    if marker.tool != OWNER_MARKER_TOOL {
+        return Err(format!(
+            "it was written by another tool ({:?})",
+            marker.tool
+        ));
+    }
+    if me.host.is_empty() || marker.host != me.host {
+        return Err(format!(
+            "it was written on another host ({:?}), where its run may still be going",
+            marker.host
+        ));
+    }
+    match (marker.boot_id.as_deref(), me.boot_id.as_deref()) {
+        (Some(theirs), Some(ours)) if !theirs.is_empty() && theirs == ours => {}
+        (Some(theirs), Some(ours)) if !theirs.is_empty() && !ours.is_empty() => {
+            return Err(
+                "it was written in another boot of this host, or by another machine with the same name sharing this volume"
+                    .to_string(),
+            );
+        }
+        _ => {
+            return Err("the boot of its run or of this host cannot be identified".to_string());
+        }
+    }
+    #[cfg(target_os = "linux")]
+    match (marker.pid_namespace.as_deref(), me.pid_namespace.as_deref()) {
+        (Some(theirs), Some(ours)) if !theirs.is_empty() && theirs == ours => {}
+        (Some(theirs), Some(ours)) if !theirs.is_empty() && !ours.is_empty() => {
+            return Err(
+                "it was written in another PID namespace (another container sharing this volume)"
+                    .to_string(),
+            );
+        }
+        _ => {
+            return Err(
+                "the PID namespace of its run or of this process cannot be identified".to_string(),
+            );
+        }
+    }
+    #[cfg(target_os = "macos")]
+    if marker.pid_namespace.is_some() || me.pid_namespace.is_some() {
+        return Err("it records a PID namespace, which this platform does not have".to_string());
+    }
+    #[cfg(not(any(target_os = "linux", target_os = "macos")))]
+    {
+        let _ = probe;
+        return Err("this platform cannot prove that the run's owner has exited".to_string());
+    }
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    {
+        if marker.pid == me.pid {
+            return Err("it names this very process".to_string());
+        }
+        let pid = match i32::try_from(marker.pid) {
+            Ok(pid) if pid > 0 => pid,
+            _ => return Err(format!("its pid {} names no single process", marker.pid)),
+        };
+        match probe(pid) {
+            Ok(()) => Err(format!(
+                "its process {pid} is still running (or the pid has been reused)"
+            )),
+            Err(error) if error.raw_os_error() == Some(libc::ESRCH) => Ok(()),
+            Err(error) if error.raw_os_error() == Some(libc::EPERM) => Err(format!(
+                "its process {pid} exists but cannot be checked (permission denied)"
+            )),
+            Err(error) => Err(format!("its process {pid} could not be checked ({error})")),
+        }
     }
 }
 

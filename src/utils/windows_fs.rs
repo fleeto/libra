@@ -952,7 +952,8 @@ fn current_user() -> io::Result<Vec<usize>> {
     }
 }
 
-fn private_descriptor() -> io::Result<LocalAllocation> {
+/// The current process token's user SID as a string (`S-1-5-21-...`).
+pub(crate) fn current_user_sid_string() -> io::Result<String> {
     let user = current_user()?;
     // SAFETY: user is an aligned TOKEN_USER buffer, SID and converted strings remain live.
     unsafe {
@@ -966,10 +967,20 @@ fn private_descriptor() -> io::Result<LocalAllocation> {
         while *sid_text.add(len) != 0 {
             len += 1;
         }
-        let sid = String::from_utf16_lossy(std::slice::from_raw_parts(sid_text, len));
-        let sddl = wide(OsStr::new(&format!(
-            "O:{sid}D:P(A;OICI;FA;;;{sid})(A;OICI;FA;;;SY)"
-        )))?;
+        Ok(String::from_utf16_lossy(std::slice::from_raw_parts(
+            sid_text, len,
+        )))
+    }
+}
+
+fn private_descriptor() -> io::Result<LocalAllocation> {
+    let sid = current_user_sid_string()?;
+    let sddl = wide(OsStr::new(&format!(
+        "O:{sid}D:P(A;OICI;FA;;;{sid})(A;OICI;FA;;;SY)"
+    )))?;
+    // SAFETY: the SDDL string stays live through the conversion, which returns
+    // one owned descriptor.
+    unsafe {
         let mut descriptor = null_mut();
         if ConvertStringSecurityDescriptorToSecurityDescriptorW(
             sddl.as_ptr(),

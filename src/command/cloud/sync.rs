@@ -141,31 +141,61 @@ pub(crate) async fn run_cloud_sync(
         ));
     }
 
-    // Before progress, env validation, D1, or R2. `force` is intentionally unused.
-    let rejected = unsupported_capture_kinds().await?;
-    if !rejected.is_empty() {
-        return Err(CloudError::LocalCaptureKindRefused(format!(
-            "cloud sync refused before any remote write: agent_session.agent_kind {} is outside the cloud capture allowlist and was not mirrored",
-            rejected.join(", ")
-        )));
+    // Leftovers of earlier runs first, on every start (PI-25): a later
+    // refusal or configuration error still names the ones kept.
+    let tuning = SnapshotTuning::default();
+    let residue_notes = clean_residues_at_start(&tuning);
+    let prepared = async {
+        // Before progress, env validation, D1, or R2. `force` is intentionally unused.
+        let rejected = unsupported_capture_kinds().await?;
+        if !rejected.is_empty() {
+            return Err(CloudError::LocalCaptureKindRefused(format!(
+                "cloud sync refused before any remote write: agent_session.agent_kind {} is outside the cloud capture allowlist and was not mirrored",
+                rejected.join(", ")
+            )));
+        }
+
+        progress.on_starting();
+
+        validate_cloud_backup_env(false).await?;
+
+        // Initialize D1 client.
+        D1Client::from_env()
+            .await
+            .map_err(|error| cloud_d1_failure("initialize cloud client", &error))
     }
+    .await;
+    match prepared {
+        Ok(d1_client) => {
+            sync_after_cleanup(ctx, progress, d1_client, None, &tuning, residue_notes).await
+        }
+        Err(error) => Err(with_notes(error, &residue_notes)),
+    }
+}
 
-    progress.on_starting();
+/// Remove the leftovers of earlier runs whose owner provably exited and
+/// describe the rest (PI-25); no notes when the repository storage cannot be
+/// located, which then fails the sync on its own.
+fn clean_residues_at_start(tuning: &SnapshotTuning) -> Vec<String> {
+    let Ok(storage) = util::try_get_storage_path(None) else {
+        return Vec::new();
+    };
+    let raw_root = util::working_dir().join(util::ROOT_DIR);
+    super::snapshot::clean_residues(&storage, &raw_root, tuning)
+}
 
-    validate_cloud_backup_env(false).await?;
-
-    // Initialize D1 client.
-    let d1_client = D1Client::from_env()
-        .await
-        .map_err(|error| cloud_d1_failure("initialize cloud client", &error))?;
-
-    run_cloud_sync_with_clients(ctx, progress, d1_client, None).await
+/// `error` with each of `notes` appended.
+fn with_notes(error: CloudError, notes: &[String]) -> CloudError {
+    notes
+        .iter()
+        .fold(error, |error, note| error.with_note(note))
 }
 
 /// Remote phases of [`run_cloud_sync`] with an injected D1 client and, in
 /// tests, an injected R2 store (`None` builds R2 from the environment). The
 /// first remote request is the read-only `agent_kind` CHECK probe (PI-18), so
 /// a refusal happens before any remote write.
+#[cfg(test)]
 pub(super) async fn run_cloud_sync_with_clients(
     ctx: CloudSyncContext,
     progress: &dyn CloudSyncProgress,
@@ -186,6 +216,7 @@ pub(super) async fn run_cloud_sync_with_clients(
 /// PI-18 probe and before the first remote write, the object identities and
 /// the refs projection to upload are frozen into this run's spool (PI-09);
 /// every later phase reads the spool, not the live tables.
+#[cfg(test)]
 pub(super) async fn run_cloud_sync_from_snapshot(
     ctx: CloudSyncContext,
     progress: &dyn CloudSyncProgress,
@@ -193,8 +224,26 @@ pub(super) async fn run_cloud_sync_from_snapshot(
     r2_override: Option<RemoteStorage>,
     tuning: &SnapshotTuning,
 ) -> CloudResult<CloudSyncReport> {
-    let local_kinds = local_capture_kinds().await?;
-    refuse_kinds_rejected_by_remote_check(&d1_client, &local_kinds).await?;
+    let residue_notes = clean_residues_at_start(tuning);
+    sync_after_cleanup(ctx, progress, d1_client, r2_override, tuning, residue_notes).await
+}
+
+/// The sync after the leftover cleanup: every outcome carries
+/// `residue_notes` — reported with a success, appended to an error.
+async fn sync_after_cleanup(
+    ctx: CloudSyncContext,
+    progress: &dyn CloudSyncProgress,
+    d1_client: D1Client,
+    r2_override: Option<RemoteStorage>,
+    tuning: &SnapshotTuning,
+    residue_notes: Vec<String>,
+) -> CloudResult<CloudSyncReport> {
+    let local_kinds = local_capture_kinds()
+        .await
+        .map_err(|error| with_notes(error, &residue_notes))?;
+    refuse_kinds_rejected_by_remote_check(&d1_client, &local_kinds)
+        .await
+        .map_err(|error| with_notes(error, &residue_notes))?;
 
     // Get database connection.
     let db_conn = db::get_db_conn_instance().await;
@@ -213,9 +262,12 @@ pub(super) async fn run_cloud_sync_from_snapshot(
 
     // Freeze what this run uploads before any remote write (PI-09).
     let storage = util::try_get_storage_path(None).map_err(|error| {
-        CloudError::Generic(format!(
-            "locate the repository storage for the snapshot: {error}"
-        ))
+        with_notes(
+            CloudError::Generic(format!(
+                "locate the repository storage for the snapshot: {error}"
+            )),
+            &residue_notes,
+        )
     })?;
     let raw_root = util::working_dir().join(util::ROOT_DIR);
     let warning_sink = if progress.spool_warnings_as_ndjson() {
@@ -223,7 +275,10 @@ pub(super) async fn run_cloud_sync_from_snapshot(
     } else {
         SpoolWarningSink::Stderr
     };
-    let mut spool = SnapshotSpool::create(&storage, &raw_root, tuning, warning_sink)?;
+    let mut spool = match SnapshotSpool::create(&storage, &raw_root, tuning, warning_sink) {
+        Ok(spool) => spool,
+        Err(error) => return Err(with_notes(error, &residue_notes)),
+    };
     let result = sync_from_spool(
         &mut spool,
         ctx,
@@ -237,15 +292,18 @@ pub(super) async fn run_cloud_sync_from_snapshot(
     )
     .await;
     // Remove the spool on every outcome; a directory that cannot be removed
-    // is reported, never silently kept.
-    match (result, spool.finish()) {
-        (result, None) => result,
-        (Ok(mut report), Some(note)) => {
-            progress.on_spool_warning(&note);
-            report.spool_warning = Some(note);
+    // is reported, never silently kept, after any leftover of earlier runs.
+    let mut notes = residue_notes;
+    notes.extend(spool.finish());
+    match result {
+        Ok(mut report) => {
+            for note in &notes {
+                progress.on_spool_warning(note);
+            }
+            report.spool_warnings = notes;
             Ok(report)
         }
-        (Err(error), Some(note)) => Err(error.with_note(&note)),
+        Err(error) => Err(with_notes(error, &notes)),
     }
 }
 
@@ -333,7 +391,7 @@ async fn sync_from_spool(
             failed_count: 0,
             metadata,
             agent_capture,
-            spool_warning: None,
+            spool_warnings: Vec::new(),
         });
     }
 
@@ -423,7 +481,7 @@ async fn sync_from_spool(
             failed_count,
             metadata: MetadataSyncOutcome::NotRun,
             agent_capture: AgentCaptureSyncOutcome::NotRun,
-            spool_warning: None,
+            spool_warnings: Vec::new(),
         });
     }
 
@@ -443,7 +501,7 @@ async fn sync_from_spool(
         failed_count,
         metadata,
         agent_capture,
-        spool_warning: None,
+        spool_warnings: Vec::new(),
     })
 }
 

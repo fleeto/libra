@@ -219,8 +219,10 @@ pub struct CloudSyncReport {
     pub failed_count: usize,
     pub metadata: MetadataSyncOutcome,
     pub agent_capture: AgentCaptureSyncOutcome,
-    /// Set when this run's snapshot spool could not be removed (PI-09).
-    pub spool_warning: Option<String>,
+    /// One note per snapshot spool directory left behind: this run's own,
+    /// when it could not be removed (PI-09), and each leftover of an earlier
+    /// run that was kept, not inspected or not removable (PI-25).
+    pub spool_warnings: Vec<String>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -772,6 +774,8 @@ pub(crate) enum CloudError {
     MissingEnv {
         detail: String,
         missing_keys: Vec<String>,
+        /// Notes added by [`CloudError::with_note`], shown with the error.
+        notes: Vec<String>,
     },
     /// Repository name is already claimed by another repository in D1.
     NameAlreadyTaken(String),
@@ -878,6 +882,7 @@ impl From<String> for CloudError {
             CloudError::MissingEnv {
                 detail: error,
                 missing_keys,
+                notes: Vec::new(),
             }
         } else if error.contains("already taken by another repository") {
             CloudError::NameAlreadyTaken(error)
@@ -903,14 +908,19 @@ impl fmt::Display for CloudError {
             CloudError::MissingEnv {
                 detail,
                 missing_keys,
+                notes,
             } => {
                 if !detail.is_empty() {
-                    write!(f, "{detail}")
+                    write!(f, "{detail}")?;
                 } else if missing_keys.is_empty() {
-                    write!(f, "missing cloud environment configuration")
+                    write!(f, "missing cloud environment configuration")?;
                 } else {
-                    write!(f, "Missing: {}", missing_keys.join(", "))
+                    write!(f, "Missing: {}", missing_keys.join(", "))?;
                 }
+                for note in notes {
+                    write!(f, "; {note}")?;
+                }
+                Ok(())
             }
             CloudError::NameAlreadyTaken(detail)
             | CloudError::NameNotFound(detail)
@@ -931,13 +941,20 @@ impl CloudError {
     pub(super) fn with_note(self, note: &str) -> Self {
         let add = |detail: String| format!("{detail}; {note}");
         match self {
+            // Kept apart from the detail, which the CLI error replaces with
+            // the missing keys, so the note stays visible (PI-25).
             CloudError::MissingEnv {
                 detail,
                 missing_keys,
-            } => CloudError::MissingEnv {
-                detail: add(detail),
-                missing_keys,
-            },
+                mut notes,
+            } => {
+                notes.push(note.to_string());
+                CloudError::MissingEnv {
+                    detail,
+                    missing_keys,
+                    notes,
+                }
+            }
             CloudError::NameAlreadyTaken(detail) => CloudError::NameAlreadyTaken(add(detail)),
             CloudError::NameNotFound(detail) => CloudError::NameNotFound(add(detail)),
             CloudError::PartialTransfer(detail) => CloudError::PartialTransfer(add(detail)),
@@ -963,6 +980,7 @@ impl CloudError {
             CloudError::MissingEnv {
                 detail,
                 missing_keys,
+                notes,
             } => {
                 let message = if missing_keys.is_empty() {
                     format!("missing cloud configuration for {operation}")
@@ -972,11 +990,16 @@ impl CloudError {
                         missing_keys.join(", ")
                     )
                 };
-                CliError::auth(message)
-                    .with_stable_code(StableErrorCode::AuthMissingCredentials)
-                    .with_detail("missing_keys", missing_keys)
-                    .with_detail("raw_detail", detail)
-                    .with_hint("set the missing variables in env or vault.env.* before retrying.")
+                notes.into_iter().fold(
+                    CliError::auth(message)
+                        .with_stable_code(StableErrorCode::AuthMissingCredentials)
+                        .with_detail("missing_keys", missing_keys)
+                        .with_detail("raw_detail", detail)
+                        .with_hint(
+                            "set the missing variables in env or vault.env.* before retrying.",
+                        ),
+                    |error, note| error.with_hint(note),
+                )
             }
             CloudError::NameAlreadyTaken(detail) => CliError::conflict(detail)
                 .with_stable_code(StableErrorCode::ConflictOperationBlocked),
@@ -1099,7 +1122,7 @@ fn cloud_sync_output_from_report(report: &CloudSyncReport) -> CloudSyncOutput {
         failed_count: report.failed_count,
         metadata,
         agent_capture,
-        warnings: report.spool_warning.iter().cloned().collect(),
+        warnings: report.spool_warnings.clone(),
     }
 }
 
@@ -1179,10 +1202,12 @@ fn sync_report_failure(report: &CloudSyncReport) -> Option<CloudError> {
     } else {
         return None;
     };
-    Some(match &report.spool_warning {
-        Some(note) => error.with_note(note),
-        None => error,
-    })
+    Some(
+        report
+            .spool_warnings
+            .iter()
+            .fold(error, |error, note| error.with_note(note)),
+    )
 }
 
 /// Restore the Git objects described by D1 `object_index` rows from R2
@@ -1521,6 +1546,7 @@ async fn resolve_required_cloud_env(
         _ => Err(CloudError::MissingEnv {
             detail: format!("Missing: {name}"),
             missing_keys: vec![name.to_string()],
+            notes: Vec::new(),
         }),
     }
 }
@@ -1599,6 +1625,7 @@ async fn validate_cloud_backup_env(skip_r2: bool) -> CloudResult<()> {
         Err(CloudError::MissingEnv {
             detail,
             missing_keys: missing,
+            notes: Vec::new(),
         })
     }
 }
@@ -2926,7 +2953,7 @@ mod tests {
             failed_count: 0,
             metadata: MetadataSyncOutcome::Skipped,
             agent_capture: outcome,
-            spool_warning: None,
+            spool_warnings: Vec::new(),
         };
         let wire = serde_json::to_value(cloud_sync_output_from_report(&report))
             .expect("serialize failed cloud sync");
@@ -4252,7 +4279,7 @@ mod tests {
         // Through the CLI mode selector: human and `--progress=json` render
         // nothing more (the warning went through `emit_warning`), `--json`
         // carries the same note in `data.warnings[]`.
-        assert_eq!(report.spool_warning.as_deref(), Some(warning.as_str()));
+        assert_eq!(report.spool_warnings, vec![warning.clone()]);
         let json_mode = OutputConfig {
             json_format: Some(crate::utils::output::JsonFormat::Pretty),
             ..OutputConfig::default()
@@ -4538,7 +4565,7 @@ mod tests {
         .expect("sync");
         let notes = progress.notes.lock().unwrap().clone();
         assert_eq!(notes.len(), 1);
-        assert_eq!(report.spool_warning.as_deref(), Some(notes[0].as_str()));
+        assert_eq!(report.spool_warnings, vec![notes[0].clone()]);
         for run in spool_runs() {
             fs::remove_dir_all(run).unwrap();
         }
@@ -4752,8 +4779,9 @@ mod tests {
                 .unwrap_or_default();
             let report = outcome.unwrap_or_else(|error| panic!("{label}: {error}"));
             let note = report
-                .spool_warning
-                .clone()
+                .spool_warnings
+                .first()
+                .cloned()
                 .unwrap_or_else(|| panic!("{label}: no spool warning"));
             match *label {
                 "progress-json" => {
@@ -5211,6 +5239,778 @@ mod tests {
             .get_metadata()
             .await
             .expect("read metadata")
+    }
+
+    /// The `snapshots` directory, created owner-only as PI-09 creates it.
+    fn private_snapshots_dir() -> PathBuf {
+        let root = util::storage_path().join(super::snapshot::SPOOL_ROOT_DIR);
+        let snapshots = root.join(super::snapshot::SPOOL_SNAPSHOTS_DIR);
+        for dir in [&root, &snapshots] {
+            if !dir.exists() {
+                super::snapshot::create_private_dir(dir).expect("create a spool parent");
+            }
+        }
+        snapshots
+    }
+
+    /// An owner marker as this process would write it, for `pid`.
+    fn marker_for(pid: u32) -> super::snapshot::OwnerMarker {
+        super::snapshot::OwnerMarker {
+            tool: super::snapshot::OWNER_MARKER_TOOL.to_string(),
+            pid,
+            pid_namespace: super::snapshot::pid_namespace(),
+            boot_id: super::snapshot::boot_id(),
+            host: super::snapshot::host_name(),
+            started_at_unix_ms: 0,
+            libra_version: "test".to_string(),
+        }
+    }
+
+    /// Plant a leftover run directory as PI-09 leaves one: an owner-only
+    /// directory with `marker` as its owner-only marker when given.
+    fn plant_residue(name: &str, marker: Option<&[u8]>) -> PathBuf {
+        let run = private_snapshots_dir().join(name);
+        super::snapshot::create_private_dir(&run).expect("create a run directory");
+        if let Some(bytes) = marker {
+            let mut file = super::snapshot::create_private_file(&run.join("owner.json"))
+                .expect("create the owner marker");
+            std::io::Write::write_all(&mut file, bytes).expect("write the owner marker");
+        }
+        run
+    }
+
+    fn marker_bytes(marker: &super::snapshot::OwnerMarker) -> Vec<u8> {
+        serde_json::to_vec(marker).expect("serialize a marker")
+    }
+
+    /// A pid whose process has exited (and been reaped).
+    #[cfg(unix)]
+    fn exited_pid() -> u32 {
+        let mut child = std::process::Command::new("true")
+            .spawn()
+            .expect("spawn a short-lived process");
+        let pid = child.id();
+        child.wait().expect("reap it");
+        pid
+    }
+
+    fn note_for<'a>(notes: &'a [String], run: &std::path::Path) -> &'a str {
+        let path = run.display().to_string();
+        notes
+            .iter()
+            .find(|note| note.contains(&path))
+            .unwrap_or_else(|| panic!("no note names {path}: {notes:#?}"))
+    }
+
+    #[tokio::test]
+    #[serial(cwd, env)]
+    async fn capture_spool_owner_marker_is_valid_before_any_snapshot_data() {
+        let _repo = enter_isolated_libra_repo().await;
+        // On Windows the host comes from the operating system, not from a
+        // rewritten COMPUTERNAME.
+        #[cfg(windows)]
+        let _computer = ScopedEnvVar::set("COMPUTERNAME", "not-this-host");
+        let storage = util::storage_path();
+        let raw_root = util::working_dir().join(util::ROOT_DIR);
+        let tuning = super::snapshot::SnapshotTuning::default();
+        let before = chrono::Utc::now().timestamp_millis();
+        let spool = super::snapshot::SnapshotSpool::create(
+            &storage,
+            &raw_root,
+            &tuning,
+            super::snapshot::SpoolWarningSink::Stderr,
+        )
+        .expect("create a spool");
+        let after = chrono::Utc::now().timestamp_millis();
+        // The marker is the only thing in the run directory before any
+        // snapshot data is written.
+        let names: Vec<String> = fs::read_dir(spool.dir())
+            .expect("list the run directory")
+            .map(|entry| entry.unwrap().file_name().to_string_lossy().into_owned())
+            .collect();
+        assert_eq!(names, vec!["owner.json".to_string()]);
+        let marker: super::snapshot::OwnerMarker =
+            serde_json::from_slice(&fs::read(spool.dir().join("owner.json")).unwrap())
+                .expect("a valid marker");
+        assert_eq!(marker.tool, super::snapshot::OWNER_MARKER_TOOL);
+        assert_eq!(marker.pid, std::process::id());
+        assert_eq!(marker.pid_namespace, super::snapshot::pid_namespace());
+        assert_eq!(marker.boot_id, super::snapshot::boot_id());
+        assert!(!marker.host.is_empty());
+        assert_eq!(marker.host, super::snapshot::host_name());
+        assert_ne!(marker.host, "not-this-host");
+        assert!((before..=after).contains(&marker.started_at_unix_ms));
+        assert_eq!(marker.libra_version, env!("CARGO_PKG_VERSION"));
+        assert!(spool.finish().is_none());
+
+        // A sync in flight carries the same marker.
+        index_local_object(b"pi-25 marker in flight\n").await;
+        let seen = Arc::new(std::sync::Mutex::new(None));
+        let recorded = seen.clone();
+        let tuning = super::snapshot::SnapshotTuning {
+            after_freeze: Some(Arc::new(move |dir| {
+                let recorded = recorded.clone();
+                Box::pin(async move {
+                    *recorded.lock().unwrap() = Some(fs::read(dir.join("owner.json")).unwrap());
+                })
+            })),
+            ..Default::default()
+        };
+        let mock = crate::utils::d1_client::test_support::MockD1::spawn().await;
+        sync_with_tuning(&mock, &Arc::new(InMemory::new()), &tuning)
+            .await
+            .expect("sync");
+        let bytes = seen.lock().unwrap().clone().expect("marker read mid-run");
+        let in_flight: super::snapshot::OwnerMarker = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(in_flight.pid, std::process::id());
+        assert_eq!(in_flight.host, super::snapshot::host_name());
+    }
+
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    #[tokio::test]
+    #[serial(cwd, env)]
+    async fn capture_spool_owner_removes_only_runs_whose_owner_exited() {
+        let _repo = enter_isolated_libra_repo().await;
+        let gone = plant_residue("run-gone", Some(&marker_bytes(&marker_for(exited_pid()))));
+        let mock = crate::utils::d1_client::test_support::MockD1::spawn().await;
+        let report = sync_with_tuning(&mock, &Arc::new(InMemory::new()), &Default::default())
+            .await
+            .expect("sync");
+        assert!(!gone.exists(), "a run whose owner exited is removed");
+        assert!(
+            report.spool_warnings.is_empty(),
+            "{:#?}",
+            report.spool_warnings
+        );
+        assert!(spool_runs().is_empty());
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    #[serial(cwd, env)]
+    async fn capture_spool_owner_keeps_runs_it_cannot_prove_exited() {
+        let _repo = enter_isolated_libra_repo().await;
+        let mut alive = std::process::Command::new("sleep")
+            .arg("60")
+            .spawn()
+            .expect("spawn a live process");
+        let exited = exited_pid();
+        let with = |change: &dyn Fn(&mut super::snapshot::OwnerMarker)| {
+            let mut marker = marker_for(exited);
+            change(&mut marker);
+            marker_bytes(&marker)
+        };
+        #[cfg_attr(not(target_os = "linux"), allow(unused_mut))]
+        let mut cases: Vec<(PathBuf, &str)> = vec![
+            (plant_residue("run-missing", None), "marker is missing"),
+            (plant_residue("run-garbage", Some(b"not json")), "not valid"),
+            (
+                plant_residue("run-tool", Some(&with(&|m| m.tool = "other-tool".into()))),
+                "another tool",
+            ),
+            (
+                plant_residue("run-host", Some(&with(&|m| m.host = "another-host".into()))),
+                "another host",
+            ),
+            (
+                plant_residue(
+                    "run-boot",
+                    Some(&with(&|m| m.boot_id = Some("another-boot".into()))),
+                ),
+                "another boot",
+            ),
+            (
+                plant_residue("run-no-boot", Some(&with(&|m| m.boot_id = None))),
+                "cannot be identified",
+            ),
+            (
+                plant_residue(
+                    "run-namespace",
+                    Some(&with(&|m| m.pid_namespace = Some("pid:[1]".into()))),
+                ),
+                "namespace",
+            ),
+            (
+                plant_residue("run-alive", Some(&with(&|m| m.pid = alive.id()))),
+                "still running",
+            ),
+            (
+                plant_residue("run-self", Some(&with(&|m| m.pid = std::process::id()))),
+                "this very process",
+            ),
+            // pid 1 is never ours: either it cannot be signalled
+            // (permission denied) or, as root, it is running.
+            (
+                plant_residue("run-init", Some(&with(&|m| m.pid = 1))),
+                "process 1",
+            ),
+        ];
+        #[cfg(target_os = "linux")]
+        cases.push((
+            plant_residue("run-no-namespace", Some(&with(&|m| m.pid_namespace = None))),
+            "cannot be identified",
+        ));
+        // Cleanup reads only the marker: a FIFO elsewhere in a run would
+        // block any reader.
+        let fifo = cases[7].0.join("objects.jsonl");
+        let fifo_path = std::ffi::CString::new(fifo.as_os_str().as_encoded_bytes()).unwrap();
+        // SAFETY: a valid NUL-terminated path; mkfifo only creates the node.
+        assert_eq!(unsafe { libc::mkfifo(fifo_path.as_ptr(), 0o600) }, 0);
+
+        let mock = crate::utils::d1_client::test_support::MockD1::spawn().await;
+        let report = sync_with_tuning(&mock, &Arc::new(InMemory::new()), &Default::default())
+            .await
+            .expect("sync");
+        let _ = alive.kill();
+        let _ = alive.wait();
+        for (run, reason) in &cases {
+            assert!(run.exists(), "{} was kept", run.display());
+            let note = note_for(&report.spool_warnings, run);
+            assert!(note.contains(reason), "{reason}: {note}");
+            assert!(note.contains("kept the leftover"), "{note}");
+            assert!(note.contains("confirmed that run has stopped"), "{note}");
+        }
+        assert_eq!(
+            report.spool_warnings.len(),
+            cases.len(),
+            "{:#?}",
+            report.spool_warnings
+        );
+    }
+
+    #[cfg(windows)]
+    #[tokio::test]
+    #[serial(cwd, env)]
+    async fn capture_spool_owner_keeps_every_run_on_windows() {
+        // Windows cannot prove that a run's owner exited, so even a marker
+        // of this host is kept and reported.
+        let _repo = enter_isolated_libra_repo().await;
+        let run = plant_residue("run-windows", Some(&marker_bytes(&marker_for(1))));
+        let missing = plant_residue("run-missing", None);
+        let mock = crate::utils::d1_client::test_support::MockD1::spawn().await;
+        let report = sync_with_tuning(&mock, &Arc::new(InMemory::new()), &Default::default())
+            .await
+            .expect("sync");
+        for kept in [&run, &missing] {
+            assert!(kept.exists());
+            let note = note_for(&report.spool_warnings, kept);
+            assert!(note.contains("kept the leftover"), "{note}");
+        }
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    #[serial(cwd, env)]
+    async fn capture_spool_owner_reports_every_kept_run() {
+        // Every kept leftover is reported in every output mode: a cross-boot
+        // marker, a missing marker, a live owner, and an exited owner whose
+        // directory cannot be removed; a sync that then fails carries them
+        // in its error. The sync's own outcome is unchanged.
+        for (label, mode) in report_modes() {
+            let _repo = enter_isolated_libra_repo().await;
+            let mut alive = std::process::Command::new("sleep")
+                .arg("60")
+                .spawn()
+                .expect("spawn a live process");
+            let mut cross_boot = marker_for(exited_pid());
+            cross_boot.boot_id = Some("another-boot".into());
+            let runs = [
+                plant_residue("run-boot", Some(&marker_bytes(&cross_boot))),
+                plant_residue("run-missing", None),
+                plant_residue("run-alive", Some(&marker_bytes(&marker_for(alive.id())))),
+                plant_residue("run-stuck", Some(&marker_bytes(&marker_for(exited_pid())))),
+            ];
+            let tuning = super::snapshot::SnapshotTuning {
+                fail_residue_removal: true,
+                ..Default::default()
+            };
+            index_local_object(format!("pi-25 report {label}\n").as_bytes()).await;
+            let mock = crate::utils::d1_client::test_support::MockD1::spawn().await;
+            let (concluded, _console, ndjson) =
+                drive_sync_in_mode(&mode, &mock, Arc::new(InMemory::new()), &tuning).await;
+            let structured = concluded
+                .unwrap_or_else(|error| panic!("{label}: the sync still succeeds: {error}"));
+            let notes: Vec<String> = runs
+                .iter()
+                .map(|run| {
+                    let path = run.display().to_string();
+                    let pending = crate::utils::output::pending_warning_messages();
+                    let from_ndjson: Vec<String> = ndjson
+                        .iter()
+                        .filter_map(|line| serde_json::from_str::<serde_json::Value>(line).ok())
+                        .filter(|event| event["event"] == "cloud_sync.spool.warning")
+                        .filter_map(|event| event["message"].as_str().map(str::to_string))
+                        .collect();
+                    match label {
+                        "human" | "quiet" => pending
+                            .into_iter()
+                            .find(|note| note.contains(&path))
+                            .unwrap_or_else(|| panic!("{label}: {path} not warned")),
+                        _ => from_ndjson
+                            .into_iter()
+                            .find(|note| note.contains(&path))
+                            .unwrap_or_else(|| panic!("{label}: {path} not an NDJSON warning")),
+                    }
+                })
+                .collect();
+            assert!(notes[3].contains("could not remove"), "{}", notes[3]);
+            assert!(
+                notes[3].contains("delete that directory by hand"),
+                "{}",
+                notes[3]
+            );
+            if label == "json" {
+                let data = serde_json::to_value(structured.expect("--json data")).unwrap();
+                let warnings = data["warnings"].as_array().expect("data.warnings");
+                for note in &notes {
+                    assert!(
+                        warnings.iter().any(|w| w == note.as_str()),
+                        "{label}: {note}"
+                    );
+                }
+            }
+            for run in &runs {
+                assert!(run.exists(), "{label}: {} kept", run.display());
+            }
+
+            // The same leftovers, then a failing sync: its error names them.
+            index_local_object(format!("pi-25 failing {label}\n").as_bytes()).await;
+            let mock = crate::utils::d1_client::test_support::MockD1::spawn().await;
+            mock.fail_once_when_sql_contains(
+                "INSERT INTO object_index (o_id, o_type, o_size, repo_id, created_at, is_synced, object_format)",
+                "injected upload failure",
+            );
+            let (concluded, _, _) =
+                drive_sync_in_mode(&mode, &mock, Arc::new(InMemory::new()), &tuning).await;
+            let error = concluded.expect_err("the failing sync fails");
+            let detail = error.to_string();
+            for run in &runs {
+                assert!(
+                    detail.contains(&run.display().to_string()),
+                    "{label}: the error names {}: {detail}",
+                    run.display()
+                );
+            }
+            let _ = alive.kill();
+            let _ = alive.wait();
+        }
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    #[serial(cwd, env)]
+    async fn capture_spool_owner_never_follows_foreign_paths() {
+        use std::os::unix::fs::{PermissionsExt, symlink};
+
+        let outside = tempdir().unwrap();
+        let exited = marker_bytes(&marker_for(exited_pid()));
+        let outside_run = outside.path().join("run-outside");
+        fs::create_dir(&outside_run).unwrap();
+        fs::write(outside_run.join("owner.json"), &exited).unwrap();
+        let outside_file = outside.path().join("precious");
+        fs::write(&outside_file, b"keep me").unwrap();
+
+        // A symlinked or group-writable spool parent: nothing is enumerated,
+        // and the sync, which refuses that parent too, names it.
+        for case in ["linked snapshots", "group-writable cloud-sync"] {
+            let _repo = enter_isolated_libra_repo().await;
+            let root = util::storage_path().join(super::snapshot::SPOOL_ROOT_DIR);
+            super::snapshot::create_private_dir(&root).unwrap();
+            let reason = if case == "linked snapshots" {
+                symlink(
+                    outside.path(),
+                    root.join(super::snapshot::SPOOL_SNAPSHOTS_DIR),
+                )
+                .unwrap();
+                "symbolic link"
+            } else {
+                fs::set_permissions(&root, fs::Permissions::from_mode(0o770)).unwrap();
+                "accessible to group or others"
+            };
+            let notes = super::snapshot::clean_residues(
+                &util::storage_path(),
+                &util::working_dir().join(util::ROOT_DIR),
+                &Default::default(),
+            );
+            assert_eq!(notes.len(), 1, "{case}: {notes:#?}");
+            assert!(notes[0].contains("did not look"), "{case}: {}", notes[0]);
+            assert!(notes[0].contains(reason), "{case}: {}", notes[0]);
+            let mock = crate::utils::d1_client::test_support::MockD1::spawn().await;
+            let error = sync_with_tuning(&mock, &Arc::new(InMemory::new()), &Default::default())
+                .await
+                .expect_err("an unsafe spool parent stops the sync");
+            assert!(
+                error.to_string().contains("did not look"),
+                "{case}: {error}"
+            );
+            assert!(outside_run.join("owner.json").exists(), "{case}");
+        }
+
+        // Unsafe candidates are reported as not inspected and left alone; a
+        // link inside a removable run is removed without touching its target.
+        let _repo = enter_isolated_libra_repo().await;
+        let snapshots = private_snapshots_dir();
+        let linked_run = snapshots.join("run-linked");
+        symlink(&outside_run, &linked_run).unwrap();
+        let open_run = plant_residue("run-open", Some(&exited));
+        fs::set_permissions(&open_run, fs::Permissions::from_mode(0o770)).unwrap();
+        let forged = plant_residue("run-forged", Some(&exited));
+        fs::set_permissions(forged.join("owner.json"), fs::Permissions::from_mode(0o644)).unwrap();
+        let linked_marker = plant_residue("run-linked-marker", None);
+        symlink(
+            outside_run.join("owner.json"),
+            linked_marker.join("owner.json"),
+        )
+        .unwrap();
+        let removable = plant_residue("run-removable", Some(&exited));
+        symlink(&outside_file, removable.join("objects.jsonl")).unwrap();
+
+        let mock = crate::utils::d1_client::test_support::MockD1::spawn().await;
+        let report = sync_with_tuning(&mock, &Arc::new(InMemory::new()), &Default::default())
+            .await
+            .expect("sync");
+        for (run, reason) in [
+            (&linked_run, "symbolic link"),
+            (&open_run, "accessible to group or others"),
+            (&forged, "could have been written by someone else"),
+            (&linked_marker, "symbolic link"),
+        ] {
+            assert!(
+                fs::symlink_metadata(run).is_ok(),
+                "{} left alone",
+                run.display()
+            );
+            let note = note_for(&report.spool_warnings, run);
+            assert!(note.contains("did not inspect"), "{note}");
+            assert!(note.contains(reason), "{reason}: {note}");
+            assert!(note.contains("nothing in it was read or deleted"), "{note}");
+        }
+        assert!(!removable.exists(), "the exited run is removed");
+        assert_eq!(fs::read(&outside_file).unwrap(), b"keep me");
+        assert!(outside_run.join("owner.json").exists());
+    }
+
+    #[cfg(windows)]
+    #[tokio::test]
+    #[serial(cwd, env)]
+    async fn capture_spool_owner_never_follows_foreign_paths_on_windows() {
+        let reset = |path: &Path| {
+            let status = std::process::Command::new("icacls")
+                .arg(path)
+                .arg("/reset")
+                .status()
+                .expect("run icacls");
+            assert!(status.success());
+        };
+        // An inherited ACL on `snapshots`: nothing is enumerated.
+        let _repo = enter_isolated_libra_repo().await;
+        let snapshots = private_snapshots_dir();
+        reset(&snapshots);
+        let notes = super::snapshot::clean_residues(
+            &util::storage_path(),
+            &util::working_dir().join(util::ROOT_DIR),
+            &Default::default(),
+        );
+        assert_eq!(notes.len(), 1, "{notes:#?}");
+        assert!(notes[0].contains("did not look"), "{}", notes[0]);
+        assert!(notes[0].contains("icacls"), "{}", notes[0]);
+
+        // An inherited ACL on a run directory or on its marker: the run is
+        // reported as not inspected and left alone.
+        let _repo = enter_isolated_libra_repo().await;
+        let open_run = plant_residue("run-open", Some(&marker_bytes(&marker_for(1))));
+        reset(&open_run);
+        let open_marker = plant_residue("run-open-marker", Some(&marker_bytes(&marker_for(1))));
+        reset(&open_marker.join("owner.json"));
+        let notes = super::snapshot::clean_residues(
+            &util::storage_path(),
+            &util::working_dir().join(util::ROOT_DIR),
+            &Default::default(),
+        );
+        for run in [&open_run, &open_marker] {
+            assert!(run.exists());
+            let note = note_for(&notes, run);
+            assert!(note.contains("did not inspect"), "{note}");
+        }
+    }
+
+    #[cfg(windows)]
+    #[tokio::test]
+    #[serial(cwd, env)]
+    async fn capture_spool_owner_icacls_names_the_token_sid_on_windows() {
+        // The remedy names the process token's user SID, whatever USERNAME
+        // says.
+        let _repo = enter_isolated_libra_repo().await;
+        let _user = ScopedEnvVar::set("USERNAME", "someone-else");
+        let status = std::process::Command::new("icacls")
+            .arg(util::storage_path())
+            .arg("/reset")
+            .status()
+            .expect("run icacls");
+        assert!(status.success());
+        let mock = crate::utils::d1_client::test_support::MockD1::spawn().await;
+        let error = sync_with_tuning(&mock, &Arc::new(InMemory::new()), &Default::default())
+            .await
+            .expect_err("an inherited .libra is refused");
+        let detail = error.to_string();
+        let sid = crate::utils::windows_fs::current_user_sid_string().expect("token SID");
+        assert!(detail.contains(&format!("*{sid}")), "{detail}");
+        assert!(!detail.contains("someone-else"), "{detail}");
+        assert!(
+            detail.contains(&util::storage_path().display().to_string()),
+            "{detail}"
+        );
+    }
+
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    #[test]
+    fn capture_spool_owner_exit_proof_is_fail_closed() {
+        use super::snapshot::{OwnerMarker, ProcessIdentity, owner_exited};
+
+        fn gone(_: i32) -> std::io::Result<()> {
+            Err(std::io::Error::from_raw_os_error(libc::ESRCH))
+        }
+        fn denied(_: i32) -> std::io::Result<()> {
+            Err(std::io::Error::from_raw_os_error(libc::EPERM))
+        }
+        fn alive(_: i32) -> std::io::Result<()> {
+            Ok(())
+        }
+        fn unexpected(pid: i32) -> std::io::Result<()> {
+            panic!("signal 0 must not be sent for pid {pid}")
+        }
+        let me = ProcessIdentity {
+            host: "this-host".to_string(),
+            boot_id: Some("boot-1".to_string()),
+            pid_namespace: cfg!(target_os = "linux").then(|| "pid:[4026531836]".to_string()),
+            pid: 4242,
+        };
+        let marker = |change: &dyn Fn(&mut OwnerMarker)| {
+            let mut marker = OwnerMarker {
+                tool: super::snapshot::OWNER_MARKER_TOOL.to_string(),
+                pid: 77,
+                pid_namespace: me.pid_namespace.clone(),
+                boot_id: me.boot_id.clone(),
+                host: me.host.clone(),
+                started_at_unix_ms: 0,
+                libra_version: "test".to_string(),
+            };
+            change(&mut marker);
+            marker
+        };
+        // Only a matching marker whose pid reports "no such process" is gone.
+        assert_eq!(owner_exited(&marker(&|_| {}), &me, gone), Ok(()));
+        let refused: Vec<(
+            OwnerMarker,
+            ProcessIdentity,
+            super::snapshot::SignalProbe,
+            &str,
+        )> = vec![
+            (marker(&|_| {}), me.clone(), denied, "permission denied"),
+            (marker(&|_| {}), me.clone(), alive, "still running"),
+            (
+                marker(&|m| m.pid = 0),
+                me.clone(),
+                unexpected,
+                "names no single process",
+            ),
+            (
+                marker(&|m| m.pid = u32::MAX),
+                me.clone(),
+                unexpected,
+                "names no single process",
+            ),
+            (
+                marker(&|m| m.pid = 4242),
+                me.clone(),
+                unexpected,
+                "this very process",
+            ),
+            (
+                marker(&|m| m.tool = "other".into()),
+                me.clone(),
+                unexpected,
+                "another tool",
+            ),
+            (
+                marker(&|m| m.host = "other".into()),
+                me.clone(),
+                unexpected,
+                "another host",
+            ),
+            (
+                marker(&|m| m.boot_id = None),
+                me.clone(),
+                unexpected,
+                "cannot be identified",
+            ),
+            (
+                marker(&|m| m.boot_id = Some(String::new())),
+                me.clone(),
+                unexpected,
+                "cannot be identified",
+            ),
+            (
+                marker(&|m| m.boot_id = Some("boot-2".into())),
+                me.clone(),
+                unexpected,
+                "another boot",
+            ),
+            (
+                marker(&|_| {}),
+                ProcessIdentity {
+                    boot_id: None,
+                    ..me.clone()
+                },
+                unexpected,
+                "cannot be identified",
+            ),
+            (
+                marker(&|_| {}),
+                ProcessIdentity {
+                    host: String::new(),
+                    ..me.clone()
+                },
+                unexpected,
+                "another host",
+            ),
+        ];
+        #[cfg(target_os = "linux")]
+        let refused = {
+            let mut refused = refused;
+            refused.push((
+                marker(&|_| {}),
+                ProcessIdentity {
+                    pid_namespace: None,
+                    ..me.clone()
+                },
+                unexpected,
+                "cannot be identified",
+            ));
+            refused.push((
+                marker(&|m| m.pid_namespace = None),
+                me.clone(),
+                unexpected,
+                "cannot be identified",
+            ));
+            refused.push((
+                marker(&|m| m.pid_namespace = Some("pid:[1]".into())),
+                me.clone(),
+                unexpected,
+                "another PID namespace",
+            ));
+            refused
+        };
+        #[cfg(target_os = "macos")]
+        let refused = {
+            let mut refused = refused;
+            refused.push((
+                marker(&|m| m.pid_namespace = Some("pid:[1]".into())),
+                me.clone(),
+                unexpected,
+                "PID namespace",
+            ));
+            refused
+        };
+        for (marker, me, probe, reason) in refused {
+            let outcome = owner_exited(&marker, &me, probe);
+            let error = outcome.expect_err(reason);
+            assert!(error.contains(reason), "{reason}: {error}");
+        }
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    #[serial(cwd, env)]
+    async fn capture_spool_owner_cleanup_follows_no_linked_libra_and_reports_partial_listing() {
+        // A `.libra` that is itself a link (repository discovery resolves
+        // it): nothing under it is enumerated or removed.
+        let _repo = enter_isolated_libra_repo().await;
+        let removable = plant_residue(
+            "run-removable",
+            Some(&marker_bytes(&marker_for(exited_pid()))),
+        );
+        let workdir = util::working_dir();
+        let raw_root = workdir.join(util::ROOT_DIR);
+        let moved = workdir.join(".libra-real");
+        fs::rename(&raw_root, &moved).unwrap();
+        std::os::unix::fs::symlink(&moved, &raw_root).unwrap();
+        let notes =
+            super::snapshot::clean_residues(&util::storage_path(), &raw_root, &Default::default());
+        fs::remove_file(&raw_root).unwrap();
+        fs::rename(&moved, &raw_root).unwrap();
+        assert_eq!(notes.len(), 1, "{notes:#?}");
+        assert!(notes[0].contains("did not look"), "{}", notes[0]);
+        assert!(notes[0].contains("symbolic link"), "{}", notes[0]);
+        assert!(
+            removable.exists(),
+            "nothing under a linked .libra is removed"
+        );
+
+        // A listing that fails part-way is reported; what was listed is
+        // still judged.
+        let tuning = super::snapshot::SnapshotTuning {
+            fail_residue_listing: true,
+            ..Default::default()
+        };
+        let notes = super::snapshot::clean_residues(&util::storage_path(), &raw_root, &tuning);
+        assert!(
+            notes
+                .iter()
+                .any(|note| note.contains("could not list every leftover")),
+            "{notes:#?}"
+        );
+        assert!(
+            !removable.exists(),
+            "the listed exited run is still removed"
+        );
+    }
+
+    #[tokio::test]
+    #[serial(cwd, env)]
+    async fn capture_spool_owner_notes_survive_an_early_failure() {
+        // The cleanup runs at the start of every sync: a sync that then
+        // fails before its snapshot — on missing cloud configuration, or on
+        // the read-only D1 probe — still names each leftover it kept.
+        let _repo = enter_isolated_libra_repo().await;
+        let kept = plant_residue("run-kept", None);
+        let path = kept.display().to_string();
+
+        let _cleared: Vec<ClearedEnvVarGuard> = [
+            "LIBRA_D1_ACCOUNT_ID",
+            "LIBRA_D1_API_TOKEN",
+            "LIBRA_D1_DATABASE_ID",
+            "LIBRA_STORAGE_ENDPOINT",
+            "LIBRA_STORAGE_BUCKET",
+            "LIBRA_STORAGE_ACCESS_KEY",
+            "LIBRA_STORAGE_SECRET_KEY",
+        ]
+        .into_iter()
+        .map(ClearedEnvVarGuard::new)
+        .collect();
+        let error = super::sync::run_cloud_sync(
+            CloudSyncContext {
+                batch_size: 2,
+                force: false,
+            },
+            &SilentCloudSyncProgress,
+        )
+        .await
+        .expect_err("missing cloud configuration fails the sync");
+        assert!(matches!(error, CloudError::MissingEnv { .. }), "{error:?}");
+        assert!(error.to_string().contains(&path), "{error}");
+        // The CLI error keeps its code and shows the note.
+        let cli = cloud_cli_error_typed("sync", error);
+        assert_eq!(cli.stable_code(), StableErrorCode::AuthMissingCredentials);
+        assert!(cli.render_json().contains(&path), "{}", cli.render_json());
+        assert!(kept.exists());
+
+        let mock = crate::utils::d1_client::test_support::MockD1::spawn().await;
+        mock.fail_once_when_sql_contains("sqlite_master", "injected probe failure");
+        let error = sync_with_tuning(&mock, &Arc::new(InMemory::new()), &Default::default())
+            .await
+            .expect_err("a failed probe fails the sync");
+        assert!(error.to_string().contains(&path), "{error}");
     }
 
     /// An in-memory R2 that rejects uploads of objects or of `metadata.json`
@@ -6681,6 +7481,7 @@ mod tests {
             CloudError::MissingEnv {
                 detail: "Cloud backup requires D1 + R2 configuration. Missing: A, B".to_string(),
                 missing_keys: vec!["A".to_string(), "B".to_string()],
+                notes: Vec::new(),
             }
         );
         assert!(matches!(
@@ -6721,6 +7522,7 @@ mod tests {
             CloudError::MissingEnv {
                 detail: "Cloud backup requires D1 + R2 configuration. Missing: KEY".to_string(),
                 missing_keys: vec!["KEY".to_string()],
+                notes: Vec::new(),
             }
             .into_cli_error("sync")
             .stable_code(),
@@ -6790,7 +7592,7 @@ mod tests {
                 checkpoints_synced: 5,
                 checkpoints_failed: 0,
             },
-            spool_warning: None,
+            spool_warnings: Vec::new(),
         };
 
         let output = cloud_sync_output_from_report(&report);
@@ -6837,6 +7639,7 @@ mod tests {
         let env_reason = agent_capture_sync_failure_reason(&CloudError::MissingEnv {
             detail: REMOTE_SENTINEL.to_string(),
             missing_keys: vec![REMOTE_SENTINEL.to_string()],
+            notes: Vec::new(),
         });
         for (reason, expected) in [
             (
@@ -6858,7 +7661,7 @@ mod tests {
                 failed_count: 0,
                 metadata: MetadataSyncOutcome::Skipped,
                 agent_capture: AgentCaptureSyncOutcome::Failed { error: reason },
-                spool_warning: None,
+                spool_warnings: Vec::new(),
             };
 
             let output = cloud_sync_output_from_report(&report);

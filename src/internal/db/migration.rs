@@ -2521,7 +2521,7 @@ pub(crate) fn repository_migrations() -> Vec<Migration> {
         // HM-01: Repository agent_session.agent_kind CHECK gains 'hermes'.
         // The SQL body aborts if executed raw; the runner rebuilds the table
         // on a dedicated connection (ADR-CAP-CHECK). Down refuses while any
-        // hermes row exists and keeps those rows. Capture stays unsupported.
+        // hermes row exists and keeps those rows. Cloud sync stays refused.
         sql_migration(
             AGENT_KIND_HERMES_VERSION,
             "agent_kind_hermes",

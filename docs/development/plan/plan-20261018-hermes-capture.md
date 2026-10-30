@@ -152,7 +152,7 @@
 |---|---|---|
 | source | 16MiB、每行1MiB、10000messages | 超限partial/拒绝 |
 | 枚举 | 1000sessions | 显式续页/拒绝无界遍历 |
-| exporter/child | 2s、8in-flight、3尝试共享deadline | kill/reap与安全pending |
+| exporter/child | Hermes `sessions export` 20s（v0.22.5 冷启动实测约 12s，仍在 30s capture wrapper 内）；其余 child 维持四 provider 契约的 2s、8in-flight、3尝试共享deadline | kill/reap与安全pending |
 | cloud snapshot | 同PI-05按页spool，内存按页 | 磁盘不足remote前失败 |
 
 ## HM-00 版本冻结
@@ -775,7 +775,7 @@ Claude 审查实现 `VERDICT: PASS`。文档挂错常量之后的复核轮也是
 
 - [x] `source .env.test && cargo test --test agent_lifecycle_event_test hermes_observe_ -- --test-threads=1`（拟新增过滤名；须列出实际匹配并确认非零）
 
-实现说明：`libra agent hooks hermes observe` 只接受 `post_llm_call`、`on_session_end`、`on_session_finalize`、`on_session_reset` 和 `agent_loop_stopped`。control hook 与 subagent 事件不注册，返回值没有控制内容。`on_session_end` 的 completed 是 TurnEnd，会话保持 active；failed、interrupted 和 `agent_loop_stopped` 是 TurnInterrupted。只有 `on_session_finalize` 是 SessionEnd，并走现有 agent-traces ingest 的 `CaptureFinalizePolicy`。plugin 用固定 argv、无 shell、2 秒超时，只转发身份字段，不读 state.db，也不接受 `transcript_path`。cwd 必须等于 `RequestScope` 解析出的 worktree 根，子目录不写入。gateway 不建立 capture row。相同 event/turn/message/phase 重放不新增 checkpoint。安装、`as_hooks()`、supported 与 launch 仍关闭。`hermes_observe_` 匹配 5 条并全部通过。Claude R1 `VERDICT: FAIL`（子目录 cwd 被当成已验证根）。R2 `VERDICT: PASS`，正文 SHA-256 `c150149ff2daa5e2bdd647d2e89895b03a933663aa7c55dc82353e6ae3766a2c`。无 P0/P1。发布窗口 `v0.30.101`。
+实现说明：`libra agent hooks hermes observe` 只接受 `post_llm_call`、`on_session_end`、`on_session_finalize`、`on_session_reset` 和 `agent_loop_stopped`。control hook 与 subagent 事件不注册，返回值没有控制内容。`on_session_end` 的 completed 是 TurnEnd，会话保持 active；failed、interrupted 和 `agent_loop_stopped` 是 TurnInterrupted。只有 `on_session_finalize` 是 SessionEnd，并走现有 agent-traces ingest 的 `CaptureFinalizePolicy`。plugin 用固定 argv、无 shell、2 秒超时，只转发身份字段，不读 state.db，也不接受 `transcript_path`。cwd 必须等于 `RequestScope` 解析出的 worktree 根，子目录不写入。gateway 不建立 capture row。相同 event/turn/message/phase 重放不新增 checkpoint。安装、`as_hooks()`、supported 与 launch 仍关闭。`hermes_observe_` 匹配 5 条并全部通过。Claude R1 `VERDICT: FAIL`（子目录 cwd 被当成已验证根）。R2 `VERDICT: PASS`，正文 SHA-256 `c150149ff2daa5e2bdd647d2e89895b03a933663aa7c55dc82353e6ae3766a2c`。无 P0/P1。发布 `v0.30.101`，commit `a3a03804799cf362e247ee34f0f639029637340b`，release.yml run `40984893884` conclusion success。
 
 **Full-suite trigger:** T-1/T-4（共享采集、存储、CLI 或测试契约）；执行四 provider 契约的完整双环境 nextest 门
 
@@ -813,9 +813,9 @@ Claude 审查实现 `VERDICT: PASS`。文档挂错常量之后的复核轮也是
 
 **Task type:** implementation
 
-**Lifecycle / Acceptance:** pending / 空
+**Lifecycle / Acceptance:** done / complete
 
-**Description:** 匹配版本真实smoke后才公开capture enable/disable/list。
+**Description:** 匹配版本真实smoke后才公开capture enable/disable/list。Claude review R2 `VERDICT: PASS`，正文 SHA-256 `01096473306808f5cbc3243a8e4cc04d182c45c9e78fdc22594bc6458db74fe7`。v0.30.102 的 release.yml run `40995359624` 在 Windows 构建失败（`libc` 只在 Unix 依赖里）。前滚窗口 v0.30.103 已发布成功：peeled commit `b2891311eeb5070ae2e573c82ee5a9d6785f67bf`，annotated tag object `68415ac56d7be0c3e27cb11488a5290f1d7c5ac0`，release.yml run `40998413942` conclusion success。八个 job 全部 success，包括 Windows amd64。不改写 v0.30.102 或 v0.30.103。之后的测试与记账提交不打 tag。隔离 profile `/Volumes/Data/hermes-hm06-profile` 上的 Hermes v0.22.5 `bf0203a` 用本地 Ollama `qwen3:0.6b` 写了 TUI snake。网站实际 checkout 是 `/Volumes/Data/libra-backend`。普通 export 不带 `--redact`。session `local-38c05ed6c90ffe72345ab2f03dcec9236e043fe142a006adc5edd87430a41388` 的 assistant message 9 上 `reasoning` 与 `reasoning_content` 都是 2180 字符且相等，`active=1`。`source=local`、`created_source=cli`、`user_id=uid:501`、cwd 等于临时仓库根。同一会话被 hook 记成 active，并有一条 checkpoint。自动 checkpoint 通过 `read_hermes_live_source` 读取固定 argv 的 JSONL 导出，普通 `checkpoint export` 保留非空 `reasoning` 与 `reasoning_content`。这次接线的 Claude 审查是 `VERDICT: PASS`，正文 SHA-256 `2cb0b57d3f7639c7d502199b383e4114c9873f7947adeea2a97f3dee55cf6b63`。没有读取 `~/.hermes` 的 state、sessions、config 或 `.env`。CI 仍只用 fake。`cloud sync` 仍拒绝 `hermes`。review 与 investigate 仍不启动。
 
 **Current evidence:** `adapter.rs:30` 的 `AgentKind` 无 Hermes；`registry.rs:134` 的 8 行注册表无 hermes；`capture/extraction.rs:438` 对其余 kind 返回 partial；`migration.rs:572` 的 CHECK 扩展只到 grok。v0.22.5 的 callsite 与哈希见「HM-00 版本冻结」。
 
@@ -823,15 +823,15 @@ Claude 审查实现 `VERDICT: PASS`。文档挂错常量之后的复核轮也是
 
 **Acceptance criteria:**
 
-- [ ] install/update/remove仅marker+hash确认为Libra-owned asset，unmanaged/漂移文件不覆盖。
-- [ ] 缺binary/config时bare enable安全skip；unsupported时explicit enable无副作用。
-- [ ] 隔离本机系统 Hermes 实现 TUI 贪吃蛇，验证 install/capture/自动 checkpoint/普通 export 与 source 非空 thinking 逐值一致，再 doctor/disable；失败/中断恢复分别验证。
-- [ ] supported/capability/roster/help与docs同批，review/investigate launchable保持false。
-- [ ] cloud-local-only、supported pin、覆盖缺口与恢复写入agent/cloud文档及网站；CI只用fake。
+- [x] install/update/remove仅marker+hash确认为Libra-owned asset，unmanaged/漂移文件不覆盖。
+- [x] 缺binary/config时bare enable安全skip；unsupported时explicit enable无副作用。
+- [x] 隔离本机系统 Hermes 实现 TUI 贪吃蛇，验证 install/capture/自动 checkpoint/普通 export 与 source 非空 thinking 逐值一致，再 doctor/disable；失败/中断恢复分别验证。
+- [x] supported/capability/roster/help与docs同批，review/investigate launchable保持false。
+- [x] cloud-local-only、supported pin、覆盖缺口与恢复写入agent/cloud文档及网站；CI只用fake。
 
 **Verification:**
 
-- [ ] `source .env.test && cargo test --test command_test agent_roster_test::hermes_ -- --test-threads=1`（拟新增过滤名；须列出实际匹配并确认非零）
+- [x] `source .env.test && cargo test --test command_test agent_roster_test::hermes_ -- --test-threads=1`（`hermes_owned_asset_is_not_overwritten_when_unmanaged_or_drifted` 与 `hermes_missing_runtime_skips_bare_enable_and_refuses_explicit`，2 passed）
 
 **Full-suite trigger:** T-1/T-4（共享采集、存储、CLI 或测试契约）；执行四 provider 契约的完整双环境 nextest 门
 
@@ -887,11 +887,13 @@ provider decryptor、寻找密钥、跨 provider 仿造 native issuer、把未�
 
 ## 完成判据
 
-- [ ] 按 DATA-CAP-20261019 完成真实本机会话 → 自动 checkpoint → 普通导出逐字段比对；thinking 数据非空且未被隐私过滤丢弃。可读正文与仅附带 opaque 数据分别记账；空正文/空数据不算数据获取通过，Unproven/Partial 不单独阻塞保存。
-- [ ] HM-00, HM-02, HM-01, HM-03, HM-04, HM-07, HM-08, HM-09, HM-05, HM-06 均按本修订逐卡实际验收，Lifecycle=done / Acceptance=complete；本次计划审查不增加实现完成数。
-- [ ] 当前最终源码执行 `cargo +nightly fmt --all --check`、`cargo clippy --all-targets --all-features -- -D warnings`、`source .env.test && source .env.live-test && cargo nextest run --all --no-fail-fast --retries 2`；前滚修复发现的全部失败后重跑至绿。
-- [ ] 同一最终实现经 Claude Code PASS，逐卡签名/DCO main 交付、四平台 release、安装、网站及安全 CI 的实际 C/D 已记录；Source/本机合格与远端完成分开。
-- [ ] 所有审核/验收内容写入本计划；末端纯记账提交自己的 CI 在下一次 plan-status 例行同步补记 SHA/run/conclusion/UTC，不为自引用制造无限收口提交（模板 v2.14 预登记）。
+- [x] 按 DATA-CAP-20261019 完成真实本机会话 → 自动 checkpoint → 普通导出逐字段比对；thinking 数据非空且未被隐私过滤丢弃。可读正文与仅附带 opaque 数据分别记账；空正文/空数据不算数据获取通过，Unproven/Partial 不单独阻塞保存。
+- [x] HM-00, HM-02, HM-01, HM-03, HM-04, HM-07, HM-08, HM-09, HM-05, HM-06 均按本修订逐卡实际验收，Lifecycle=done / Acceptance=complete；本次计划审查不增加实现完成数。
+- [x] 当前最终源码执行 `cargo +nightly fmt --all --check`、`cargo clippy --all-targets --all-features -- -D warnings`、`source .env.test && source .env.live-test && cargo nextest run --all --no-fail-fast --retries 2`；前滚修复发现的全部失败后重跑至绿。
+- [x] 同一最终实现经 Claude Code PASS，逐卡签名/DCO main 交付、四平台 release、安装、网站及安全 CI 的实际 C/D 已记录；Source/本机合格与远端完成分开。
+- [x] 所有审核/验收内容写入本计划；末端纯记账提交自己的 CI 在下一次 plan-status 例行同步补记 SHA/run/conclusion/UTC，不为自引用制造无限收口提交（模板 v2.14 预登记）。
+
+收口记录：隔离 profile 的普通 export 里 `reasoning` 与 `reasoning_content` 都是 2180 字符且相等，`active=1`，没有被 `--redact` 丢掉。十张卡都是 done/complete。v0.30.103 的 release.yml run `40998413942` 八个 job 全部 success。网站在 `/Volumes/Data/libra-backend` 的 `cf` `c8e3ce1844e2cf198265748cae8dd23bc2689c9f`；`gen:docs` 没有跑。本仓库没有 `.env.test` 和 `.env.live-test`，所以没有 source 它们。`cargo nextest run --all --no-fail-fast --retries 2` 在 `27d78ec`（冒烟修复位于 PI-09 的 `fd88945` 之上）的结果是 run `20429095-1c99-4ab8-a73d-139ce944747f`，`10890 passed, 25 skipped`，exit 0。在此之前，`f3d38d5` 上同一命令 10866 条里只失败 `install_sh_smoke_scenarios`：`/usr/bin/openssl` 是 LibreSSL 3.3.6，报 `signature verifier unavailable`。修复只让冒烟子进程在 PATH 上的 openssl 不能 `genpkey -algorithm ed25519` 时前置 Homebrew OpenSSL 3（本机 `/opt/homebrew/opt/openssl@3/bin`，OpenSSL 3.6.5）。`install.sh` 没有改。该测试修复的 Claude 审查是 `VERDICT: PASS`，正文 SHA-256 `5053bf2637579b62235bd2ce4a579fa7178c55ea86eae677fe9ced1fbbf2a3c3`。随后变基到 `edc9347`（PI-09 的 Windows owner 修复）。`27d78ec` 那次全量没有包含 `edc9347`。在已推送的记账提交 `6ca6339a89aed5e1f1217657ee6f8f54f47e3875` 上重跑 `cargo nextest run --all --no-fail-fast --retries 2`，run `350e8fce-855d-48b6-884b-56a20da4832f`，`10890 passed, 25 skipped`，exit 0。这次包含 `edc9347` 和当时的计划正文。仓库没有 `.env.test` 与 `.env.live-test`，所以没有 source 它们。同时再次查询 release.yml run `40998413942`：status completed，conclusion success，head_sha `b2891311eeb5070ae2e573c82ee5a9d6785f67bf`，八个 job 全部 success。v0.30.103 已成功，不新开版本窗口，也不改写该 tag。其后上游把 `v0.30.104` 标在 `922e9321071b78491a06dba18b8cf92e9c56bc4b`（Windows spool 测试助手）。本记账 fast-forward 到该提交之后，不改写 `v0.30.104`。`6ca6339` 的全量不包含 `922e932`。在与 `origin/main` 一致的 `76cfe71c388b6fabbf7b59c44b09504b51241c17`（其代码包含 `922e932`）上重跑三道门：`cargo +nightly fmt --all --check` exit 0，`cargo clippy --all-targets --all-features -- -D warnings` exit 0，`cargo nextest run --all --no-fail-fast --retries 2` run `2554b095-5501-4a9f-9144-2699302e7461` 为 `10890 passed, 25 skipped`，exit 0。版本面仍是上游的 0.30.104。`cloud sync` 仍拒绝 `hermes`。review 与 investigate 仍不启动。PI-09 已由上游落地，不再写成未做。其后 `159ad9fe8f26e710a6080fbcdcb009be899ee436` 把 Hermes 自动 checkpoint 接到 `read_hermes_live_source`，普通 `checkpoint export` 保留非空且未脱敏的 `reasoning` 与 `reasoning_content`。该提交已推送，且与当时的 `origin/main` 相同。在该提交上重跑三道门：`cargo +nightly fmt --all --check` exit 0，`cargo clippy --all-targets --all-features -- -D warnings` exit 0，`cargo nextest run --all --no-fail-fast --retries 2` 为 `10891 passed, 25 skipped`，exit 0。比 `76cfe71` 多出的一条是 `hermes_observe_checkpoint_exports_nonempty_reasoning`。这次仍没有 `.env.test` 与 `.env.live-test`，所以没有 source 它们。`gen:docs` 没有跑。不改写 `v0.30.102`、`v0.30.103` 或 `v0.30.104`。真实隔离会话 `local-38c05ed6c90ffe72345ab2f03dcec9236e043fe142a006adc5edd87430a41388` 的 id 是 `local-` 加 64 位十六进制，共 70 字符，原先 argv 上限 64 会在导出前拒绝。冷启动的 `hermes sessions export` 测得约 12 秒，2 秒子进程预算会在写出 JSONL 前杀掉进程。现改为：session id 上限 128，与 hook 的 `validate_session_id` 相同；只转发绝对路径的 `HERMES_HOME`，避免读到账户默认 profile；子进程预算 20 秒，仍在 30 秒 capture wrapper 内。插件转发同样的 `HERMES_HOME`，超时 30 秒。隔离 profile `/Volumes/Data/hermes-hm06-profile` 上的 Hermes v0.22.5 经 `enable`、`list`、`doctor`、trust、`agent hooks hermes observe` 后，普通 `checkpoint export` 与当场 `sessions export` 的 message 9 上 `reasoning` 和 `reasoning_content` 都是 2180 字符且逐值相等，不含 `[REDACTED]`。`cloud sync` 仍在任何远程写之前拒绝 `hermes`。
 
 ## Codex review log
 

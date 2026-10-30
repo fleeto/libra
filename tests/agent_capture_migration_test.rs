@@ -947,20 +947,18 @@ async fn hermes_role_repository_check_preserves_children_and_blocks_down() {
     );
 }
 
-/// HM-01 stub: hermes resolves, but capture, install, and launch stay off.
-#[tokio::test]
-async fn hermes_role_stub_disables_capture_install_and_launch() {
-    use libra::{
-        command::agent::{AgentArgs, AgentSubcommand, EnableArgs, execute_safe},
-        internal::ai::{
-            capture::deadline_provider_extraction_summary,
-            observed_agents::{
-                AgentKind, AgentSessionCtx, SlugLookup, agent_for, extract::skill_registry_for,
-                is_preview, live_capture_matches_hook_installable, lookup_cli_slug,
-                registration_for, supported_slugs,
-            },
+/// HM-06: hermes is supported for local capture. Review, investigate, and
+/// cloud sync stay closed.
+#[test]
+fn hermes_role_stub_disables_capture_install_and_launch() {
+    use libra::internal::ai::{
+        capture::deadline_provider_extraction_summary,
+        hooks::providers::hermes::settings::{HermesEnableGate, hermes_enable_gate},
+        observed_agents::{
+            AgentKind, AgentSessionCtx, SlugLookup, agent_for, extract::skill_registry_for,
+            is_preview, live_capture_matches_hook_installable, lookup_cli_slug, registration_for,
+            supported_slugs,
         },
-        utils::output::{ColorChoice, OutputConfig, ProgressMode, ProgressPreference},
     };
 
     assert_eq!(AgentKind::Hermes.as_db_str(), "hermes");
@@ -975,17 +973,17 @@ async fn hermes_role_stub_disables_capture_install_and_launch() {
     ));
     assert!(!is_preview(AgentKind::Hermes));
     let row = registration_for(AgentKind::Hermes);
-    assert!(!row.supported);
-    assert!(!row.hook_installable);
+    assert!(row.supported);
+    assert!(row.hook_installable);
     assert!(!row.launchable_review);
     assert!(!row.launchable_investigate);
-    assert!(!row.transcript_readable);
-    assert!(row.support_wave.is_none());
-    assert!(!supported_slugs().contains(&"hermes"));
+    assert!(row.transcript_readable);
+    assert_eq!(row.support_wave, Some("hermes"));
+    assert!(supported_slugs().contains(&"hermes"));
     assert!(live_capture_matches_hook_installable(AgentKind::Hermes));
     assert!(skill_registry_for(AgentKind::Hermes).is_empty());
     let agent = agent_for(AgentKind::Hermes);
-    assert!(agent.as_hooks().is_none());
+    assert!(agent.as_hooks().is_some());
     assert_eq!(agent.protected_dirs(), &[".hermes"]);
     let transcript_error = agent
         .read_transcript(&AgentSessionCtx {
@@ -1019,30 +1017,9 @@ async fn hermes_role_stub_disables_capture_install_and_launch() {
         "HM-01 must not add hermes to the cloud allowlist: {window}"
     );
 
-    let output = OutputConfig {
-        json_format: None,
-        color: ColorChoice::Never,
-        pager: false,
-        quiet: true,
-        exit_code_on_warning: false,
-        progress: ProgressMode::None,
-        progress_preference: ProgressPreference::None,
-    };
-    let enable = execute_safe(
-        AgentArgs {
-            command: AgentSubcommand::Enable(EnableArgs {
-                agents: vec!["hermes".to_string()],
-            }),
-        },
-        &output,
-        None,
-    )
-    .await;
-    let enable_error = enable.expect_err("enable must refuse the unsupported stub");
-    assert!(
-        enable_error
-            .to_string()
-            .contains("not in the supported roster"),
-        "{enable_error}"
+    assert_eq!(hermes_enable_gate(true, false), HermesEnableGate::SkipBare);
+    assert_eq!(
+        hermes_enable_gate(false, false),
+        HermesEnableGate::RefuseExplicit
     );
 }

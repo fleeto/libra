@@ -82,8 +82,8 @@ fn agent_list_json_contains_capability_fields() {
     let agents = data["agents"].as_array().expect("agents array");
     assert_eq!(
         agents.len(),
-        4,
-        "listing surfaces the supported roster, including grok"
+        5,
+        "listing surfaces the supported roster, including grok and hermes"
     );
 
     let supported: Vec<&str> = agents
@@ -91,7 +91,10 @@ fn agent_list_json_contains_capability_fields() {
         .filter(|row| row["supported"] == true)
         .map(|row| row["slug"].as_str().unwrap())
         .collect();
-    assert_eq!(supported, ["claude-code", "codex", "opencode", "grok"]);
+    assert_eq!(
+        supported,
+        ["claude-code", "codex", "opencode", "grok", "hermes"]
+    );
 
     for row in agents {
         // Frozen wire keys (AG-17): missing keys are a schema break.
@@ -129,6 +132,13 @@ fn agent_list_json_contains_capability_fields() {
             assert_eq!(row["hook_installable"], true);
             assert_eq!(row["launchable_review"], false);
             assert_eq!(row["launchable_investigate"], false);
+        } else if row["slug"] == "hermes" {
+            assert_eq!(row["support_wave"], "hermes");
+            assert_eq!(row["supported"], true);
+            assert_eq!(row["hook_installable"], true);
+            assert_eq!(row["transcript_readable"], true);
+            assert_eq!(row["launchable_review"], false);
+            assert_eq!(row["launchable_investigate"], false);
         } else if row["supported"] == true {
             assert_eq!(row["support_wave"], "first_batch", "{}", row["slug"]);
         } else {
@@ -154,7 +164,7 @@ fn agent_list_json_contains_capability_fields() {
     // supported roster is shown. Their unsupported registry classification is
     // pinned separately against the static registry by
     // tests/compat/agent_capability_matrix_pin.rs.
-    for slug in ["gemini", "cursor", "copilot", "factory-ai", "hermes"] {
+    for slug in ["gemini", "cursor", "copilot", "factory-ai"] {
         assert!(
             !agents.iter().any(|row| row["slug"] == slug),
             "{slug} must not appear in the supported-only listing"
@@ -191,8 +201,8 @@ fn agent_roster_surface() {
         .collect();
     assert_eq!(
         slugs,
-        ["claude-code", "codex", "opencode", "grok"],
-        "listing must surface the first-batch trio plus grok"
+        ["claude-code", "codex", "opencode", "grok", "hermes"],
+        "listing must surface the first-batch trio plus grok and hermes"
     );
 
     // Every listed row is supported (the unsupported agents are omitted).
@@ -208,7 +218,7 @@ fn agent_roster_surface() {
     // fully-closed unsupported classification (supported/hook_installable/
     // launchable_*/capabilities.hooks all false) stays pinned against the
     // static registry by tests/compat/agent_capability_matrix_pin.rs.
-    for slug in ["gemini", "cursor", "copilot", "factory-ai", "hermes"] {
+    for slug in ["gemini", "cursor", "copilot", "factory-ai"] {
         assert!(
             !agents.iter().any(|row| row["slug"] == slug),
             "{slug} must not appear in the supported-only listing"
@@ -411,4 +421,94 @@ fn agent_remove_preserves_user_hook_entries() {
         !rendered.contains("libra-session-start"),
         "Libra-managed entries are removed: {rendered}"
     );
+}
+
+/// HM-06: install and update rewrite only a marker-and-hash owned asset.
+/// An unmanaged file and a drifted file stay byte-for-byte.
+#[test]
+fn hermes_owned_asset_is_not_overwritten_when_unmanaged_or_drifted() {
+    use libra::internal::ai::hooks::providers::hermes::settings::{
+        hermes_capture_is_installed, install_owned_hermes_capture, remove_owned_hermes_capture,
+    };
+
+    let temp = tempdir().expect("tempdir");
+    let home = temp.path();
+    install_owned_hermes_capture(home, "/usr/bin/libra-a").expect("install");
+    assert!(hermes_capture_is_installed(home).expect("installed"));
+    let plugin = home.join("plugins/libra-hermes-capture");
+    let init = plugin.join("__init__.py");
+    let yaml = plugin.join("plugin.yaml");
+    let config = home.join("config.yaml");
+    assert!(
+        std::fs::read_to_string(&init)
+            .unwrap()
+            .contains("libra capture")
+    );
+    assert!(
+        std::fs::read_to_string(&init)
+            .unwrap()
+            .contains("/usr/bin/libra-a")
+    );
+    assert!(
+        std::fs::read_to_string(&config)
+            .unwrap()
+            .contains("libra-hermes-capture")
+    );
+
+    install_owned_hermes_capture(home, "/usr/bin/libra-b").expect("update owned");
+    let updated = std::fs::read_to_string(&init).unwrap();
+    assert!(updated.contains("/usr/bin/libra-b"));
+    assert!(!updated.contains("/usr/bin/libra-a"));
+
+    let unmanaged = b"name: someone-else\n";
+    std::fs::write(&yaml, unmanaged).unwrap();
+    let err = install_owned_hermes_capture(home, "/usr/bin/libra-c").unwrap_err();
+    assert!(err.to_string().contains("left unchanged"), "{err}");
+    assert_eq!(std::fs::read(&yaml).unwrap(), unmanaged);
+
+    remove_owned_hermes_capture(home).expect("remove leaves unmanaged");
+    assert_eq!(std::fs::read(&yaml).unwrap(), unmanaged);
+    assert!(init.exists(), "drifted sibling stays");
+
+    let owned = tempdir().expect("owned home");
+    install_owned_hermes_capture(owned.path(), "/usr/bin/libra-a").expect("reinstall");
+    let owned_init = owned
+        .path()
+        .join("plugins/libra-hermes-capture/__init__.py");
+    let mut drifted = std::fs::read(&owned_init).unwrap();
+    drifted.extend_from_slice(b"\n# libra capture edited\n");
+    std::fs::write(&owned_init, &drifted).unwrap();
+    let err = install_owned_hermes_capture(owned.path(), "/usr/bin/libra-c").unwrap_err();
+    assert!(err.to_string().contains("drifted"), "{err}");
+    assert_eq!(std::fs::read(&owned_init).unwrap(), drifted);
+    remove_owned_hermes_capture(owned.path()).expect("remove drifted is a no-op");
+    assert_eq!(std::fs::read(&owned_init).unwrap(), drifted);
+
+    let clean = tempdir().expect("clean home");
+    install_owned_hermes_capture(clean.path(), "/usr/bin/libra-a").expect("clean install");
+    remove_owned_hermes_capture(clean.path()).expect("remove owned");
+    assert!(!hermes_capture_is_installed(clean.path()).expect("gone"));
+    assert!(!clean.path().join("config.yaml").exists());
+}
+
+/// HM-06: a bare enable skips a missing Hermes runtime, and an explicit
+/// enable refuses it before any file is written.
+#[test]
+fn hermes_missing_runtime_skips_bare_enable_and_refuses_explicit() {
+    use libra::internal::ai::hooks::providers::hermes::settings::{
+        HermesEnableGate, hermes_enable_gate, hermes_version_text_is_supported,
+    };
+
+    assert_eq!(hermes_enable_gate(true, false), HermesEnableGate::SkipBare);
+    assert_eq!(
+        hermes_enable_gate(false, false),
+        HermesEnableGate::RefuseExplicit
+    );
+    assert_eq!(hermes_enable_gate(false, true), HermesEnableGate::Install);
+    assert!(hermes_version_text_is_supported(
+        "Hermes Agent v0.22.5 (2026.9.24) stable local bf0203a794a0"
+    ));
+    assert!(!hermes_version_text_is_supported(
+        "Hermes Agent v0.22.6 bf0203a"
+    ));
 }

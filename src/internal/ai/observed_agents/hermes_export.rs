@@ -29,7 +29,10 @@ use crate::internal::ai::{
 
 /// Live hook budget from the four-provider contract. A later explicit retry
 /// uses a new deadline; this one is not extended in place.
-pub const HERMES_LIVE_DEADLINE: Duration = Duration::from_secs(2);
+/// Child budget for `hermes sessions export`. A v0.22.5 export of one local
+/// session measured about 12s, so the old 2s budget killed the process
+/// before it wrote JSONL. 20s stays inside the 30s capture wrapper.
+pub const HERMES_LIVE_DEADLINE: Duration = Duration::from_secs(20);
 
 const EXPORT_ARGV: [&str; 5] = ["sessions", "export", "--format", "jsonl", "--session-id"];
 
@@ -83,6 +86,8 @@ pub struct HermesLiveRead {
     pub source_state: &'static str,
     pub spawned: bool,
     pub readable_thinking: Vec<String>,
+    /// Original selected export bytes. Empty when the read did not keep a frame.
+    pub transcript: Vec<u8>,
 }
 
 impl HermesLiveRead {
@@ -94,6 +99,7 @@ impl HermesLiveRead {
             source_state: "unproven",
             spawned,
             readable_thinking: Vec::new(),
+            transcript: Vec::new(),
         }
     }
 }
@@ -241,7 +247,13 @@ async fn export_under_lease(
         .current_dir(&request.cwd)
         .env_clear()
         .env("PWD", &request.cwd)
-        .env("PATH", "/usr/bin:/bin")
+        .env("PATH", "/usr/bin:/bin");
+    // The account default profile is a different database. Forward only an
+    // absolute HERMES_HOME so an isolated profile is the one that is read.
+    if let Some(home) = forwarded_hermes_home() {
+        child.env("HERMES_HOME", home);
+    }
+    child
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
@@ -333,6 +345,7 @@ fn finish_bytes(
             .iter()
             .filter_map(|item| item.readable_thinking().map(str::to_string))
             .collect(),
+        transcript: bytes.to_vec(),
     })
 }
 
@@ -351,6 +364,7 @@ fn finish_transcript(
             .iter()
             .filter_map(|message| message.readable_thinking().map(str::to_string))
             .collect(),
+        transcript: Vec::new(),
     })
 }
 
@@ -373,12 +387,24 @@ fn request_is_safe(request: &HermesLiveRequest) -> bool {
 }
 
 fn session_id_is_safe(session_id: &str) -> bool {
-    // Same component rule as Hermes import: one argv token, not a 32-hex pin.
+    // One argv token. Hook admission allows 128 characters. A Hermes local
+    // id is `local-` plus 64 hex digits, which is 70 characters.
     !session_id.is_empty()
-        && session_id.len() <= 64
+        && session_id.len() <= 128
         && session_id
             .chars()
             .all(|character| character.is_ascii_alphanumeric() || matches!(character, '-' | '_'))
+}
+
+/// Absolute `HERMES_HOME` only. A missing or relative value is not forwarded,
+/// so the child cannot be pointed at a path the operator did not name.
+fn forwarded_hermes_home() -> Option<std::ffi::OsString> {
+    let value = std::env::var_os("HERMES_HOME")?;
+    let text = value.to_str()?;
+    if text.is_empty() || text.contains(['\0', '\n', '\r']) || !Path::new(text).is_absolute() {
+        return None;
+    }
+    Some(value)
 }
 
 fn stdout_signals_unavailable(stdout: &str) -> bool {
@@ -430,7 +456,7 @@ impl std::fmt::Display for HermesBridgeStatus {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(
             formatter,
-            "Hermes export bridge: trusted={}; source-qualified; native origin is not claimed; hook install remains disabled",
+            "Hermes export bridge: trusted={}; source-qualified; native origin is not claimed; review and investigate stay closed; cloud sync stays refused",
             if self.trusted { "yes" } else { "no" }
         )
     }
@@ -439,4 +465,39 @@ impl std::fmt::Display for HermesBridgeStatus {
 /// The fixed exporter arguments, without the session id or output path.
 pub fn hermes_export_argv() -> &'static [&'static str] {
     &EXPORT_ARGV
+}
+
+/// Live snapshot entry. The capture layer calls this before it admits its own
+/// export runner, so this function can take the export-job lease itself.
+pub async fn export_for_live_capture(
+    session_id: &str,
+    cwd: &Path,
+    deadline: Instant,
+) -> Result<HermesLiveRead, HermesLiveError> {
+    if !session_id_is_safe(session_id) || !cwd.is_absolute() || Instant::now() >= deadline {
+        return Err(HermesLiveError::BadRequest);
+    }
+    let storage = crate::utils::util::try_get_storage_path(Some(cwd.to_path_buf()))
+        .map_err(|_| HermesLiveError::Unavailable)?;
+    let database = storage.join(crate::utils::util::DATABASE);
+    let conn = crate::internal::db::get_db_conn_instance_for_path(&database)
+        .await
+        .map_err(|_| HermesLiveError::Unavailable)?;
+    let scope = CaptureScope::resolve(&conn, cwd)
+        .await
+        .map_err(|_| HermesLiveError::Unavailable)?;
+    let trust = HermesExporterTrust::load(&conn)
+        .await
+        .map_err(|_| HermesLiveError::Unavailable)?;
+    let Some(trust) = trust else {
+        return Err(HermesLiveError::Unavailable);
+    };
+    let request = HermesLiveRequest {
+        session_id: session_id.to_string(),
+        profile: "default".to_string(),
+        cwd: cwd.to_path_buf(),
+        source: HermesLiveSource::Export,
+    };
+    let lease = acquire_hermes_export_lease(&conn, &scope, session_id, deadline).await?;
+    read_hermes_live_source(&conn, &scope, lease, Some(&trust), &request, deadline).await
 }

@@ -8,7 +8,7 @@
 use std::collections::BTreeSet;
 
 use libra::internal::ai::observed_agents::{
-    AgentKind, DeclaredAgentCaps, FIRST_BATCH_WAVE, GROK_WAVE, SlugLookup, agent_for,
+    AgentKind, DeclaredAgentCaps, FIRST_BATCH_WAVE, GROK_WAVE, HERMES_WAVE, SlugLookup, agent_for,
     discover_skills, launchable_investigate_slugs, launchable_review_slugs, lookup_cli_slug,
     registration_for, registry, supported_slugs,
 };
@@ -75,12 +75,21 @@ fn known_agent_capability_matrix_matches_current_roster() {
     // Frozen first-batch roster.
     assert_eq!(
         supported_slugs(),
-        ["claude-code", "codex", "opencode", "grok"]
+        ["claude-code", "codex", "opencode", "grok", "hermes"]
     );
     for row in registry() {
         if row.slug == "grok" {
             assert_eq!(row.support_wave, Some("grok"), "grok");
             assert!(row.transcript_readable, "grok");
+            continue;
+        }
+        if row.slug == "hermes" {
+            assert_eq!(row.support_wave, Some(HERMES_WAVE), "hermes");
+            assert!(row.supported, "hermes");
+            assert!(row.hook_installable, "hermes");
+            assert!(row.transcript_readable, "hermes");
+            assert!(!row.launchable_review, "hermes");
+            assert!(!row.launchable_investigate, "hermes");
             continue;
         }
         if row.supported {
@@ -160,14 +169,13 @@ fn known_agent_capability_matrix_matches_current_roster() {
         }
     }
 
-    // Non-first-batch agents other than grok must never be exposed as
-    // installable or launchable (E9 quarantine/unsupported rule).
+    // Non-first-batch agents other than grok and hermes must never be
+    // exposed as installable or launchable (E9 quarantine/unsupported rule).
     for kind in [
         AgentKind::Gemini,
         AgentKind::Cursor,
         AgentKind::Copilot,
         AgentKind::FactoryAi,
-        AgentKind::Hermes,
     ] {
         let row = registration_for(kind);
         assert!(!row.supported, "{}", row.slug);

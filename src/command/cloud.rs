@@ -49,6 +49,7 @@ mod agent_capture;
 mod metadata;
 mod object_format;
 mod restore;
+mod snapshot;
 mod sync;
 
 use agent_capture::*;
@@ -219,6 +220,8 @@ pub struct CloudSyncReport {
     pub failed_count: usize,
     pub metadata: MetadataSyncOutcome,
     pub agent_capture: AgentCaptureSyncOutcome,
+    /// Set when this run's snapshot spool could not be removed (PI-09).
+    pub spool_warning: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -230,6 +233,8 @@ struct CloudSyncOutput {
     failed_count: usize,
     metadata: CloudMetadataSyncOutput,
     agent_capture: CloudAgentCaptureSyncOutput,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    warnings: Vec<String>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -370,6 +375,26 @@ pub trait CloudSyncProgress: Send + Sync {
     fn on_agent_capture_warning(&self, err: &str) {
         let _ = err;
     }
+    /// A snapshot spool directory could not be removed (PI-09). The default
+    /// goes through [`emit_warning`]: stderr for humans, `data.warnings[]`
+    /// under `--json`.
+    fn on_spool_warning(&self, note: &str) {
+        emit_warning(note);
+    }
+    /// Whether this renderer owns an NDJSON stream, so a spool dropped on a
+    /// panic or cancellation must report through it too (PI-09).
+    fn spool_warnings_as_ndjson(&self) -> bool {
+        false
+    }
+}
+
+/// The `--progress=json` event for a snapshot spool that could not be
+/// removed; one NDJSON line, so plain text never lands on that stream.
+fn spool_warning_event(note: &str) -> serde_json::Value {
+    serde_json::json!({
+        "event": "cloud_sync.spool.warning",
+        "message": note,
+    })
 }
 
 /// Console implementation that reproduces the legacy `libra cloud
@@ -442,9 +467,21 @@ impl CloudSyncProgress for SilentCloudSyncProgress {}
 
 struct JsonCloudSyncProgress;
 
+/// Test-only capture of `--progress=json` lines, in place of stderr.
+#[cfg(test)]
+static JSON_PROGRESS_CAPTURE: std::sync::Mutex<Option<Vec<String>>> = std::sync::Mutex::new(None);
+
 impl JsonCloudSyncProgress {
     fn emit(event: serde_json::Value) {
-        eprintln!("{event}");
+        #[cfg(test)]
+        if let Ok(mut capture) = JSON_PROGRESS_CAPTURE.lock()
+            && let Some(lines) = capture.as_mut()
+        {
+            lines.push(event.to_string());
+            return;
+        }
+        // Never panics: this also runs from `Drop` during unwinding.
+        let _ = std::io::Write::write_fmt(&mut std::io::stderr(), format_args!("{event}\n"));
     }
 }
 
@@ -552,6 +589,15 @@ impl CloudSyncProgress for JsonCloudSyncProgress {
             "error": err,
         }));
     }
+    fn on_spool_warning(&self, note: &str) {
+        // Counted for `--exit-code-on-warning` and kept for a `--json`
+        // envelope, but printed only as an NDJSON event.
+        crate::utils::output::record_warning_message(note.to_string());
+        Self::emit(spool_warning_event(note));
+    }
+    fn spool_warnings_as_ndjson(&self) -> bool {
+        true
+    }
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -602,42 +648,17 @@ pub async fn execute_safe(args: CloudArgs, output: &OutputConfig) -> CliResult<(
     util::require_repo().map_err(|_| CliError::repo_not_found())?;
     match args.command {
         CloudCommand::Sync(sync_args) => {
-            if output.is_json() || output.quiet || matches!(output.progress, ProgressMode::Json) {
-                let ctx = CloudSyncContext {
-                    batch_size: sync_args.batch_size,
-                    force: sync_args.force,
-                };
-                let progress: &dyn CloudSyncProgress =
-                    if matches!(output.progress, ProgressMode::Json) {
-                        &JsonCloudSyncProgress
-                    } else {
-                        &SilentCloudSyncProgress
-                    };
-                let report = run_cloud_sync(ctx, progress)
-                    .await
-                    .map_err(|e| cloud_cli_error_typed("sync", e))?;
-                if report.failed_count > 0 {
-                    // Variant is known here — skip the String -> CloudError
-                    // classification round-trip and surface PartialTransfer directly.
-                    return Err(cloud_cli_error_typed(
-                        "sync",
-                        CloudError::PartialTransfer(format!(
-                            "{} objects failed to sync",
-                            report.failed_count
-                        )),
-                    ));
-                }
-                if let AgentCaptureSyncOutcome::Failed { error } = &report.agent_capture {
-                    return Err(cloud_cli_error_typed(
-                        "sync",
-                        agent_capture_mirror_failure(error),
-                    ));
-                }
-                render_cloud_sync_output(&report, output)?;
-            } else {
-                execute_sync(sync_args)
-                    .await
-                    .map_err(|e| cloud_cli_error_typed("sync", e))?;
+            let ctx = CloudSyncContext {
+                batch_size: sync_args.batch_size,
+                force: sync_args.force,
+            };
+            let report = run_cloud_sync(ctx, sync_progress_for(output))
+                .await
+                .map_err(|e| cloud_cli_error_typed("sync", e))?;
+            if let Some(structured) =
+                finish_sync(&report, output).map_err(|e| cloud_cli_error_typed("sync", e))?
+            {
+                emit_json_data("cloud.sync", &structured, output)?;
             }
         }
         CloudCommand::Restore(restore_args) => {
@@ -830,6 +851,36 @@ impl fmt::Display for CloudError {
 }
 
 impl CloudError {
+    /// Append `note` to the error's detail, keeping its variant (and so its
+    /// stable code).
+    pub(super) fn with_note(self, note: &str) -> Self {
+        let add = |detail: String| format!("{detail}; {note}");
+        match self {
+            CloudError::MissingEnv {
+                detail,
+                missing_keys,
+            } => CloudError::MissingEnv {
+                detail: add(detail),
+                missing_keys,
+            },
+            CloudError::NameAlreadyTaken(detail) => CloudError::NameAlreadyTaken(add(detail)),
+            CloudError::NameNotFound(detail) => CloudError::NameNotFound(add(detail)),
+            CloudError::PartialTransfer(detail) => CloudError::PartialTransfer(add(detail)),
+            CloudError::D1(detail) => CloudError::D1(add(detail)),
+            CloudError::R2(detail) => CloudError::R2(add(detail)),
+            CloudError::AmbiguousObjectFormat(detail) => {
+                CloudError::AmbiguousObjectFormat(add(detail))
+            }
+            CloudError::RemoteCaptureKindRefused(detail) => {
+                CloudError::RemoteCaptureKindRefused(add(detail))
+            }
+            CloudError::LocalCaptureKindRefused(detail) => {
+                CloudError::LocalCaptureKindRefused(add(detail))
+            }
+            CloudError::Generic(detail) => CloudError::Generic(add(detail)),
+        }
+    }
+
     /// Map the typed cloud error onto a [`CliError`] for the given top-level
     /// `operation` ("sync" / "restore" / "status").
     fn into_cli_error(self, operation: &str) -> CliError {
@@ -973,15 +1024,36 @@ fn cloud_sync_output_from_report(report: &CloudSyncReport) -> CloudSyncOutput {
         failed_count: report.failed_count,
         metadata,
         agent_capture,
+        warnings: report.spool_warning.iter().cloned().collect(),
     }
 }
 
-fn render_cloud_sync_output(report: &CloudSyncReport, output: &OutputConfig) -> CliResult<()> {
-    if output.is_json() {
-        let cloud_output = cloud_sync_output_from_report(report);
-        return emit_json_data("cloud.sync", &cloud_output, output);
+/// Progress renderer for an output mode: NDJSON events for
+/// `--progress=json`, nothing for `--json`/`--quiet`, console lines otherwise.
+fn sync_progress_for(output: &OutputConfig) -> &'static dyn CloudSyncProgress {
+    if matches!(output.progress, ProgressMode::Json) {
+        &JsonCloudSyncProgress
+    } else if output.is_json() || output.quiet {
+        &SilentCloudSyncProgress
+    } else {
+        &ConsoleCloudSyncProgress
     }
-    Ok(())
+}
+
+/// What a finished sync renders in an output mode: the error it stands for
+/// (see [`sync_report_failure`]), the structured `cloud.sync` data under
+/// `--json`, or nothing more (human and quiet modes have already printed
+/// progress, and any warning went through `emit_warning`).
+fn finish_sync(
+    report: &CloudSyncReport,
+    output: &OutputConfig,
+) -> Result<Option<CloudSyncOutput>, CloudError> {
+    if let Some(error) = sync_report_failure(report) {
+        return Err(error);
+    }
+    Ok(output
+        .is_json()
+        .then(|| cloud_sync_output_from_report(report)))
 }
 
 /// Execute sync command - uploads objects to R2, indexes to D1, and registers project name
@@ -995,16 +1067,27 @@ async fn execute_sync(args: SyncArgs) -> CloudResult<()> {
     // Preserve the pre-Phase-1 exit semantics: per-object failures
     // surface as a hard error after the human-readable summary has
     // already been emitted by `ConsoleCloudSyncProgress`.
-    if report.failed_count > 0 {
-        return Err(CloudError::PartialTransfer(format!(
-            "{} objects failed to sync",
-            report.failed_count
-        )));
+    match sync_report_failure(&report) {
+        Some(error) => Err(error),
+        None => Ok(()),
     }
-    if let AgentCaptureSyncOutcome::Failed { error } = report.agent_capture {
-        return Err(agent_capture_mirror_failure(&error));
-    }
-    Ok(())
+}
+
+/// The error a finished sync report stands for, if any: object failures,
+/// then a failed agent-capture mirror. A snapshot spool that could not be
+/// removed is named in that error, since no success output is rendered.
+fn sync_report_failure(report: &CloudSyncReport) -> Option<CloudError> {
+    let error = if report.failed_count > 0 {
+        CloudError::PartialTransfer(format!("{} objects failed to sync", report.failed_count))
+    } else if let AgentCaptureSyncOutcome::Failed { error } = &report.agent_capture {
+        agent_capture_mirror_failure(error)
+    } else {
+        return None;
+    };
+    Some(match &report.spool_warning {
+        Some(note) => error.with_note(note),
+        None => error,
+    })
 }
 
 /// Restore the Git objects described by D1 `object_index` rows from R2
@@ -2748,6 +2831,7 @@ mod tests {
             failed_count: 0,
             metadata: MetadataSyncOutcome::Skipped,
             agent_capture: outcome,
+            spool_warning: None,
         };
         let wire = serde_json::to_value(cloud_sync_output_from_report(&report))
             .expect("serialize failed cloud sync");
@@ -3046,10 +3130,14 @@ mod tests {
     /// Index one local object as not yet synced, so a sync that got past the
     /// probe would upload it to R2.
     async fn insert_unsynced_local_object() {
+        index_local_object(b"pi-18 unsynced object\n").await;
+    }
+
+    /// Store `data` as a local blob and index it as not yet synced.
+    async fn index_local_object(data: &[u8]) -> ObjectHash {
         use crate::internal::model::object_index;
 
         let repo_id = ensure_repo_id().await;
-        let data = b"pi-18 unsynced object\n";
         let hash = ObjectHash::from_type_and_data(ObjectType::Blob, data);
         LocalStorage::new(path::objects())
             .put(&hash, data, ObjectType::Blob)
@@ -3067,6 +3155,7 @@ mod tests {
         .insert(&db::get_db_conn_instance().await)
         .await
         .expect("index unsynced local object");
+        hash
     }
 
     async fn r2_object_count(store: &InMemory) -> usize {
@@ -3392,6 +3481,1923 @@ mod tests {
         assert!(r2_object_count(&r2).await >= expected.len());
     }
 
+    // ---- PI-09: frozen snapshot spool --------------------------------------
+
+    async fn insert_branch_ref(name: &str) {
+        use crate::internal::model::reference::{self, ConfigKind};
+
+        reference::ActiveModel {
+            name: Set(Some(name.to_owned())),
+            kind: Set(ConfigKind::Branch),
+            commit: Set(Some("a".repeat(40))),
+            remote: Set(None),
+            worktree_id: Set(None),
+            ..Default::default()
+        }
+        .insert(&db::get_db_conn_instance().await)
+        .await
+        .expect("insert local ref");
+    }
+
+    async fn local_is_synced(hash: &ObjectHash) -> i32 {
+        use crate::internal::model::object_index;
+
+        object_index::Entity::find()
+            .filter(object_index::Column::OId.eq(hash.to_string()))
+            .one(&db::get_db_conn_instance().await)
+            .await
+            .expect("read local object_index")
+            .expect("indexed object")
+            .is_synced
+    }
+
+    fn spool_runs() -> Vec<PathBuf> {
+        let snapshots = util::storage_path()
+            .join(super::snapshot::SPOOL_ROOT_DIR)
+            .join(super::snapshot::SPOOL_SNAPSHOTS_DIR);
+        let Ok(entries) = fs::read_dir(&snapshots) else {
+            return Vec::new();
+        };
+        entries
+            .filter_map(Result::ok)
+            .map(|entry| entry.path())
+            .filter(|path| {
+                path.file_name()
+                    .and_then(|name| name.to_str())
+                    .is_some_and(|name| name.starts_with("run-"))
+            })
+            .collect()
+    }
+
+    /// Run a sync against fresh mocks with `tuning`; the after-freeze hook
+    /// receives the run directory.
+    async fn sync_with_tuning(
+        mock: &crate::utils::d1_client::test_support::MockD1,
+        r2: &Arc<InMemory>,
+        tuning: &super::snapshot::SnapshotTuning,
+    ) -> CloudResult<CloudSyncReport> {
+        super::sync::run_cloud_sync_from_snapshot(
+            CloudSyncContext {
+                batch_size: 2,
+                force: false,
+            },
+            &SilentCloudSyncProgress,
+            mock.client(),
+            Some(RemoteStorage::new(r2.clone())),
+            tuning,
+        )
+        .await
+    }
+
+    /// Hook that records the run directory and then runs `extra`.
+    fn recording_hook(
+        seen: Arc<std::sync::Mutex<Vec<PathBuf>>>,
+        extra: impl Fn() -> futures::future::BoxFuture<'static, ()> + Send + Sync + 'static,
+    ) -> super::snapshot::AfterFreezeHook {
+        Arc::new(move |dir: PathBuf| {
+            if let Ok(mut seen) = seen.lock() {
+                seen.push(dir);
+            }
+            extra()
+        })
+    }
+
+    #[tokio::test]
+    #[serial(cwd, env)]
+    async fn capture_snapshot_spool_excludes_writes_after_the_freeze() {
+        let _repo = enter_isolated_libra_repo().await;
+        let repo_id = ensure_repo_id().await;
+        let frozen_a = index_local_object(b"pi-09 frozen a\n").await;
+        let frozen_b = index_local_object(b"pi-09 frozen b\n").await;
+        insert_branch_ref("refs/heads/frozen").await;
+        ConfigKv::set("cloud.name", "pi09-frozen-name", false)
+            .await
+            .expect("set cloud.name");
+        let late = ObjectHash::from_type_and_data(ObjectType::Blob, b"pi-09 late\n");
+
+        let seen = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let tuning = super::snapshot::SnapshotTuning {
+            after_freeze: Some(recording_hook(seen.clone(), || {
+                Box::pin(async {
+                    index_local_object(b"pi-09 late\n").await;
+                    insert_branch_ref("refs/heads/late").await;
+                    ConfigKv::set("cloud.name", "pi09-late-name", false)
+                        .await
+                        .expect("change cloud.name after the freeze");
+                })
+            })),
+            ..Default::default()
+        };
+        let mock = crate::utils::d1_client::test_support::MockD1::spawn().await;
+        let r2 = Arc::new(InMemory::new());
+        let report = sync_with_tuning(&mock, &r2, &tuning)
+            .await
+            .expect("sync from the frozen snapshot");
+        assert_eq!(report.total_unsynced, 2);
+        assert_eq!(report.synced_count, 2);
+        assert_eq!(seen.lock().map(|seen| seen.len()).unwrap_or(0), 1);
+
+        let mut indexed: Vec<String> = mock
+            .client()
+            .get_object_indexes(&repo_id)
+            .await
+            .expect("read D1 object index")
+            .into_iter()
+            .map(|row| row.o_id)
+            .collect();
+        indexed.sort();
+        let mut expected = vec![frozen_a.to_string(), frozen_b.to_string()];
+        expected.sort();
+        assert_eq!(indexed, expected, "only frozen identities reach D1");
+
+        let remote = RemoteStorage::new(r2.clone());
+        assert_eq!(
+            remote.exist_batch(&[frozen_a, frozen_b, late]).await,
+            vec![true, true, false],
+            "only frozen objects reach R2"
+        );
+        let metadata = String::from_utf8(remote.get_metadata().await.expect("read metadata"))
+            .expect("utf-8 metadata");
+        assert!(metadata.contains("refs/heads/frozen"), "{metadata}");
+        assert!(
+            !metadata.contains("refs/heads/late"),
+            "a ref written after the freeze must wait for the next sync: {metadata}"
+        );
+
+        #[derive(serde::Deserialize)]
+        struct NameRow {
+            name: String,
+        }
+        let names: Vec<NameRow> = mock
+            .client()
+            .query(
+                "SELECT name FROM repositories WHERE repo_id = ?1",
+                Some(vec![serde_json::json!(repo_id)]),
+            )
+            .await
+            .expect("read D1 repositories");
+        assert_eq!(
+            names.into_iter().map(|row| row.name).collect::<Vec<_>>(),
+            vec!["pi09-frozen-name".to_string()],
+            "the project name comes from the frozen snapshot"
+        );
+    }
+
+    #[tokio::test]
+    #[serial(cwd, env)]
+    async fn capture_snapshot_spool_uses_a_unique_run_dir_under_snapshots() {
+        let _repo = enter_isolated_libra_repo().await;
+        index_local_object(b"pi-09 unique\n").await;
+        let seen = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let tuning = super::snapshot::SnapshotTuning {
+            after_freeze: Some(recording_hook(seen.clone(), || Box::pin(async {}))),
+            ..Default::default()
+        };
+        for _ in 0..2 {
+            let mock = crate::utils::d1_client::test_support::MockD1::spawn().await;
+            sync_with_tuning(&mock, &Arc::new(InMemory::new()), &tuning)
+                .await
+                .expect("sync");
+        }
+        let seen = seen.lock().map(|seen| seen.clone()).unwrap_or_default();
+        assert_eq!(seen.len(), 2);
+        assert_ne!(seen[0], seen[1], "each run gets its own directory");
+        let snapshots = util::storage_path()
+            .canonicalize()
+            .expect("canonical storage")
+            .join(super::snapshot::SPOOL_ROOT_DIR)
+            .join(super::snapshot::SPOOL_SNAPSHOTS_DIR);
+        for dir in &seen {
+            let parent = dir
+                .parent()
+                .expect("run dir parent")
+                .canonicalize()
+                .expect("canonical parent");
+            assert_eq!(parent, snapshots, "{}", dir.display());
+            let name = dir.file_name().and_then(|n| n.to_str()).unwrap_or("");
+            assert!(name.starts_with("run-"), "{name}");
+        }
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    #[serial(cwd, env)]
+    async fn capture_snapshot_spool_is_owner_only() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let _repo = enter_isolated_libra_repo().await;
+        index_local_object(b"pi-09 private\n").await;
+        let modes = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let recorded = modes.clone();
+        let tuning = super::snapshot::SnapshotTuning {
+            after_freeze: Some(Arc::new(move |dir: PathBuf| {
+                let recorded = recorded.clone();
+                Box::pin(async move {
+                    let mut found = vec![(
+                        "run".to_string(),
+                        fs::metadata(&dir).unwrap().permissions().mode() & 0o777,
+                    )];
+                    for entry in fs::read_dir(&dir).unwrap() {
+                        let entry = entry.unwrap();
+                        found.push((
+                            entry.file_name().to_string_lossy().into_owned(),
+                            entry.metadata().unwrap().permissions().mode() & 0o777,
+                        ));
+                    }
+                    recorded.lock().unwrap().extend(found);
+                })
+            })),
+            ..Default::default()
+        };
+        let mock = crate::utils::d1_client::test_support::MockD1::spawn().await;
+        sync_with_tuning(&mock, &Arc::new(InMemory::new()), &tuning)
+            .await
+            .expect("sync");
+        let mut modes = modes.lock().unwrap().clone();
+        modes.sort();
+        assert_eq!(
+            modes,
+            vec![
+                ("objects.jsonl".to_string(), 0o600),
+                ("owner.json".to_string(), 0o600),
+                ("refs.json".to_string(), 0o600),
+                ("repository.json".to_string(), 0o600),
+                ("run".to_string(), 0o700),
+            ]
+        );
+        let root = util::storage_path().join(super::snapshot::SPOOL_ROOT_DIR);
+        for dir in [
+            root.clone(),
+            root.join(super::snapshot::SPOOL_SNAPSHOTS_DIR),
+        ] {
+            assert_eq!(
+                fs::metadata(&dir).unwrap().permissions().mode() & 0o777,
+                0o700,
+                "{}",
+                dir.display()
+            );
+        }
+    }
+
+    /// Give `dir` a protected DACL granting only the current user and SYSTEM
+    /// and make the current user its owner, exactly as the refusal's remedy
+    /// says: grant, set the owner (an elevated runner's new files are owned
+    /// by the Administrators group), then remove any other account `icacls`
+    /// still lists. The final listing goes to stderr for a failing test.
+    #[cfg(windows)]
+    fn make_private_with_icacls(dir: &std::path::Path) {
+        let user = env::var("USERNAME").expect("USERNAME");
+        let icacls = |args: &[&str]| {
+            let output = std::process::Command::new("icacls")
+                .arg(dir)
+                .args(args)
+                .output()
+                .expect("run icacls");
+            assert!(
+                output.status.success(),
+                "icacls {args:?} failed for {}: {}",
+                dir.display(),
+                String::from_utf8_lossy(&output.stderr)
+            );
+            String::from_utf8_lossy(&output.stdout).into_owned()
+        };
+        icacls(&[
+            "/inheritance:r",
+            "/grant:r",
+            &format!("{user}:(OI)(CI)F"),
+            "SYSTEM:(OI)(CI)F",
+        ]);
+        icacls(&["/setowner", &user]);
+        // `icacls <dir>` prints `<dir> <principal>:(...)` and then one
+        // `<principal>:(...)` per line.
+        let shown = dir.display().to_string();
+        let listing = icacls(&[]);
+        let lowered_user = user.to_lowercase();
+        for line in listing.lines() {
+            let entry = line.strip_prefix(shown.as_str()).unwrap_or(line).trim();
+            let Some((principal, _)) = entry.split_once(":(") else {
+                continue;
+            };
+            let principal = principal.trim();
+            let lowered = principal.to_lowercase();
+            if principal.is_empty()
+                || lowered == lowered_user
+                || lowered.ends_with(&format!("\\{lowered_user}"))
+                || lowered == "nt authority\\system"
+                || lowered == "system"
+            {
+                continue;
+            }
+            let target = if principal.starts_with("S-1-") {
+                format!("*{principal}")
+            } else {
+                principal.to_string()
+            };
+            icacls(&["/remove:g", &target]);
+        }
+        eprintln!("icacls {shown} after making it private:\n{}", icacls(&[]));
+    }
+
+    #[cfg(windows)]
+    #[tokio::test]
+    #[serial(cwd, env)]
+    async fn capture_snapshot_spool_refuses_an_inherited_acl_root_on_windows() {
+        let _repo = enter_isolated_libra_repo().await;
+        let status = std::process::Command::new("icacls")
+            .arg(util::storage_path())
+            .arg("/reset")
+            .status()
+            .expect("run icacls");
+        assert!(status.success());
+        index_local_object(b"pi-09 inherited windows\n").await;
+        let mock = crate::utils::d1_client::test_support::MockD1::spawn().await;
+        let error = sync_with_tuning(&mock, &Arc::new(InMemory::new()), &Default::default())
+            .await
+            .expect_err("a .libra with inherited permissions must be refused");
+        let detail = error.to_string();
+        assert!(detail.contains("icacls"), "{detail}");
+        assert!(
+            detail.contains("/setowner"),
+            "the remedy also makes the current user the owner: {detail}"
+        );
+        assert!(
+            detail.contains(&util::storage_path().display().to_string()),
+            "{detail}"
+        );
+        assert!(!remote_table_present(&mock, "object_index").await);
+    }
+
+    #[cfg(windows)]
+    #[tokio::test]
+    #[serial(cwd, env)]
+    async fn capture_snapshot_spool_is_owner_only_on_windows() {
+        let _repo = enter_isolated_libra_repo().await;
+        make_private_with_icacls(&util::storage_path());
+        index_local_object(b"pi-09 private windows\n").await;
+        let checked = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let recorded = checked.clone();
+        let file_acls = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let recorded_files = file_acls.clone();
+        let tuning = super::snapshot::SnapshotTuning {
+            after_freeze: Some(Arc::new(move |dir: PathBuf| {
+                let recorded = recorded.clone();
+                let recorded_files = recorded_files.clone();
+                Box::pin(async move {
+                    for name in [
+                        "owner.json",
+                        "objects.jsonl",
+                        "refs.json",
+                        "repository.json",
+                    ] {
+                        let output = std::process::Command::new("icacls")
+                            .arg(dir.join(name))
+                            .output()
+                            .expect("run icacls");
+                        recorded_files.lock().unwrap().push((
+                            name.to_string(),
+                            String::from_utf8_lossy(&output.stdout).into_owned(),
+                        ));
+                    }
+                    let mut results = Vec::new();
+                    let mut current = Some(dir.as_path());
+                    for _ in 0..3 {
+                        let Some(path) = current else { break };
+                        results.push(
+                            crate::utils::windows_fs::open_private_directory(path)
+                                .map(|_| ())
+                                .map_err(|error| format!("{}: {error}", path.display())),
+                        );
+                        current = path.parent();
+                    }
+                    recorded.lock().unwrap().extend(results);
+                })
+            })),
+            ..Default::default()
+        };
+        let mock = crate::utils::d1_client::test_support::MockD1::spawn().await;
+        sync_with_tuning(&mock, &Arc::new(InMemory::new()), &tuning)
+            .await
+            .expect("sync");
+        let checked = checked.lock().unwrap().clone();
+        assert_eq!(
+            checked.len(),
+            3,
+            "run, snapshots and cloud-sync were checked"
+        );
+        for result in checked {
+            result.expect("spool directories carry an owner-only protected DACL");
+        }
+        // `icacls <file>` lists one principal per line after the path line;
+        // only the current user and SYSTEM may appear.
+        let files = file_acls.lock().unwrap().clone();
+        assert_eq!(files.len(), 4, "{files:?}");
+        let user = env::var("USERNAME").expect("USERNAME").to_lowercase();
+        for (name, acl) in files {
+            let acl = acl.to_lowercase();
+            assert!(acl.contains(&user), "{name}: {acl}");
+            for line in acl.lines() {
+                let Some((_, principal)) = line.split_once(name.as_str()) else {
+                    let entry = line.trim();
+                    if entry.is_empty() || entry.starts_with("successfully") {
+                        continue;
+                    }
+                    assert!(
+                        entry.contains(&user) || entry.contains("system"),
+                        "{name} grants another principal: {acl}"
+                    );
+                    continue;
+                };
+                let entry = principal.trim();
+                assert!(
+                    entry.contains(&user) || entry.contains("system"),
+                    "{name} grants another principal: {acl}"
+                );
+            }
+        }
+    }
+
+    #[cfg(windows)]
+    #[tokio::test]
+    #[serial(cwd, env)]
+    async fn capture_snapshot_spool_refuses_an_inherited_acl_parent_on_windows() {
+        let _repo = enter_isolated_libra_repo().await;
+        make_private_with_icacls(&util::storage_path());
+        index_local_object(b"pi-09 inherited parent windows\n").await;
+        // A pre-existing `cloud-sync` that inherits ordinary permissions.
+        let cloud_sync = util::storage_path().join(super::snapshot::SPOOL_ROOT_DIR);
+        fs::create_dir(&cloud_sync).unwrap();
+        let status = std::process::Command::new("icacls")
+            .arg(&cloud_sync)
+            .args(["/inheritance:e", "/grant", "*S-1-5-11:(OI)(CI)M"])
+            .status()
+            .expect("run icacls");
+        assert!(status.success());
+        let mock = crate::utils::d1_client::test_support::MockD1::spawn().await;
+        let r2 = Arc::new(InMemory::new());
+        let error = sync_with_tuning(&mock, &r2, &Default::default())
+            .await
+            .expect_err("a spool parent without a protected DACL must be refused");
+        let detail = error.to_string();
+        assert!(detail.contains("icacls"), "{detail}");
+        assert!(
+            detail.contains(&cloud_sync.display().to_string()),
+            "{detail}"
+        );
+        assert!(!remote_table_present(&mock, "object_index").await);
+        assert_eq!(r2_object_count(&r2).await, 0);
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    #[serial(cwd, env)]
+    async fn capture_snapshot_spool_refuses_unsafe_parents() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let _repo = enter_isolated_libra_repo().await;
+        index_local_object(b"pi-09 unsafe parent\n").await;
+        let storage = util::storage_path();
+        let root = storage.join(super::snapshot::SPOOL_ROOT_DIR);
+
+        // A `.libra` that is itself a symlink is refused, although repository
+        // discovery resolves it to a valid storage directory.
+        let workdir = util::working_dir();
+        let raw_root = workdir.join(util::ROOT_DIR);
+        let moved = workdir.join(".libra-real");
+        fs::rename(&raw_root, &moved).unwrap();
+        std::os::unix::fs::symlink(&moved, &raw_root).unwrap();
+        let mock = crate::utils::d1_client::test_support::MockD1::spawn().await;
+        let outcome =
+            sync_with_tuning(&mock, &Arc::new(InMemory::new()), &Default::default()).await;
+        fs::remove_file(&raw_root).unwrap();
+        fs::rename(&moved, &raw_root).unwrap();
+        let error = outcome.expect_err("a symlinked .libra must be refused");
+        assert!(error.to_string().contains("symbolic link"), "{error}");
+        assert!(!remote_table_present(&mock, "object_index").await);
+
+        // A group-writable `.libra` is not a trusted spool root.
+        let original = fs::metadata(&storage).unwrap().permissions().mode() & 0o777;
+        fs::set_permissions(&storage, fs::Permissions::from_mode(0o775)).unwrap();
+        let mock = crate::utils::d1_client::test_support::MockD1::spawn().await;
+        let r2 = Arc::new(InMemory::new());
+        let error = sync_with_tuning(&mock, &r2, &Default::default())
+            .await
+            .expect_err("a group-writable repository storage directory must be refused");
+        fs::set_permissions(&storage, fs::Permissions::from_mode(original)).unwrap();
+        assert!(
+            error
+                .to_string()
+                .contains("repository storage directory is writable by group"),
+            "{error}"
+        );
+        assert!(!root.exists(), "nothing is created under an untrusted root");
+        assert!(!remote_table_present(&mock, "object_index").await);
+        assert_eq!(r2_object_count(&r2).await, 0);
+
+        // A symlinked `cloud-sync` is never followed.
+        let outside = tempdir().unwrap();
+        std::os::unix::fs::symlink(outside.path(), &root).unwrap();
+        let mock = crate::utils::d1_client::test_support::MockD1::spawn().await;
+        let r2 = Arc::new(InMemory::new());
+        let error = sync_with_tuning(&mock, &r2, &Default::default())
+            .await
+            .expect_err("a symlinked spool parent must be refused");
+        assert!(error.to_string().contains("symbolic link"), "{error}");
+        assert_eq!(fs::read_dir(outside.path()).unwrap().count(), 0);
+        assert!(!remote_table_present(&mock, "object_index").await);
+        assert_eq!(r2_object_count(&r2).await, 0);
+        fs::remove_file(&root).unwrap();
+
+        // A group-writable existing parent is refused too.
+        let snapshots = root.join(super::snapshot::SPOOL_SNAPSHOTS_DIR);
+        fs::create_dir_all(&snapshots).unwrap();
+        fs::set_permissions(&root, fs::Permissions::from_mode(0o700)).unwrap();
+        fs::set_permissions(&snapshots, fs::Permissions::from_mode(0o770)).unwrap();
+        let mock = crate::utils::d1_client::test_support::MockD1::spawn().await;
+        let error = sync_with_tuning(&mock, &r2, &Default::default())
+            .await
+            .expect_err("a group-writable spool parent must be refused");
+        assert!(error.to_string().contains("writable by group"), "{error}");
+        assert!(!remote_table_present(&mock, "object_index").await);
+        assert!(spool_runs().is_empty());
+
+        // Safe existing parents are reused, so a second sync still works.
+        fs::set_permissions(&snapshots, fs::Permissions::from_mode(0o700)).unwrap();
+        for _ in 0..2 {
+            let mock = crate::utils::d1_client::test_support::MockD1::spawn().await;
+            sync_with_tuning(&mock, &Arc::new(InMemory::new()), &Default::default())
+                .await
+                .expect("sync with safe existing parents");
+        }
+
+        // A parent another sync created first is reused after validation,
+        // unlike the run directory.
+        super::snapshot::create_parent_or_reuse(&snapshots)
+            .expect("an existing parent is accepted for validation");
+
+        // The run directory itself is created exclusively: a sync whose run
+        // name already exists refuses and leaves that directory alone.
+        let taken = snapshots.join("run-taken");
+        fs::create_dir(&taken).unwrap();
+        fs::write(taken.join("sentinel"), b"keep").unwrap();
+        let mock = crate::utils::d1_client::test_support::MockD1::spawn().await;
+        let r2 = Arc::new(InMemory::new());
+        let tuning = super::snapshot::SnapshotTuning {
+            run_name: Some("run-taken".to_string()),
+            ..Default::default()
+        };
+        sync_with_tuning(&mock, &r2, &tuning)
+            .await
+            .expect_err("an existing run directory must not be reused");
+        assert_eq!(fs::read(taken.join("sentinel")).unwrap(), b"keep");
+        assert_eq!(fs::read_dir(&taken).unwrap().count(), 1);
+        assert!(!remote_table_present(&mock, "object_index").await);
+        assert_eq!(r2_object_count(&r2).await, 0);
+    }
+
+    #[tokio::test]
+    #[serial(cwd, env)]
+    async fn capture_snapshot_spool_writes_owner_marker() {
+        let _repo = enter_isolated_libra_repo().await;
+        index_local_object(b"pi-09 marker\n").await;
+        let markers = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let recorded = markers.clone();
+        let before = chrono::Utc::now().timestamp_millis();
+        let tuning = super::snapshot::SnapshotTuning {
+            after_freeze: Some(Arc::new(move |dir: PathBuf| {
+                let recorded = recorded.clone();
+                Box::pin(async move {
+                    let bytes = fs::read(dir.join(super::snapshot::OWNER_MARKER_FILE)).unwrap();
+                    let marker: super::snapshot::OwnerMarker =
+                        serde_json::from_slice(&bytes).unwrap();
+                    recorded.lock().unwrap().push(marker);
+                })
+            })),
+            ..Default::default()
+        };
+        let mock = crate::utils::d1_client::test_support::MockD1::spawn().await;
+        sync_with_tuning(&mock, &Arc::new(InMemory::new()), &tuning)
+            .await
+            .expect("sync");
+        let markers = markers.lock().unwrap().clone();
+        assert_eq!(markers.len(), 1);
+        let marker = &markers[0];
+        assert_eq!(marker.tool, super::snapshot::OWNER_MARKER_TOOL);
+        assert_eq!(marker.pid, std::process::id());
+        assert_eq!(marker.libra_version, env!("CARGO_PKG_VERSION"));
+        assert!(marker.started_at_unix_ms >= before, "{marker:?}");
+        assert_eq!(marker.pid_namespace, super::snapshot::pid_namespace());
+        assert_eq!(marker.boot_id, super::snapshot::boot_id());
+        #[cfg(any(target_os = "linux", target_os = "macos"))]
+        assert!(marker.boot_id.is_some(), "{marker:?}");
+        #[cfg(unix)]
+        assert!(!marker.host.is_empty(), "{marker:?}");
+    }
+
+    #[tokio::test]
+    #[serial(cwd, env)]
+    async fn capture_snapshot_spool_is_released_on_success_and_failure() {
+        let _repo = enter_isolated_libra_repo().await;
+        index_local_object(b"pi-09 release\n").await;
+        let seen = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let tuning = super::snapshot::SnapshotTuning {
+            after_freeze: Some(recording_hook(seen.clone(), || Box::pin(async {}))),
+            ..Default::default()
+        };
+
+        // A failed object upload (its D1 index write fails) ends the run
+        // with a failure count.
+        let mock = crate::utils::d1_client::test_support::MockD1::spawn().await;
+        mock.fail_once_when_sql_contains(
+            "INSERT INTO object_index (o_id, o_type, o_size, repo_id, created_at, is_synced, object_format)",
+            "injected upload failure",
+        );
+        let report = sync_with_tuning(&mock, &Arc::new(InMemory::new()), &tuning)
+            .await
+            .expect("an object failure is reported in the result");
+        assert_eq!(report.failed_count, 1);
+        assert!(spool_runs().is_empty(), "the failed run released its spool");
+
+        // A hard error after the freeze returns early.
+        let mock = crate::utils::d1_client::test_support::MockD1::spawn().await;
+        mock.fail_once_when_sql_contains("repositories", "injected D1 failure");
+        sync_with_tuning(&mock, &Arc::new(InMemory::new()), &tuning)
+            .await
+            .expect_err("the injected D1 failure stops the run");
+        assert!(
+            spool_runs().is_empty(),
+            "the aborted run released its spool"
+        );
+
+        // A removal failure keeps the sync result but is reported with the
+        // directory to delete.
+        let mock = crate::utils::d1_client::test_support::MockD1::spawn().await;
+        let retained_seen = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let retaining = super::snapshot::SnapshotTuning {
+            fail_spool_release: true,
+            after_freeze: Some(recording_hook(retained_seen.clone(), || Box::pin(async {}))),
+            ..Default::default()
+        };
+        let report = sync_with_tuning(&mock, &Arc::new(InMemory::new()), &retaining)
+            .await
+            .expect("a removal failure does not fail the sync");
+        assert_eq!(report.failed_count, 0);
+        let retained = retained_seen.lock().unwrap()[0].clone();
+        assert!(
+            retained.exists(),
+            "the injected failure keeps the directory"
+        );
+        let warning = crate::utils::output::pending_warning_messages()
+            .into_iter()
+            .find(|message| message.contains(&retained.display().to_string()))
+            .expect("a warning names the retained spool");
+        assert!(
+            warning.contains("delete that directory manually"),
+            "{warning}"
+        );
+        // Through the CLI mode selector: human and `--progress=json` render
+        // nothing more (the warning went through `emit_warning`), `--json`
+        // carries the same note in `data.warnings[]`.
+        assert_eq!(report.spool_warning.as_deref(), Some(warning.as_str()));
+        let json_mode = OutputConfig {
+            json_format: Some(crate::utils::output::JsonFormat::Pretty),
+            ..OutputConfig::default()
+        };
+        let progress_mode = OutputConfig {
+            progress: ProgressMode::Json,
+            ..OutputConfig::default()
+        };
+        assert!(
+            finish_sync(&report, &OutputConfig::default())
+                .unwrap()
+                .is_none()
+        );
+        assert!(finish_sync(&report, &progress_mode).unwrap().is_none());
+        let structured = finish_sync(&report, &json_mode)
+            .unwrap()
+            .expect("--json renders the cloud.sync data");
+        let json = serde_json::to_value(structured).unwrap();
+        assert_eq!(json["warnings"], serde_json::json!([warning]));
+        fs::remove_dir_all(&retained).unwrap();
+
+        // On a failed run the note joins the returned error instead.
+        index_local_object(b"pi-09 release retained on failure\n").await;
+        let mock = crate::utils::d1_client::test_support::MockD1::spawn().await;
+        mock.fail_once_when_sql_contains("repositories", "injected D1 failure");
+        retained_seen.lock().unwrap().clear();
+        let error = sync_with_tuning(&mock, &Arc::new(InMemory::new()), &retaining)
+            .await
+            .expect_err("the injected D1 failure stops the run");
+        let retained = retained_seen.lock().unwrap()[0].clone();
+        let detail = error.to_string();
+        assert!(detail.contains(&retained.display().to_string()), "{detail}");
+        assert!(
+            detail.contains("delete that directory manually"),
+            "{detail}"
+        );
+        fs::remove_dir_all(&retained).unwrap();
+
+        // When objects fail, the report becomes an error that names it too.
+        let mock = crate::utils::d1_client::test_support::MockD1::spawn().await;
+        mock.fail_once_when_sql_contains(
+            "INSERT INTO object_index (o_id, o_type, o_size, repo_id, created_at, is_synced, object_format)",
+            "injected upload failure",
+        );
+        retained_seen.lock().unwrap().clear();
+        let report = sync_with_tuning(&mock, &Arc::new(InMemory::new()), &retaining)
+            .await
+            .expect("object failures are reported in the result");
+        let retained = retained_seen.lock().unwrap()[0].clone();
+        for mode in [
+            OutputConfig::default(),
+            json_mode.clone(),
+            progress_mode.clone(),
+        ] {
+            let error =
+                finish_sync(&report, &mode).expect_err("failed objects make the run an error");
+            let detail = error.to_string();
+            assert!(detail.contains("objects failed to sync"), "{detail}");
+            assert!(detail.contains(&retained.display().to_string()), "{detail}");
+        }
+        fs::remove_dir_all(&retained).unwrap();
+
+        // A spool write failure stops the run before the hook.
+        let mock = crate::utils::d1_client::test_support::MockD1::spawn().await;
+        let failing = super::snapshot::SnapshotTuning {
+            fail_spool_write: true,
+            ..Default::default()
+        };
+        sync_with_tuning(&mock, &Arc::new(InMemory::new()), &failing)
+            .await
+            .expect_err("the injected spool write failure stops the run");
+        assert!(spool_runs().is_empty(), "the failed spool is released");
+
+        // Success.
+        let mock = crate::utils::d1_client::test_support::MockD1::spawn().await;
+        let report = sync_with_tuning(&mock, &Arc::new(InMemory::new()), &tuning)
+            .await
+            .expect("sync");
+        assert_eq!(report.failed_count, 0);
+        assert!(
+            spool_runs().is_empty(),
+            "the successful run released its spool"
+        );
+        assert_eq!(seen.lock().map(|seen| seen.len()).unwrap_or(0), 3);
+        for dir in seen.lock().map(|seen| seen.clone()).unwrap_or_default() {
+            assert!(!dir.exists(), "{}", dir.display());
+        }
+    }
+
+    #[tokio::test]
+    #[serial(cwd, env)]
+    async fn capture_snapshot_spool_write_failure_precedes_remote_side_effects() {
+        let _repo = enter_isolated_libra_repo().await;
+        index_local_object(b"pi-09 disk full\n").await;
+        let mock = crate::utils::d1_client::test_support::MockD1::spawn().await;
+        let r2 = Arc::new(InMemory::new());
+        let tuning = super::snapshot::SnapshotTuning {
+            fail_spool_write: true,
+            ..Default::default()
+        };
+        let error = sync_with_tuning(&mock, &r2, &tuning)
+            .await
+            .expect_err("a spool write failure stops the sync");
+        let detail = error.to_string();
+        assert!(detail.contains("no space left on device"), "{detail}");
+        assert!(
+            detail.contains("nothing was written to D1 or R2"),
+            "{detail}"
+        );
+        let probe = "SELECT sql FROM sqlite_master WHERE type = 'table' AND name = ?1";
+        let expected: Vec<serde_json::Value> = ["agent_session", "agent_capture_session_v2"]
+            .iter()
+            .map(|table| serde_json::json!({ "sql": probe, "params": [table] }))
+            .collect();
+        assert_eq!(
+            mock.request_bodies().await,
+            expected,
+            "only the read-only probes may precede a spool failure"
+        );
+        assert_eq!(r2_object_count(&r2).await, 0);
+        assert!(spool_runs().is_empty(), "the failed spool is released");
+    }
+
+    #[tokio::test]
+    #[serial(cwd, env)]
+    async fn capture_snapshot_spool_marks_only_frozen_identities() {
+        let _repo = enter_isolated_libra_repo().await;
+        let repo_id = ensure_repo_id().await;
+        // Three frozen identities with a page size of two span two pages.
+        let mut frozen = Vec::new();
+        for data in [
+            &b"pi-09 frozen synced 1\n"[..],
+            &b"pi-09 frozen synced 2\n"[..],
+            &b"pi-09 frozen synced 3\n"[..],
+        ] {
+            frozen.push(index_local_object(data).await);
+        }
+        let late = ObjectHash::from_type_and_data(ObjectType::Blob, b"pi-09 late synced\n");
+        let tuning = super::snapshot::SnapshotTuning {
+            page_size: Some(2),
+            after_freeze: Some(Arc::new(|_dir: PathBuf| {
+                Box::pin(async {
+                    index_local_object(b"pi-09 late synced\n").await;
+                })
+            })),
+            ..Default::default()
+        };
+        let mock = crate::utils::d1_client::test_support::MockD1::spawn().await;
+        let r2 = Arc::new(InMemory::new());
+        let report = sync_with_tuning(&mock, &r2, &tuning).await.expect("sync");
+        assert_eq!(report.total_unsynced, 3);
+        assert_eq!(report.synced_count, 3);
+        for hash in &frozen {
+            assert_eq!(local_is_synced(hash).await, 1, "{hash}");
+        }
+        let mut indexed: Vec<String> = mock
+            .client()
+            .get_object_indexes(&repo_id)
+            .await
+            .expect("read D1 object index")
+            .into_iter()
+            .map(|row| row.o_id)
+            .collect();
+        indexed.sort();
+        let mut expected: Vec<String> = frozen.iter().map(ToString::to_string).collect();
+        expected.sort();
+        assert_eq!(indexed, expected, "every frozen identity is uploaded once");
+        assert_eq!(
+            RemoteStorage::new(r2.clone()).exist_batch(&frozen).await,
+            vec![true; 3]
+        );
+        assert_eq!(
+            local_is_synced(&late).await,
+            0,
+            "a row indexed after the freeze stays unsynced"
+        );
+    }
+
+    #[tokio::test]
+    #[serial(cwd, env)]
+    async fn capture_snapshot_spool_leaves_failed_identities_unsynced() {
+        use crate::internal::model::object_index;
+
+        let _repo = enter_isolated_libra_repo().await;
+        let first = index_local_object(b"pi-09 upload fails\n").await;
+        let second = index_local_object(b"pi-09 upload works\n").await;
+
+        // The first object's D1 index write fails: only the second is marked.
+        let mock = crate::utils::d1_client::test_support::MockD1::spawn().await;
+        mock.fail_once_when_sql_contains(
+            "INSERT INTO object_index (o_id, o_type, o_size, repo_id, created_at, is_synced, object_format)",
+            "injected upload failure",
+        );
+        let report = sync_with_tuning(&mock, &Arc::new(InMemory::new()), &Default::default())
+            .await
+            .expect("an object failure is reported in the result");
+        assert_eq!((report.synced_count, report.failed_count), (1, 1));
+        assert_eq!(
+            local_is_synced(&first).await,
+            0,
+            "a failed upload stays unsynced"
+        );
+        assert_eq!(local_is_synced(&second).await, 1);
+
+        // Reset, then make every local status update fail: nothing counts as
+        // synced although the uploads themselves succeed.
+        object_index::Entity::update_many()
+            .col_expr(object_index::Column::IsSynced, Expr::value(0))
+            .exec(&db::get_db_conn_instance().await)
+            .await
+            .expect("reset local sync flags");
+        let mock = crate::utils::d1_client::test_support::MockD1::spawn().await;
+        let failing = super::snapshot::SnapshotTuning {
+            fail_status_update: true,
+            ..Default::default()
+        };
+        let report = sync_with_tuning(&mock, &Arc::new(InMemory::new()), &failing)
+            .await
+            .expect("status failures are reported in the result");
+        assert_eq!((report.synced_count, report.failed_count), (0, 2));
+        assert_eq!(local_is_synced(&first).await, 0);
+        assert_eq!(local_is_synced(&second).await, 0);
+
+        // A frozen row deleted after the freeze updates zero rows: that is a
+        // failure, not a synced object.
+        let deleted = index_local_object(b"pi-09 row deleted after freeze\n").await;
+        let mock = crate::utils::d1_client::test_support::MockD1::spawn().await;
+        let deleting = super::snapshot::SnapshotTuning {
+            after_freeze: Some(Arc::new(move |_dir: PathBuf| {
+                Box::pin(async move {
+                    object_index::Entity::delete_many()
+                        .filter(object_index::Column::OId.eq(deleted.to_string()))
+                        .exec(&db::get_db_conn_instance().await)
+                        .await
+                        .expect("delete the frozen row");
+                })
+            })),
+            ..Default::default()
+        };
+        let report = sync_with_tuning(&mock, &Arc::new(InMemory::new()), &deleting)
+            .await
+            .expect("a vanished row is reported in the result");
+        assert_eq!((report.synced_count, report.failed_count), (2, 1));
+    }
+
+    /// Progress that records spool warnings instead of printing them.
+    struct RecordingSpoolProgress {
+        notes: std::sync::Mutex<Vec<String>>,
+    }
+
+    impl CloudSyncProgress for RecordingSpoolProgress {
+        fn on_spool_warning(&self, note: &str) {
+            self.notes.lock().unwrap().push(note.to_string());
+        }
+    }
+
+    #[tokio::test]
+    #[serial(cwd, env)]
+    async fn capture_snapshot_spool_routes_its_warning_through_progress() {
+        let _repo = enter_isolated_libra_repo().await;
+        index_local_object(b"pi-09 progress warning\n").await;
+        let retaining = super::snapshot::SnapshotTuning {
+            fail_spool_release: true,
+            ..Default::default()
+        };
+
+        // The renderer, not stderr, receives the note.
+        let progress = RecordingSpoolProgress {
+            notes: std::sync::Mutex::new(Vec::new()),
+        };
+        let mock = crate::utils::d1_client::test_support::MockD1::spawn().await;
+        let report = super::sync::run_cloud_sync_from_snapshot(
+            CloudSyncContext {
+                batch_size: 2,
+                force: false,
+            },
+            &progress,
+            mock.client(),
+            Some(RemoteStorage::new(Arc::new(InMemory::new()))),
+            &retaining,
+        )
+        .await
+        .expect("sync");
+        let notes = progress.notes.lock().unwrap().clone();
+        assert_eq!(notes.len(), 1);
+        assert_eq!(report.spool_warning.as_deref(), Some(notes[0].as_str()));
+        for run in spool_runs() {
+            fs::remove_dir_all(run).unwrap();
+        }
+
+        // Under `--progress=json` every emitted line is one JSON event, and
+        // the note is one of them.
+        index_local_object(b"pi-09 ndjson warning\n").await;
+        *JSON_PROGRESS_CAPTURE.lock().unwrap() = Some(Vec::new());
+        let mock = crate::utils::d1_client::test_support::MockD1::spawn().await;
+        let outcome = super::sync::run_cloud_sync_from_snapshot(
+            CloudSyncContext {
+                batch_size: 2,
+                force: false,
+            },
+            &JsonCloudSyncProgress,
+            mock.client(),
+            Some(RemoteStorage::new(Arc::new(InMemory::new()))),
+            &retaining,
+        )
+        .await;
+        let lines = JSON_PROGRESS_CAPTURE
+            .lock()
+            .unwrap()
+            .take()
+            .unwrap_or_default();
+        outcome.expect("sync");
+        assert!(!lines.is_empty());
+        let events: Vec<serde_json::Value> = lines
+            .iter()
+            .map(|line| {
+                assert!(!line.contains('\n'), "{line}");
+                serde_json::from_str(line).unwrap_or_else(|_| panic!("not JSON: {line}"))
+            })
+            .collect();
+        assert!(
+            events
+                .iter()
+                .any(|event| event["event"] == "cloud_sync.spool.warning"
+                    && event["message"]
+                        .as_str()
+                        .is_some_and(|message| message.contains("delete that directory manually"))),
+            "{lines:?}"
+        );
+        for run in spool_runs() {
+            fs::remove_dir_all(run).unwrap();
+        }
+    }
+
+    #[tokio::test]
+    #[serial(cwd, env)]
+    async fn capture_snapshot_spool_drop_reports_a_retained_directory() {
+        let _repo = enter_isolated_libra_repo().await;
+        let storage = util::storage_path();
+        let raw_root = util::working_dir().join(util::ROOT_DIR);
+        let tuning = super::snapshot::SnapshotTuning {
+            fail_spool_release: true,
+            ..Default::default()
+        };
+        // Dropped without `finish`, as on a panic or a cancelled future. The
+        // plain-text sink prints in every mode, `--json` included.
+        *super::snapshot::DROP_WARNING_CAPTURE.lock().unwrap() = Some(Vec::new());
+        let spool = super::snapshot::SnapshotSpool::create(
+            &storage,
+            &raw_root,
+            &tuning,
+            super::snapshot::SpoolWarningSink::Stderr,
+        )
+        .expect("create the spool");
+        drop(spool);
+        let printed = super::snapshot::DROP_WARNING_CAPTURE
+            .lock()
+            .unwrap()
+            .take()
+            .unwrap_or_default();
+        let retained = spool_runs();
+        assert_eq!(retained.len(), 1);
+        let path = retained[0].display().to_string();
+        assert_eq!(printed.len(), 1, "{printed:?}");
+        assert!(
+            printed[0].starts_with("warning: ") && printed[0].contains(&path),
+            "{printed:?}"
+        );
+        assert!(
+            crate::utils::output::pending_warning_messages()
+                .iter()
+                .any(|message| message.contains(&path)
+                    && message.contains("delete that directory manually")),
+            "the dropped spool must still be reported"
+        );
+        fs::remove_dir_all(&retained[0]).unwrap();
+    }
+
+    #[tokio::test]
+    #[serial(cwd, env)]
+    async fn capture_snapshot_spool_rejects_extra_or_unterminated_records() {
+        let _repo = enter_isolated_libra_repo().await;
+        let edit = |change: fn(&str) -> String| super::snapshot::SnapshotTuning {
+            after_freeze: Some(Arc::new(move |dir: PathBuf| {
+                Box::pin(async move {
+                    let path = dir.join("objects.jsonl");
+                    let text = fs::read_to_string(&path).unwrap_or_default();
+                    fs::write(&path, change(&text)).unwrap();
+                })
+            })),
+            ..Default::default()
+        };
+        // Zero frozen objects, one appended record.
+        let mock = crate::utils::d1_client::test_support::MockD1::spawn().await;
+        let tuning = edit(|_| {
+            r#"{"id":999999,"o_id":"00","o_type":"blob","o_size":1,"repo_id":"x","created_at":0}
+"#
+            .to_string()
+        });
+        let error = sync_with_tuning(&mock, &Arc::new(InMemory::new()), &tuning)
+            .await
+            .expect_err("an object spool that should be empty must be refused");
+        assert!(
+            error
+                .to_string()
+                .contains("more identities than the freeze recorded"),
+            "{error}"
+        );
+        assert!(spool_runs().is_empty());
+
+        // One frozen object, one extra record.
+        index_local_object(b"pi-09 extra record\n").await;
+        let mock = crate::utils::d1_client::test_support::MockD1::spawn().await;
+        let tuning = edit(|text| {
+            format!(
+                "{text}{}",
+                r#"{"id":999999,"o_id":"00","o_type":"blob","o_size":1,"repo_id":"x","created_at":0}
+"#
+            )
+        });
+        let error = sync_with_tuning(&mock, &Arc::new(InMemory::new()), &tuning)
+            .await
+            .expect_err("an extra spool record must be refused");
+        assert!(
+            error
+                .to_string()
+                .contains("more identities than the freeze recorded"),
+            "{error}"
+        );
+
+        // The last record without its newline.
+        index_local_object(b"pi-09 unterminated record\n").await;
+        let mock = crate::utils::d1_client::test_support::MockD1::spawn().await;
+        let tuning = edit(|text| text.trim_end_matches('\n').to_string());
+        let error = sync_with_tuning(&mock, &Arc::new(InMemory::new()), &tuning)
+            .await
+            .expect_err("an unterminated spool record must be refused");
+        assert!(
+            error.to_string().contains("not newline-terminated"),
+            "{error}"
+        );
+        assert!(spool_runs().is_empty());
+    }
+
+    #[tokio::test]
+    #[serial(cwd, env)]
+    async fn capture_snapshot_spool_warning_follows_each_output_mode() {
+        let _repo = enter_isolated_libra_repo().await;
+        let retaining = super::snapshot::SnapshotTuning {
+            fail_spool_release: true,
+            ..Default::default()
+        };
+        let json_mode = OutputConfig {
+            json_format: Some(crate::utils::output::JsonFormat::Pretty),
+            ..OutputConfig::default()
+        };
+        let progress_mode = OutputConfig {
+            progress: ProgressMode::Json,
+            ..OutputConfig::default()
+        };
+        let quiet_mode = OutputConfig {
+            quiet: true,
+            ..OutputConfig::default()
+        };
+        let modes = [
+            ("human", OutputConfig::default()),
+            ("quiet", quiet_mode),
+            ("json", json_mode),
+            ("progress-json", progress_mode),
+        ];
+        for (index, (label, mode)) in modes.iter().enumerate() {
+            index_local_object(format!("pi-09 mode {label}\n").as_bytes()).await;
+            // The renderer `execute_safe` would pick for this mode.
+            let progress = sync_progress_for(mode);
+            assert_eq!(
+                progress.spool_warnings_as_ndjson(),
+                *label == "progress-json",
+                "{label}"
+            );
+            *JSON_PROGRESS_CAPTURE.lock().unwrap() = Some(Vec::new());
+            let mock = crate::utils::d1_client::test_support::MockD1::spawn().await;
+            let outcome = super::sync::run_cloud_sync_from_snapshot(
+                CloudSyncContext {
+                    batch_size: 2,
+                    force: false,
+                },
+                progress,
+                mock.client(),
+                Some(RemoteStorage::new(Arc::new(InMemory::new()))),
+                &retaining,
+            )
+            .await;
+            let lines = JSON_PROGRESS_CAPTURE
+                .lock()
+                .unwrap()
+                .take()
+                .unwrap_or_default();
+            let report = outcome.unwrap_or_else(|error| panic!("{label}: {error}"));
+            let note = report
+                .spool_warning
+                .clone()
+                .unwrap_or_else(|| panic!("{label}: no spool warning"));
+            match *label {
+                "progress-json" => {
+                    // Every line on the progress stream is JSON, the note
+                    // included.
+                    assert!(!lines.is_empty());
+                    for line in &lines {
+                        let event: serde_json::Value = serde_json::from_str(line)
+                            .unwrap_or_else(|_| panic!("not JSON: {line}"));
+                        assert!(event.get("event").is_some(), "{line}");
+                    }
+                    assert!(
+                        lines
+                            .iter()
+                            .any(|line| line.contains("cloud_sync.spool.warning"))
+                    );
+                    assert!(finish_sync(&report, mode).unwrap().is_none());
+                }
+                "json" => {
+                    assert!(lines.is_empty(), "--json prints no progress events");
+                    let structured = finish_sync(&report, mode)
+                        .unwrap()
+                        .expect("--json renders cloud.sync data");
+                    let json = serde_json::to_value(structured).unwrap();
+                    assert_eq!(json["warnings"], serde_json::json!([note]));
+                }
+                _ => {
+                    // Human and `--quiet`: `emit_warning` keeps it on stderr.
+                    assert!(lines.is_empty());
+                    assert!(finish_sync(&report, mode).unwrap().is_none());
+                    assert!(!crate::utils::output::structured_output_active());
+                    assert!(
+                        crate::utils::output::pending_warning_messages().contains(&note),
+                        "{label} goes through emit_warning"
+                    );
+                }
+            }
+            let runs = spool_runs();
+            assert_eq!(runs.len(), 1, "run {index}: {runs:?}");
+            fs::remove_dir_all(&runs[0]).unwrap();
+        }
+    }
+
+    #[tokio::test]
+    #[serial(cwd, env)]
+    async fn capture_snapshot_spool_cancelled_run_keeps_ndjson_clean() {
+        let _repo = enter_isolated_libra_repo().await;
+        index_local_object(b"pi-09 cancelled\n").await;
+        let progress_mode = OutputConfig {
+            progress: ProgressMode::Json,
+            ..OutputConfig::default()
+        };
+        // Freeze, then stall until the caller gives up on the future.
+        let tuning = super::snapshot::SnapshotTuning {
+            fail_spool_release: true,
+            after_freeze: Some(Arc::new(|_dir: PathBuf| {
+                Box::pin(async {
+                    tokio::time::sleep(std::time::Duration::from_secs(30)).await;
+                })
+            })),
+            ..Default::default()
+        };
+        *JSON_PROGRESS_CAPTURE.lock().unwrap() = Some(Vec::new());
+        let mock = crate::utils::d1_client::test_support::MockD1::spawn().await;
+        let cancelled = tokio::time::timeout(
+            std::time::Duration::from_millis(500),
+            super::sync::run_cloud_sync_from_snapshot(
+                CloudSyncContext {
+                    batch_size: 2,
+                    force: false,
+                },
+                sync_progress_for(&progress_mode),
+                mock.client(),
+                Some(RemoteStorage::new(Arc::new(InMemory::new()))),
+                &tuning,
+            ),
+        )
+        .await;
+        let lines = JSON_PROGRESS_CAPTURE
+            .lock()
+            .unwrap()
+            .take()
+            .unwrap_or_default();
+        assert!(cancelled.is_err(), "the sync future was cancelled");
+        assert!(
+            lines
+                .iter()
+                .any(|line| line.contains("cloud_sync.spool.warning")),
+            "{lines:?}"
+        );
+        for line in &lines {
+            let _: serde_json::Value =
+                serde_json::from_str(line).unwrap_or_else(|_| panic!("not JSON: {line}"));
+        }
+        let runs = spool_runs();
+        assert_eq!(runs.len(), 1);
+        fs::remove_dir_all(&runs[0]).unwrap();
+    }
+
+    #[tokio::test]
+    #[serial(cwd, env)]
+    async fn capture_snapshot_spool_failures_follow_each_output_mode() {
+        let _repo = enter_isolated_libra_repo().await;
+        let json_mode = OutputConfig {
+            json_format: Some(crate::utils::output::JsonFormat::Pretty),
+            ..OutputConfig::default()
+        };
+        let progress_mode = OutputConfig {
+            progress: ProgressMode::Json,
+            ..OutputConfig::default()
+        };
+        let quiet_mode = OutputConfig {
+            quiet: true,
+            ..OutputConfig::default()
+        };
+        let modes = [
+            ("human", OutputConfig::default()),
+            ("quiet", quiet_mode),
+            ("json", json_mode),
+            ("progress-json", progress_mode),
+        ];
+        let failures = ["upload", "hard-error", "spool-write", "marker-write"];
+        let mut run = 0usize;
+        for (label, mode) in &modes {
+            for failure in failures {
+                run += 1;
+                index_local_object(format!("pi-09 failure {run}\n").as_bytes()).await;
+                let mock = crate::utils::d1_client::test_support::MockD1::spawn().await;
+                let mut tuning = super::snapshot::SnapshotTuning {
+                    fail_spool_release: true,
+                    ..Default::default()
+                };
+                match failure {
+                    "upload" => mock.fail_once_when_sql_contains(
+                        "INSERT INTO object_index (o_id, o_type, o_size, repo_id, created_at, is_synced, object_format)",
+                        "injected upload failure",
+                    ),
+                    "hard-error" => {
+                        mock.fail_once_when_sql_contains("repositories", "injected D1 failure")
+                    }
+                    "spool-write" => tuning.fail_spool_write = true,
+                    _ => tuning.fail_marker_write = true,
+                }
+                // The renderer `execute_safe` picks for this mode, then the
+                // decision it makes on the result.
+                *JSON_PROGRESS_CAPTURE.lock().unwrap() = Some(Vec::new());
+                let outcome = super::sync::run_cloud_sync_from_snapshot(
+                    CloudSyncContext {
+                        batch_size: 2,
+                        force: false,
+                    },
+                    sync_progress_for(mode),
+                    mock.client(),
+                    Some(RemoteStorage::new(Arc::new(InMemory::new()))),
+                    &tuning,
+                )
+                .await;
+                let lines = JSON_PROGRESS_CAPTURE
+                    .lock()
+                    .unwrap()
+                    .take()
+                    .unwrap_or_default();
+                let error = match outcome {
+                    Ok(report) => finish_sync(&report, mode)
+                        .expect_err("a failed upload must not be rendered as success"),
+                    Err(error) => error,
+                };
+                let retained = spool_runs();
+                assert_eq!(retained.len(), 1, "{label}/{failure}: {retained:?}");
+                let detail = error.to_string();
+                assert!(
+                    detail.contains(&retained[0].display().to_string())
+                        && detail.contains("delete that directory manually"),
+                    "{label}/{failure}: {detail}"
+                );
+                if *label == "progress-json" {
+                    for line in &lines {
+                        let _: serde_json::Value = serde_json::from_str(line)
+                            .unwrap_or_else(|_| panic!("{label}/{failure} not JSON: {line}"));
+                    }
+                } else {
+                    assert!(lines.is_empty(), "{label}/{failure}: {lines:?}");
+                }
+                fs::remove_dir_all(&retained[0]).unwrap();
+            }
+        }
+    }
+
+    #[tokio::test]
+    #[serial(cwd, env)]
+    async fn capture_snapshot_spool_freeze_does_not_block_other_writers() {
+        use crate::internal::model::object_index;
+
+        let _repo = enter_isolated_libra_repo().await;
+        let repo_id = ensure_repo_id().await;
+        for n in 0..200 {
+            index_local_object(format!("pi-09 writer page {n}\n").as_bytes()).await;
+        }
+        let db_path = util::storage_path().join(util::DATABASE);
+        let writes = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let recorded = writes.clone();
+        let repo = repo_id.clone();
+        // While the first attempt walks twenty pages, another connection (as
+        // another process would) commits after every page with a 200 ms busy
+        // timeout. The freeze holds no lock between statements, so each write
+        // lands at once; the changed database then makes the freeze retry,
+        // and the second attempt (no writer) is one consistent state that
+        // includes those rows.
+        let tuning = super::snapshot::SnapshotTuning {
+            page_size: Some(10),
+            between_pages: Some(Arc::new(move |attempt| {
+                let recorded = recorded.clone();
+                let db_path = db_path.clone();
+                let repo = repo.clone();
+                Box::pin(async move {
+                    if attempt != 1 {
+                        return;
+                    }
+                    let other = crate::internal::db::establish_connection_with_busy_timeout(
+                        db_path.to_str().expect("utf-8 path"),
+                        std::time::Duration::from_millis(200),
+                    )
+                    .await
+                    .expect("open a second connection");
+                    let n = recorded.lock().unwrap().len();
+                    let data = format!("pi-09 concurrent writer {n}\n");
+                    let hash = ObjectHash::from_type_and_data(ObjectType::Blob, data.as_bytes());
+                    let result = object_index::ActiveModel {
+                        o_id: Set(hash.to_string()),
+                        o_type: Set("blob".to_string()),
+                        o_size: Set(data.len() as i64),
+                        repo_id: Set(repo),
+                        created_at: Set(0),
+                        is_synced: Set(0),
+                        ..Default::default()
+                    }
+                    .insert(&other)
+                    .await
+                    .map(|_| hash)
+                    .map_err(|error| error.to_string());
+                    let _ = other.close().await;
+                    recorded.lock().unwrap().push(result);
+                })
+            })),
+            ..Default::default()
+        };
+        let mock = crate::utils::d1_client::test_support::MockD1::spawn().await;
+        let report = sync_with_tuning(&mock, &Arc::new(InMemory::new()), &tuning)
+            .await
+            .expect("sync");
+        let writes = writes.lock().unwrap().clone();
+        assert_eq!(writes.len(), 20, "one write after each of twenty pages");
+        for write in &writes {
+            write
+                .as_ref()
+                .unwrap_or_else(|error| panic!("a concurrent writer was blocked: {error}"));
+        }
+        assert_eq!(
+            report.total_unsynced, 220,
+            "the retried freeze is one state that includes the committed rows"
+        );
+    }
+
+    #[tokio::test]
+    #[serial(cwd, env)]
+    async fn capture_snapshot_spool_ref_pages_do_not_block_other_writers() {
+        use crate::internal::model::reference::{self, ConfigKind};
+
+        let _repo = enter_isolated_libra_repo().await;
+        for n in 0..30 {
+            insert_branch_ref(&format!("refs/heads/pi-09-ref-{n:02}")).await;
+        }
+        let db_path = util::storage_path().join(util::DATABASE);
+        let writes = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let recorded = writes.clone();
+        // Refs are read a page per statement too: another connection commits
+        // a new ref after every ref page of the first attempt with a 200 ms
+        // busy timeout, and every write lands at once. The retried freeze
+        // then uploads one consistent ref set that includes them.
+        let tuning = super::snapshot::SnapshotTuning {
+            page_size: Some(10),
+            between_ref_pages: Some(Arc::new(move |attempt| {
+                let recorded = recorded.clone();
+                let db_path = db_path.clone();
+                Box::pin(async move {
+                    if attempt != 1 {
+                        return;
+                    }
+                    let other = crate::internal::db::establish_connection_with_busy_timeout(
+                        db_path.to_str().expect("utf-8 path"),
+                        std::time::Duration::from_millis(200),
+                    )
+                    .await
+                    .expect("open a second connection");
+                    let name = format!(
+                        "refs/heads/pi-09-concurrent-{}",
+                        recorded.lock().unwrap().len()
+                    );
+                    let result = reference::ActiveModel {
+                        name: Set(Some(name.clone())),
+                        kind: Set(ConfigKind::Branch),
+                        commit: Set(Some("b".repeat(40))),
+                        remote: Set(None),
+                        worktree_id: Set(None),
+                        ..Default::default()
+                    }
+                    .insert(&other)
+                    .await
+                    .map(|_| name)
+                    .map_err(|error| error.to_string());
+                    let _ = other.close().await;
+                    recorded.lock().unwrap().push(result);
+                })
+            })),
+            ..Default::default()
+        };
+        let mock = crate::utils::d1_client::test_support::MockD1::spawn().await;
+        let r2 = Arc::new(InMemory::new());
+        sync_with_tuning(&mock, &r2, &tuning).await.expect("sync");
+        let writes = writes.lock().unwrap().clone();
+        assert!(
+            writes.len() >= 3,
+            "thirty refs at ten per page give at least three ref pages: {writes:?}"
+        );
+        for write in &writes {
+            write
+                .as_ref()
+                .unwrap_or_else(|error| panic!("a concurrent writer was blocked: {error}"));
+        }
+        // The uploaded projection is exactly the ref table as the retried
+        // freeze saw it (nothing was written after the first attempt): every
+        // row once, none skipped between pages.
+        let metadata: Vec<serde_json::Value> = serde_json::from_slice(
+            &RemoteStorage::new(r2.clone())
+                .get_metadata()
+                .await
+                .expect("read metadata"),
+        )
+        .expect("metadata is a JSON array");
+        let mut uploaded: Vec<i64> = metadata
+            .iter()
+            .map(|row| row["id"].as_i64().expect("ref id"))
+            .collect();
+        uploaded.sort_unstable();
+        let mut local: Vec<i64> = reference::Entity::find()
+            .all(&db::get_db_conn_instance().await)
+            .await
+            .expect("read local refs")
+            .into_iter()
+            .map(|row| row.id)
+            .collect();
+        local.sort_unstable();
+        assert_eq!(uploaded, local, "every ref uploaded exactly once");
+        let names: Vec<&str> = metadata
+            .iter()
+            .filter_map(|row| row["name"].as_str())
+            .collect();
+        for n in 0..30 {
+            let name = format!("refs/heads/pi-09-ref-{n:02}");
+            assert!(names.contains(&name.as_str()), "{name} missing: {names:?}");
+        }
+        for name in writes.iter().flatten() {
+            assert!(names.contains(&name.as_str()), "{name} missing: {names:?}");
+        }
+    }
+
+    #[tokio::test]
+    #[serial(cwd, env)]
+    async fn capture_snapshot_spool_ref_pages_stop_when_refs_keep_changing() {
+        let _repo = enter_isolated_libra_repo().await;
+        index_local_object(b"pi-09 ref churn object\n").await;
+        for n in 0..3 {
+            insert_branch_ref(&format!("refs/heads/pi-09-churn-{n}")).await;
+        }
+        let inserted = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let counter = inserted.clone();
+        // A new ref lands after every one-ref page of every attempt. Each
+        // attempt reads only up to the ref boundary it started with, so it
+        // ends; the changed database retries it until the run stops, still
+        // before any remote write.
+        let tuning = super::snapshot::SnapshotTuning {
+            page_size: Some(1),
+            between_ref_pages: Some(Arc::new(move |_attempt| {
+                let counter = counter.clone();
+                Box::pin(async move {
+                    let n = counter.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                    insert_branch_ref(&format!("refs/heads/pi-09-churn-writer-{n}")).await;
+                })
+            })),
+            ..Default::default()
+        };
+        let mock = crate::utils::d1_client::test_support::MockD1::spawn().await;
+        let r2 = Arc::new(InMemory::new());
+        let error = sync_with_tuning(&mock, &r2, &tuning)
+            .await
+            .expect_err("refs that keep changing stop the run");
+        let detail = error.to_string();
+        assert!(detail.contains("kept changing"), "{detail}");
+        assert!(
+            detail.contains("nothing was written to D1 or R2"),
+            "{detail}"
+        );
+        let pages = inserted.load(std::sync::atomic::Ordering::SeqCst);
+        assert!(
+            pages < 3 * 64,
+            "every attempt ends at its ref boundary instead of chasing new refs: {pages} pages"
+        );
+        let probe = "SELECT sql FROM sqlite_master WHERE type = 'table' AND name = ?1";
+        let probes: Vec<serde_json::Value> = ["agent_session", "agent_capture_session_v2"]
+            .iter()
+            .map(|table| serde_json::json!({ "sql": probe, "params": [table] }))
+            .collect();
+        assert_eq!(mock.request_bodies().await, probes);
+        assert_eq!(r2_object_count(&r2).await, 0);
+        assert!(spool_runs().is_empty());
+    }
+
+    #[tokio::test]
+    #[serial(cwd, env)]
+    async fn capture_snapshot_spool_retries_or_stops_when_rows_change() {
+        use crate::internal::model::object_index;
+
+        let _repo = enter_isolated_libra_repo().await;
+        let repo_id = ensure_repo_id().await;
+        let mut hashes = Vec::new();
+        for n in 0..5 {
+            hashes.push(index_local_object(format!("pi-09 consistent {n}\n").as_bytes()).await);
+        }
+        let deleted = hashes[4].to_string();
+        let promoted = hashes[3].to_string();
+
+        // Rows change once, during the first attempt: the freeze retries and
+        // the run uploads the second attempt's consistent state.
+        let tuning = super::snapshot::SnapshotTuning {
+            page_size: Some(2),
+            between_pages: Some(Arc::new(move |attempt| {
+                let deleted = deleted.clone();
+                let promoted = promoted.clone();
+                Box::pin(async move {
+                    if attempt != 1 {
+                        return;
+                    }
+                    let conn = db::get_db_conn_instance().await;
+                    object_index::Entity::delete_many()
+                        .filter(object_index::Column::OId.eq(deleted))
+                        .exec(&conn)
+                        .await
+                        .expect("delete a covered row");
+                    // Same length and first letter as `blob`: no aggregate
+                    // could tell the two apart.
+                    object_index::Entity::update_many()
+                        .col_expr(object_index::Column::OType, Expr::value("bolb"))
+                        .filter(object_index::Column::OId.eq(promoted))
+                        .exec(&conn)
+                        .await
+                        .expect("change a covered row");
+                })
+            })),
+            ..Default::default()
+        };
+        let mock = crate::utils::d1_client::test_support::MockD1::spawn().await;
+        let report = sync_with_tuning(&mock, &Arc::new(InMemory::new()), &tuning)
+            .await
+            .expect("one change is absorbed by a retry");
+        assert_eq!((report.total_unsynced, report.failed_count), (4, 0));
+        let rows = mock
+            .client()
+            .get_object_indexes(&repo_id)
+            .await
+            .expect("read D1 object index");
+        assert!(!rows.iter().any(|row| row.o_id == hashes[4].to_string()));
+        let changed = rows
+            .iter()
+            .find(|row| row.o_id == hashes[3].to_string())
+            .expect("the changed row is uploaded");
+        assert_eq!(
+            changed.o_type, "bolb",
+            "the uploaded metadata is the consistent one"
+        );
+
+        // Rows that keep changing stop the run before any remote write.
+        for n in 0..3 {
+            index_local_object(format!("pi-09 churn {n}\n").as_bytes()).await;
+        }
+        let churn = super::snapshot::SnapshotTuning {
+            page_size: Some(1),
+            between_pages: Some(Arc::new(|_attempt| {
+                Box::pin(async {
+                    let n = std::time::SystemTime::now()
+                        .duration_since(std::time::UNIX_EPOCH)
+                        .map(|elapsed| elapsed.as_nanos())
+                        .unwrap_or_default();
+                    index_local_object(format!("pi-09 churn writer {n}\n").as_bytes()).await;
+                })
+            })),
+            ..Default::default()
+        };
+        let mock = crate::utils::d1_client::test_support::MockD1::spawn().await;
+        let r2 = Arc::new(InMemory::new());
+        let error = sync_with_tuning(&mock, &r2, &churn)
+            .await
+            .expect_err("a database that keeps changing stops the run");
+        let detail = error.to_string();
+        assert!(detail.contains("kept changing"), "{detail}");
+        assert!(
+            detail.contains("nothing was written to D1 or R2"),
+            "{detail}"
+        );
+        let probe = "SELECT sql FROM sqlite_master WHERE type = 'table' AND name = ?1";
+        let probes: Vec<serde_json::Value> = ["agent_session", "agent_capture_session_v2"]
+            .iter()
+            .map(|table| serde_json::json!({ "sql": probe, "params": [table] }))
+            .collect();
+        assert_eq!(mock.request_bodies().await, probes);
+        assert_eq!(r2_object_count(&r2).await, 0);
+        assert!(spool_runs().is_empty());
+    }
+
+    #[tokio::test]
+    #[serial(cwd, env)]
+    async fn capture_snapshot_spool_keeps_a_row_promoted_after_the_freeze_unsynced() {
+        use crate::internal::model::object_index;
+
+        let _repo = enter_isolated_libra_repo().await;
+        let promoted = index_local_object(b"pi-09 promoted after freeze\n").await;
+        let kept = index_local_object(b"pi-09 unchanged after freeze\n").await;
+        let target = promoted.to_string();
+        let tuning = super::snapshot::SnapshotTuning {
+            after_freeze: Some(Arc::new(move |_dir: PathBuf| {
+                let target = target.clone();
+                Box::pin(async move {
+                    object_index::Entity::update_many()
+                        .col_expr(object_index::Column::OType, Expr::value("agent_transcript"))
+                        .col_expr(object_index::Column::IsSynced, Expr::value(0))
+                        .filter(object_index::Column::OId.eq(target))
+                        .exec(&db::get_db_conn_instance().await)
+                        .await
+                        .expect("promote a frozen row");
+                })
+            })),
+            ..Default::default()
+        };
+        let mock = crate::utils::d1_client::test_support::MockD1::spawn().await;
+        let report = sync_with_tuning(&mock, &Arc::new(InMemory::new()), &tuning)
+            .await
+            .expect("the run completes and reports the changed row");
+        assert_eq!((report.synced_count, report.failed_count), (1, 1));
+        assert_eq!(
+            local_is_synced(&promoted).await,
+            0,
+            "the promoted metadata still needs an upload"
+        );
+        assert_eq!(local_is_synced(&kept).await, 1);
+    }
+
+    #[tokio::test]
+    #[serial(cwd, env)]
+    async fn capture_snapshot_spool_retries_when_the_freeze_connection_is_replaced() {
+        let _repo = enter_isolated_libra_repo().await;
+        for n in 0..3 {
+            index_local_object(format!("pi-09 reconnect {n}\n").as_bytes()).await;
+        }
+        let attempts = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let recorded = attempts.clone();
+        // No other connection commits, so `data_version` alone would match;
+        // the first attempt still ends on what a replaced connection looks
+        // like and must not be trusted.
+        let tuning = super::snapshot::SnapshotTuning {
+            page_size: Some(2),
+            simulate_reconnect: true,
+            between_pages: Some(Arc::new(move |attempt| {
+                let recorded = recorded.clone();
+                Box::pin(async move {
+                    recorded.lock().unwrap().push(attempt);
+                })
+            })),
+            ..Default::default()
+        };
+        let mock = crate::utils::d1_client::test_support::MockD1::spawn().await;
+        let report = sync_with_tuning(&mock, &Arc::new(InMemory::new()), &tuning)
+            .await
+            .expect("the retried freeze succeeds");
+        assert_eq!(report.synced_count, 3);
+        let attempts = attempts.lock().unwrap().clone();
+        assert!(
+            attempts.contains(&1) && attempts.contains(&2),
+            "{attempts:?}"
+        );
+        assert!(!attempts.contains(&3), "{attempts:?}");
+    }
+
+    #[tokio::test]
+    #[serial(cwd, env)]
+    async fn capture_snapshot_spool_freezes_the_fallback_project_name() {
+        let _repo = enter_isolated_libra_repo().await;
+        let repo_id = ensure_repo_id().await;
+        index_local_object(b"pi-09 fallback name\n").await;
+        let fallback = util::working_dir()
+            .file_name()
+            .map(|name| name.to_string_lossy().to_string())
+            .expect("working directory name");
+        let tuning = super::snapshot::SnapshotTuning {
+            after_freeze: Some(Arc::new(|_dir: PathBuf| {
+                Box::pin(async {
+                    ConfigKv::set("cloud.name", "pi09-set-after-freeze", false)
+                        .await
+                        .expect("set cloud.name after the freeze");
+                })
+            })),
+            ..Default::default()
+        };
+        let mock = crate::utils::d1_client::test_support::MockD1::spawn().await;
+        sync_with_tuning(&mock, &Arc::new(InMemory::new()), &tuning)
+            .await
+            .expect("sync");
+        #[derive(serde::Deserialize)]
+        struct NameRow {
+            name: String,
+        }
+        let names: Vec<NameRow> = mock
+            .client()
+            .query(
+                "SELECT name FROM repositories WHERE repo_id = ?1",
+                Some(vec![serde_json::json!(repo_id)]),
+            )
+            .await
+            .expect("read D1 repositories");
+        assert_eq!(
+            names.into_iter().map(|row| row.name).collect::<Vec<_>>(),
+            vec![fallback],
+            "the fallback name resolved at the freeze is registered"
+        );
+    }
+
+    #[tokio::test]
+    #[serial(cwd, env)]
+    async fn capture_snapshot_spool_config_read_failure_precedes_remote_side_effects() {
+        let _repo = enter_isolated_libra_repo().await;
+        index_local_object(b"pi-09 config read\n").await;
+        let mock = crate::utils::d1_client::test_support::MockD1::spawn().await;
+        let r2 = Arc::new(InMemory::new());
+        let tuning = super::snapshot::SnapshotTuning {
+            fail_config_read: true,
+            ..Default::default()
+        };
+        let error = sync_with_tuning(&mock, &r2, &tuning)
+            .await
+            .expect_err("a cloud.name read failure stops the sync");
+        assert!(error.to_string().contains("read cloud.name"), "{error}");
+        let probe = "SELECT sql FROM sqlite_master WHERE type = 'table' AND name = ?1";
+        let expected: Vec<serde_json::Value> = ["agent_session", "agent_capture_session_v2"]
+            .iter()
+            .map(|table| serde_json::json!({ "sql": probe, "params": [table] }))
+            .collect();
+        assert_eq!(mock.request_bodies().await, expected);
+        assert_eq!(r2_object_count(&r2).await, 0);
+        assert!(spool_runs().is_empty());
+    }
+
+    #[tokio::test]
+    #[serial(cwd, env)]
+    async fn capture_snapshot_spool_reports_marker_and_read_failures() {
+        let _repo = enter_isolated_libra_repo().await;
+        index_local_object(b"pi-09 marker failure\n").await;
+
+        // A marker write failure removes the half-made run; when that removal
+        // fails too, the error names the directory.
+        let mock = crate::utils::d1_client::test_support::MockD1::spawn().await;
+        let tuning = super::snapshot::SnapshotTuning {
+            fail_marker_write: true,
+            fail_spool_release: true,
+            ..Default::default()
+        };
+        let error = sync_with_tuning(&mock, &Arc::new(InMemory::new()), &tuning)
+            .await
+            .expect_err("a marker write failure stops the sync");
+        let detail = error.to_string();
+        assert!(detail.contains("injected marker write failure"), "{detail}");
+        let retained = spool_runs();
+        assert_eq!(
+            retained.len(),
+            1,
+            "the injected removal failure keeps one run"
+        );
+        assert!(
+            detail.contains(&retained[0].display().to_string()),
+            "{detail}"
+        );
+        assert!(
+            detail.contains("delete that directory manually"),
+            "{detail}"
+        );
+        assert!(!remote_table_present(&mock, "object_index").await);
+        fs::remove_dir_all(&retained[0]).unwrap();
+
+        // A spool read after the freeze does not claim that nothing was sent.
+        let mock = crate::utils::d1_client::test_support::MockD1::spawn().await;
+        let tuning = super::snapshot::SnapshotTuning {
+            after_freeze: Some(Arc::new(|dir: PathBuf| {
+                Box::pin(async move {
+                    fs::remove_file(dir.join("objects.jsonl")).expect("drop the object spool");
+                })
+            })),
+            ..Default::default()
+        };
+        let error = sync_with_tuning(&mock, &Arc::new(InMemory::new()), &tuning)
+            .await
+            .expect_err("a missing object spool stops the sync");
+        let detail = error.to_string();
+        assert!(detail.contains("may already have been sent"), "{detail}");
+        assert!(!detail.contains("nothing was written"), "{detail}");
+        assert!(spool_runs().is_empty());
+
+        // A spool cut to a valid prefix is a read failure, not a smaller
+        // successful upload.
+        index_local_object(b"pi-09 truncated a\n").await;
+        index_local_object(b"pi-09 truncated b\n").await;
+        let mock = crate::utils::d1_client::test_support::MockD1::spawn().await;
+        let tuning = super::snapshot::SnapshotTuning {
+            after_freeze: Some(Arc::new(|dir: PathBuf| {
+                Box::pin(async move {
+                    let path = dir.join("objects.jsonl");
+                    let text = fs::read_to_string(&path).unwrap();
+                    let first = text.split_inclusive('\n').next().unwrap().to_string();
+                    fs::write(&path, first).unwrap();
+                })
+            })),
+            ..Default::default()
+        };
+        let error = sync_with_tuning(&mock, &Arc::new(InMemory::new()), &tuning)
+            .await
+            .expect_err("a truncated spool stops the sync");
+        assert!(
+            error.to_string().contains("short of the frozen count"),
+            "{error}"
+        );
+        assert!(spool_runs().is_empty());
+    }
+
     async fn enter_isolated_libra_repo() -> (
         tempfile::TempDir,
         tempfile::TempDir,
@@ -3405,6 +5411,9 @@ mod tests {
         let test_home_env = ScopedEnvVar::set("LIBRA_TEST_HOME", home.path());
         setup_with_new_libra_in(repo.path()).await;
         let cwd = ChangeDirGuard::new(repo.path());
+        // The snapshot spool requires a private `.libra` on Windows (PI-09).
+        #[cfg(windows)]
+        make_private_with_icacls(&util::storage_path());
         (repo, home, home_env, test_home_env, cwd)
     }
 
@@ -3609,6 +5618,7 @@ mod tests {
                 checkpoints_synced: 5,
                 checkpoints_failed: 0,
             },
+            spool_warning: None,
         };
 
         let output = cloud_sync_output_from_report(&report);
@@ -3676,6 +5686,7 @@ mod tests {
                 failed_count: 0,
                 metadata: MetadataSyncOutcome::Skipped,
                 agent_capture: AgentCaptureSyncOutcome::Failed { error: reason },
+                spool_warning: None,
             };
 
             let output = cloud_sync_output_from_report(&report);

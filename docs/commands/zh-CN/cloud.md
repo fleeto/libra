@@ -29,9 +29,11 @@ libra cloud status [--verbose]
 
 ### 对象格式（B3-09 / B3-14）
 
-`cloud sync` 在凭据、D1 或 R2 之前读取本地 `agent_session.agent_kind`。不在当前采集允许名单里的种类（`claude_code`、`cursor`、`codex`、`gemini`、`opencode`、`copilot`、`factory_ai`、`grok`），包括 `hermes`，会以 `LBR-CONFLICT-002`（退出码 128）停止。`--force`、`--json` 和 `--progress=json` 都不能绕过，也不会打印同步成功。允许的种类仍走原来的同步顺序。允许名单与构建 D1 `agent_kind` CHECK 的是同一份列表，所以一个种类恰在当前 D1 表接受时才放行，云镜像尚未支持的后续种类同样被拒绝。拒绝附带两条提示：仓库中存在这类仅本地的采集会话时，`cloud sync` 会持续拒绝，直到后续 Libra 版本为该种类提供完整云支持；在此之前，请用你自己选择的外部备份工具备份整个仓库（包括 `.libra` 目录）。停用 hook 或删除采集会话都不是受支持的绕过方式。
+`cloud sync` 在凭据、D1 或 R2 之前读取本地 `agent_session.agent_kind`。不在当前采集允许名单里的种类（`claude_code`、`cursor`、`codex`、`gemini`、`opencode`、`copilot`、`factory_ai`、`grok`），包括已经可以本地采集的 `hermes`，会以 `LBR-CONFLICT-002`（退出码 128）停止。`--force`、`--json` 和 `--progress=json` 都不能绕过，也不会打印同步成功。允许的种类仍走原来的同步顺序。允许名单与构建 D1 `agent_kind` CHECK 的是同一份列表，所以一个种类恰在当前 D1 表接受时才放行，云镜像尚未支持的后续种类同样被拒绝。拒绝附带两条提示：仓库中存在这类仅本地的采集会话时，`cloud sync` 会持续拒绝，直到后续 Libra 版本为该种类提供完整云支持；在此之前，请用你自己选择的外部备份工具备份整个仓库（包括 `.libra` 目录）。停用 hook 或删除采集会话都不是受支持的绕过方式。
 
 D1 初始化之后、第一次远端写入之前，`cloud sync` 用只读的 `sqlite_master` 查询读取已有 D1 `agent_session` 与 `agent_capture_session_v2` 表的 `agent_kind` CHECK。D1 表从不重建，所以在支持 `grok` 之前建立的表仍只列原来的七种。即使仓库没有本地采集会话，每次同步也都会探测。已有表不接受某个本地种类，或 CHECK 无法读取（`agent_kind` 约束不是唯一一组带引号种类的 `agent_kind IN (...)` 列表，或 schema 查询失败）时，同步在上传任何内容之前以 `LBR-CONFLICT-002` 停止。提示给出唯一的恢复方式：新建 D1 数据库，把 `LIBRA_D1_DATABASE_ID` 指向它，再运行 `libra cloud sync --force` 全量回填（默认同步只上传尚未标记为已同步的对象）。不存在的表会按当前 DDL 创建，不会被拒绝。
+
+紧接该探测、仍在任何远端写入之前，`cloud sync` 以短的本地读取确定边界与项目名，再对 refs 与对象逐页短读（不会长时间阻塞其它本地写入），把本次要上传的对象身份、refs 与已配置的 `cloud.name` 冻结到 `.libra/cloud-sync/snapshots/<run>` 下的私有快照 spool。之后的上传、metadata JSON、在 D1 登记的项目名与 `is_synced` 标记只来自该 spool，因此快照完成之后新写入的对象、ref 或 `cloud.name` 修改留待下一次同步。若其它 Libra 命令在取快照期间向仓库数据库提交了修改，快照会重新取（至多三次），这些修改因而可能被包含；若数据库持续变化，同步会在发送任何内容之前停止，重新运行即可。对象只有在上传与本地状态更新都成功后才标记为已同步，否则计为失败并在下次重试。每次同步都新建 run 目录，权限仅限所有者（目录 0700、文件 0600），并带 `owner.json` 标记；本次运行结束时无论成功或失败都会删除。`.libra`、`.libra/cloud-sync` 或其 `snapshots` 目录任一为符号链接、解析到 `.libra` 之外、属于其他用户或可被组/他人写入时，`cloud sync` 拒绝使用（可用 `chmod go-w` 修正）。在 Windows 上，`.libra` 与 spool 目录必须带只授予你与 SYSTEM 的受保护访问列表；继承上级权限的 `.libra` 会被拒绝，并给出把它设为私有的 `icacls` 命令。run 目录无法删除时同步成败不变：成功的同步以警告给出该目录（`--json` 下在 `data.warnings`），失败的同步把同一说明加入其错误。该目录含本次运行的对象身份（id、类型、大小、仓库 id、时间戳）、refs、项目名与 owner 标记（pid、主机、开机标识），从不复用，可手动删除。spool 无法写入（例如磁盘已满）时，同步在向 D1 或 R2 发送任何内容之前停止。
 
 备份会把仓库的 `core.objectformat` 写入 D1 `repositories.object_format`（并标记 `object_index` 行）。恢复只以该元数据作为 sha1/sha256/blake3 权威，绝不根据 `o_id` 长度猜测。缺少元数据且存在任意 64-hex 对象 id 的快照会以 `LBR-REPO-002`（退出码 128）fail-closed，并提示在源仓重跑 `libra cloud sync`；无元数据且全部为 40-hex 的旧快照仍按 sha1 兼容。早于 REL-B3-02 的客户端不得通过宽度猜测恢复带元数据的新备份。
 
@@ -260,6 +262,8 @@ Unsynced objects:
   }
 }
 ```
+
+`data.warnings`（字符串数组）只在本次运行有需要报告的事项时出现，目前即无法删除的快照 spool 目录。
 
 成功恢复时，`cloud restore --json` / `--machine` 输出 `cloud.restore`：
 

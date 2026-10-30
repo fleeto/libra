@@ -36,7 +36,7 @@ pub enum AgentKind {
     Copilot,
     FactoryAi,
     /// External Grok sessions. GK-01 accepts the db tag while the agent
-    /// stays unsupported; capture and hooks land in later cards.
+    /// is supported for local capture. Review and investigate stay closed.
     Grok,
     /// External Hermes sessions. HM-01 accepts the db tag. Capture, hook
     /// install, and review/investigate launch stay disabled.

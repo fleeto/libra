@@ -508,7 +508,7 @@ fn disable_agents(agents: &[String], output: &OutputConfig) -> CliResult<()> {
 fn install_or_uninstall(agents: &[String], output: &OutputConfig, install: bool) -> CliResult<()> {
     let verb_present = if install { "enable" } else { "disable" };
 
-    let resolved = resolve_agent_kinds(agents)?;
+    let mut resolved = resolve_agent_kinds(agents)?;
     if resolved.is_empty() {
         return Err(CliError::fatal(format!(
             "no installable agents to {verb_present}"
@@ -534,6 +534,27 @@ fn install_or_uninstall(agents: &[String], output: &OutputConfig, install: bool)
                 row.slug,
                 supported_slugs().join(", ")
             )));
+        }
+    }
+    if install && resolved.contains(&AgentKind::Hermes) {
+        match crate::internal::ai::hooks::providers::hermes::settings::hermes_enable_gate(
+            agents.is_empty(),
+            crate::internal::ai::hooks::providers::hermes::settings::hermes_runtime_is_supported(),
+        ) {
+            crate::internal::ai::hooks::providers::hermes::settings::HermesEnableGate::Install => {}
+            crate::internal::ai::hooks::providers::hermes::settings::HermesEnableGate::SkipBare => {
+                resolved.retain(|kind| *kind != AgentKind::Hermes);
+                if !output.quiet {
+                    eprintln!(
+                        "libra agent enable: skipping 'hermes' (Hermes v0.22.5 bf0203a was not found on PATH; no Hermes files were changed)"
+                    );
+                }
+            }
+            crate::internal::ai::hooks::providers::hermes::settings::HermesEnableGate::RefuseExplicit => {
+                return Err(CliError::fatal(
+                    "agent 'hermes' needs Hermes v0.22.5 (bf0203a) on PATH before capture can be enabled; no files were changed",
+                ));
+            }
         }
     }
     if install && !output.quiet {
@@ -703,7 +724,8 @@ mod tests {
                 AgentKind::ClaudeCode,
                 AgentKind::Codex,
                 AgentKind::OpenCode,
-                AgentKind::Grok
+                AgentKind::Grok,
+                AgentKind::Hermes,
             ]
         );
     }

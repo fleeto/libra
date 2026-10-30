@@ -1,4 +1,8 @@
-use super::{metadata::sync_metadata, *};
+use super::{
+    metadata::sync_metadata,
+    snapshot::{FrozenObject, SnapshotSpool, SnapshotTuning, SpoolWarningSink},
+    *,
+};
 
 /// Kinds the current D1 capture CHECK accepts: the same list the D1 DDL is
 /// built from, so the fence and the DDL cannot drift (PI-05). `hermes` and
@@ -168,14 +172,29 @@ pub(super) async fn run_cloud_sync_with_clients(
     d1_client: D1Client,
     r2_override: Option<RemoteStorage>,
 ) -> CloudResult<CloudSyncReport> {
+    run_cloud_sync_from_snapshot(
+        ctx,
+        progress,
+        d1_client,
+        r2_override,
+        &SnapshotTuning::default(),
+    )
+    .await
+}
+
+/// [`run_cloud_sync_with_clients`] with explicit snapshot knobs. After the
+/// PI-18 probe and before the first remote write, the object identities and
+/// the refs projection to upload are frozen into this run's spool (PI-09);
+/// every later phase reads the spool, not the live tables.
+pub(super) async fn run_cloud_sync_from_snapshot(
+    ctx: CloudSyncContext,
+    progress: &dyn CloudSyncProgress,
+    d1_client: D1Client,
+    r2_override: Option<RemoteStorage>,
+    tuning: &SnapshotTuning,
+) -> CloudResult<CloudSyncReport> {
     let local_kinds = local_capture_kinds().await?;
     refuse_kinds_rejected_by_remote_check(&d1_client, &local_kinds).await?;
-
-    // Ensure D1 table exists before any operations.
-    d1_client
-        .ensure_object_index_table()
-        .await
-        .map_err(|error| cloud_d1_failure("ensure object-index table", &error))?;
 
     // Get database connection.
     let db_conn = db::get_db_conn_instance().await;
@@ -192,18 +211,76 @@ pub(super) async fn run_cloud_sync_with_clients(
 
     let repo_id = ensure_repo_id().await;
 
-    // Determine project name from config 'cloud.name' or current directory name.
-    let project_name = ConfigKv::get("cloud.name")
+    // Freeze what this run uploads before any remote write (PI-09).
+    let storage = util::try_get_storage_path(None).map_err(|error| {
+        CloudError::Generic(format!(
+            "locate the repository storage for the snapshot: {error}"
+        ))
+    })?;
+    let raw_root = util::working_dir().join(util::ROOT_DIR);
+    let warning_sink = if progress.spool_warnings_as_ndjson() {
+        SpoolWarningSink::NdjsonProgress
+    } else {
+        SpoolWarningSink::Stderr
+    };
+    let mut spool = SnapshotSpool::create(&storage, &raw_root, tuning, warning_sink)?;
+    let result = sync_from_spool(
+        &mut spool,
+        ctx,
+        progress,
+        d1_client,
+        r2_override,
+        tuning,
+        &db_conn,
+        repo_id,
+        &storage,
+    )
+    .await;
+    // Remove the spool on every outcome; a directory that cannot be removed
+    // is reported, never silently kept.
+    match (result, spool.finish()) {
+        (result, None) => result,
+        (Ok(mut report), Some(note)) => {
+            progress.on_spool_warning(&note);
+            report.spool_warning = Some(note);
+            Ok(report)
+        }
+        (Err(error), Some(note)) => Err(error.with_note(&note)),
+    }
+}
+
+/// The phases of one sync run that read from `spool`. The caller owns the
+/// spool's removal.
+#[allow(clippy::too_many_arguments)]
+async fn sync_from_spool(
+    spool: &mut SnapshotSpool,
+    ctx: CloudSyncContext,
+    progress: &dyn CloudSyncProgress,
+    d1_client: D1Client,
+    r2_override: Option<RemoteStorage>,
+    tuning: &SnapshotTuning,
+    db_conn: &sea_orm::DatabaseConnection,
+    repo_id: String,
+    storage: &std::path::Path,
+) -> CloudResult<CloudSyncReport> {
+    let page_size = tuning.page_size();
+    spool
+        .freeze(&storage.join(util::DATABASE), &repo_id, ctx.force, tuning)
+        .await?;
+    #[cfg(test)]
+    if let Some(after_freeze) = &tuning.after_freeze {
+        after_freeze(spool.dir().to_path_buf()).await;
+    }
+
+    // Ensure D1 table exists before any operations.
+    d1_client
+        .ensure_object_index_table()
         .await
-        .ok()
-        .flatten()
-        .map(|e| e.value)
-        .unwrap_or_else(|| {
-            util::working_dir()
-                .file_name()
-                .map(|n| n.to_string_lossy().to_string())
-                .unwrap_or_else(|| "unknown-project".to_string())
-        });
+        .map_err(|error| cloud_d1_failure("ensure object-index table", &error))?;
+
+    // Project name: the `cloud.name` frozen with the snapshot, or the
+    // working directory name.
+    let project_name = spool.repository()?.project_name;
 
     // Ensure repositories table exists.
     d1_client
@@ -227,36 +304,27 @@ pub(super) async fn run_cloud_sync_with_clients(
         return Err(project_name_taken(&project_name));
     }
 
-    // Query unsynced objects.
-    let query = if ctx.force {
-        object_index::Entity::find().filter(object_index::Column::RepoId.eq(&repo_id))
-    } else {
-        object_index::Entity::find()
-            .filter(object_index::Column::RepoId.eq(&repo_id))
-            .filter(object_index::Column::IsSynced.eq(0))
-    };
-
-    let unsynced_objects = query
-        .all(&db_conn)
-        .await
-        .map_err(|e| CloudError::Generic(format!("Database query failed: {}", e)))?;
-
     // Initialize R2 storage.
     let r2_storage = match r2_override {
         Some(r2_storage) => r2_storage,
         None => create_r2_storage(&repo_id).await?,
     };
 
-    let total_unsynced = unsynced_objects.len();
+    let total_unsynced = usize::try_from(spool.object_count()).map_err(|_| {
+        CloudError::Generic("the snapshot holds more objects than this platform can count".into())
+    })?;
 
-    if unsynced_objects.is_empty() {
+    if total_unsynced == 0 {
+        // Still read the object spool: with nothing frozen, any record in it
+        // is a read failure.
+        spool.object_pages(page_size)?.next_page()?;
         progress.on_no_objects();
-        let metadata = sync_metadata(&db_conn, &r2_storage, progress).await?;
+        let metadata = sync_metadata(&r2_storage, progress, &spool.refs()?).await?;
         // CEX-EntireIO §10.2: even when there are no new git objects to
         // ship, the agent_session/agent_checkpoint catalog may have new
         // rows from local hook ingestion. Mirror them on every sync.
         let agent_capture =
-            mirror_agent_capture(&db_conn, &d1_client, &r2_storage, &repo_id, progress).await;
+            mirror_agent_capture(db_conn, &d1_client, &r2_storage, &repo_id, progress).await;
         return Ok(CloudSyncReport {
             repo_id,
             project_name,
@@ -265,6 +333,7 @@ pub(super) async fn run_cloud_sync_with_clients(
             failed_count: 0,
             metadata,
             agent_capture,
+            spool_warning: None,
         });
     }
 
@@ -277,62 +346,70 @@ pub(super) async fn run_cloud_sync_with_clients(
     let mut synced_count = 0usize;
     let mut failed_count = 0usize;
 
-    // Process in batches.
-    for batch in unsynced_objects.chunks(ctx.batch_size) {
-        // Parse the batch's hashes once, then run ONE bounded-concurrency dedup
-        // pre-check (`exist_batch`, lore.md §0.6) instead of a HEAD per object, so
-        // objects already in R2 are skipped without a serial round-trip each.
-        let parsed: Vec<CloudResult<ObjectHash>> =
-            batch.iter().map(parse_object_index_hash).collect();
-        let probe_hashes: Vec<ObjectHash> = parsed
-            .iter()
-            .filter_map(|r| r.as_ref().ok().copied())
-            .collect();
-        let already_in_remote: std::collections::HashSet<ObjectHash> = {
-            let flags = r2_storage.exist_batch(&probe_hashes).await;
-            probe_hashes
+    // Read the frozen identities a page at a time, then process each page in
+    // batches.
+    let mut pages = spool.object_pages(page_size)?;
+    while let Some(page) = pages.next_page()? {
+        for batch in page.chunks(ctx.batch_size) {
+            // Parse the batch's hashes once, then run ONE bounded-concurrency
+            // dedup pre-check (`exist_batch`, lore.md §0.6) instead of a HEAD
+            // per object, so objects already in R2 are skipped without a
+            // serial round-trip each.
+            let parsed: Vec<CloudResult<ObjectHash>> =
+                batch.iter().map(parse_object_index_hash).collect();
+            let probe_hashes: Vec<ObjectHash> = parsed
                 .iter()
-                .copied()
-                .zip(flags)
-                .filter_map(|(hash, exists)| exists.then_some(hash))
-                .collect()
-        };
-
-        for (obj, hash_result) in batch.iter().zip(parsed) {
-            let result = match hash_result {
-                Ok(hash) => {
-                    let remote_has = already_in_remote.contains(&hash);
-                    sync_single_object(
-                        obj,
-                        &local_storage,
-                        &r2_storage,
-                        &d1_client,
-                        hash,
-                        remote_has,
-                    )
-                    .await
-                }
-                Err(err) => Err(err),
+                .filter_map(|r| r.as_ref().ok().copied())
+                .collect();
+            let already_in_remote: std::collections::HashSet<ObjectHash> = {
+                let flags = r2_storage.exist_batch(&probe_hashes).await;
+                probe_hashes
+                    .iter()
+                    .copied()
+                    .zip(flags)
+                    .filter_map(|(hash, exists)| exists.then_some(hash))
+                    .collect()
             };
 
-            match result {
-                Ok(_) => {
-                    // Update local is_synced flag.
-                    let mut active: object_index::ActiveModel = obj.clone().into();
-                    active.is_synced = Set(1);
-                    if let Err(e) = active.update(&db_conn).await {
-                        progress.on_local_status_warning(&obj.o_id, &e.to_string());
+            for (obj, hash_result) in batch.iter().zip(parsed) {
+                let result = match hash_result {
+                    Ok(hash) => {
+                        let remote_has = already_in_remote.contains(&hash);
+                        sync_single_object(
+                            obj,
+                            &local_storage,
+                            &r2_storage,
+                            &d1_client,
+                            hash,
+                            remote_has,
+                        )
+                        .await
                     }
-                    synced_count += 1;
-                }
-                Err(e) => {
-                    let err = e.to_string();
-                    progress.on_object_error(&obj.o_id, &err);
-                    failed_count += 1;
+                    Err(err) => Err(err),
+                };
+
+                match result {
+                    Ok(_) => {
+                        // Mark only this frozen identity as synced. A failed
+                        // local update leaves it unsynced, so it counts as a
+                        // failure rather than a synced object.
+                        match mark_frozen_object_synced(db_conn, obj, tuning).await {
+                            Ok(()) => synced_count += 1,
+                            Err(e) => {
+                                progress.on_local_status_warning(&obj.o_id, &e);
+                                failed_count += 1;
+                            }
+                        }
+                    }
+                    Err(e) => {
+                        let err = e.to_string();
+                        progress.on_object_error(&obj.o_id, &err);
+                        failed_count += 1;
+                    }
                 }
             }
+            progress.on_batch_progress(synced_count, total_unsynced, failed_count);
         }
-        progress.on_batch_progress(synced_count, total_unsynced, failed_count);
     }
 
     progress.on_sync_complete(synced_count, failed_count);
@@ -346,16 +423,17 @@ pub(super) async fn run_cloud_sync_with_clients(
             failed_count,
             metadata: MetadataSyncOutcome::NotRun,
             agent_capture: AgentCaptureSyncOutcome::NotRun,
+            spool_warning: None,
         });
     }
 
-    let metadata = sync_metadata(&db_conn, &r2_storage, progress).await?;
+    let metadata = sync_metadata(&r2_storage, progress, &spool.refs()?).await?;
     // CEX-EntireIO §10.2: append agent capture catalog mirroring at the
     // tail of the sync flow per the plan. The report retains the detailed
     // phase outcome; `execute_sync` turns a failed mirror into a non-zero,
     // actionable partial-transfer result after rendering progress.
     let agent_capture =
-        mirror_agent_capture(&db_conn, &d1_client, &r2_storage, &repo_id, progress).await;
+        mirror_agent_capture(db_conn, &d1_client, &r2_storage, &repo_id, progress).await;
 
     Ok(CloudSyncReport {
         repo_id,
@@ -365,6 +443,7 @@ pub(super) async fn run_cloud_sync_with_clients(
         failed_count,
         metadata,
         agent_capture,
+        spool_warning: None,
     })
 }
 
@@ -388,8 +467,43 @@ pub(super) async fn mirror_agent_capture(
     }
 }
 
-/// Parse an `object_index` model's hex `o_id` into an `ObjectHash`.
-fn parse_object_index_hash(obj: &object_index::Model) -> CloudResult<ObjectHash> {
+/// Set `is_synced` for one frozen identity, matched by both `id` and `o_id`.
+async fn mark_frozen_object_synced(
+    db_conn: &sea_orm::DatabaseConnection,
+    obj: &FrozenObject,
+    tuning: &SnapshotTuning,
+) -> Result<(), String> {
+    #[cfg(test)]
+    if tuning.fail_status_update {
+        return Err("injected local status update failure".to_string());
+    }
+    #[cfg(not(test))]
+    let _ = tuning;
+    let result = object_index::Entity::update_many()
+        .col_expr(object_index::Column::IsSynced, Expr::value(1))
+        .filter(object_index::Column::Id.eq(obj.id))
+        .filter(object_index::Column::OId.eq(obj.o_id.as_str()))
+        .filter(object_index::Column::RepoId.eq(obj.repo_id.as_str()))
+        // A row whose uploaded fields changed since the freeze (for example a
+        // promoted `o_type`) is not the identity that was uploaded.
+        .filter(object_index::Column::OType.eq(obj.o_type.as_str()))
+        .filter(object_index::Column::OSize.eq(obj.o_size))
+        .filter(object_index::Column::CreatedAt.eq(obj.created_at))
+        .exec(db_conn)
+        .await
+        .map_err(|error| error.to_string())?;
+    // The frozen row may have been deleted or replaced since the freeze.
+    match result.rows_affected {
+        1 => Ok(()),
+        rows => Err(format!(
+            "expected to mark exactly one unchanged local object_index row for frozen id {}, updated {rows}",
+            obj.id
+        )),
+    }
+}
+
+/// Parse a frozen identity's hex `o_id` into an `ObjectHash`.
+fn parse_object_index_hash(obj: &FrozenObject) -> CloudResult<ObjectHash> {
     let bytes =
         hex::decode(&obj.o_id).map_err(|e| CloudError::Generic(format!("Invalid hash: {}", e)))?;
     ObjectHash::from_bytes_for_kind(git_internal::hash::get_hash_kind(), &bytes)
@@ -402,7 +516,7 @@ fn parse_object_index_hash(obj: &object_index::Model) -> CloudResult<ObjectHash>
 /// lore.md §0.6), so this no longer issues a per-object HEAD — the whole batch's
 /// existence is probed up front in one bounded-concurrency call.
 async fn sync_single_object(
-    obj: &object_index::Model,
+    obj: &FrozenObject,
     local_storage: &LocalStorage,
     r2_storage: &RemoteStorage,
     d1_client: &D1Client,

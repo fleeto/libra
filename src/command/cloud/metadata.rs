@@ -11,19 +11,16 @@ fn calculate_metadata_hash(json: &[u8]) -> u64 {
     hasher.finish()
 }
 
+/// Upload the refs projection frozen in this run's snapshot spool (PI-09);
+/// refs written after the freeze wait for the next sync.
 pub(super) async fn sync_metadata(
-    db_conn: &sea_orm::DatabaseConnection,
     r2_storage: &RemoteStorage,
     progress: &dyn CloudSyncProgress,
+    frozen: &super::snapshot::FrozenRefs,
 ) -> CloudResult<MetadataSyncOutcome> {
     progress.on_metadata_starting();
-    let references = reference::Entity::find()
-        .all(db_conn)
-        .await
-        .map_err(|e| CloudError::Generic(format!("Failed to fetch references: {}", e)))?;
-
-    let (sorted_refs, json) = serialize_reference_projection(references)?;
-    let current_hash = calculate_metadata_hash(&json);
+    let json = &frozen.json;
+    let current_hash = calculate_metadata_hash(json);
 
     // Check if hash matches last sync.
     if let Some(stored) = ConfigKv::get("cloud.metadata_hash")
@@ -39,22 +36,22 @@ pub(super) async fn sync_metadata(
     }
 
     r2_storage
-        .put_metadata(&json)
+        .put_metadata(json)
         .await
         .map_err(|e| CloudError::R2(format!("Failed to upload metadata: {}", e)))?;
 
     // Update stored hash.
     let _ = ConfigKv::set("cloud.metadata_hash", &current_hash.to_string(), false).await;
 
-    progress.on_metadata_synced(sorted_refs.len());
+    progress.on_metadata_synced(frozen.references);
     Ok(MetadataSyncOutcome::Synced {
-        references: sorted_refs.len(),
+        references: frozen.references,
     })
 }
 
 /// Keep the cloud metadata contract limited to references. Repository-private
 /// `metadata_kv` scopes never enter this projection.
-fn serialize_reference_projection(
+pub(super) fn serialize_reference_projection(
     references: Vec<reference::Model>,
 ) -> CloudResult<(Vec<reference::Model>, Vec<u8>)> {
     let mut sorted_refs = references;

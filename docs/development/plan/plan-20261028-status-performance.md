@@ -56,6 +56,14 @@ Nowledge 定向检索已尝试，服务连接被环境阻止；本计划依据�
 - 默认 Docs and compatibility impact=N/A 仅适用于输出与错误完全不变的内部优化；公开行为变化卡须同卡双语与网站文档。网站路径为候选，DEP-SP-DOCS 核验后才允许开工；遵循用户 standing instruction 直接 cf，通过 Libra 提交推送，不能另建网站分支/PR/worktree。
 - 无家族合并发布；C/D coverage=self（实现卡），SP-09 继承下列具体实现卡。SP-00 按用户批准的 EX-SP-00-AUDIT-01 独立文档验收（见下）；该例外不免除评审、fmt、Clippy 或本卡 PR CI，也不授权其它卡开工。
 
+### SP-01 已知上游 CI 失败合并决策（EX-SP-01-UPSTREAM-CI-01）
+
+2026-10-30，用户在核实失败来源后明确要求“这个问题提出一个 Issue，然后合并 PR 并完成本卡片”。上游问题已登记 [#656](https://github.com/libra-tools/libra/issues/656)，本次授权仅允许 PR #655 在披露该已知上游失败的前提下合并，不修改守卫、不提高基线、不修复 Hermes，也不把该次运行记为全绿。SP-01 保持 done/complete（修复卡口径），网站及发布延期项保持原状。
+
+- head `d9b5eeeb4fab47062088f819732922a410bfdf15` 的 base run [40973355588](https://github.com/libra-tools/libra/actions/runs/40973355588) 失败：10875 项执行，10874 passed（2 flaky）、1 failed、23 skipped，572.500s；唯一最终失败是 `compat_agent_architecture_guard::live_capture_shared_runtime_is_provider_neutral`，三次均报告 extraction.rs 的非测试 AgentKind 引用 16 超过冻结基线 15。其它适用 PR 检查、Clippy、CodeQL 均成功。
+- checkout 实证：CI 测试 merge `90e3f4bb600742acc737d9e52018a37007dd10bb`，合并到 main 基线 `6062e382f0099f396f0056438beb5e467a058f68`。extraction.rs 在该基线与 merge 的 blob 均为 `88c131d8a0e6420183c5c647fc860d6558aae0bb`；SP-01 未修改该文件。上游 `760a5529f9840736bf9db9b0a148201481f1ad36` 新增 AgentKind::Hermes 分支；#656 跟踪恢复 provider 中立边界及原守卫要求。
+- 本次后续提交仅同步两份计划文档和 PR 已知失败说明，生产代码不变。其新 head 的 CI 与合并后 main CI 各自单独观察；不将先前 head 的成功或失败冒称为新运行。本次合并例外不授权绕过其它新发现的代码缺陷，也不关闭 #656。
+
 ### SP-01 修复卡收口决策（EX-SP-01-CLOSE-01）
 
 2026-10-30，用户在 PR #655 的全部检查通过后要求“设置卡片完成，推送更新 PR”。本次以修复实现、本仓库文档及 PR CI 验收作为 SP-01 的完成口径，登记 `done / complete`；这是对模板 ER-04/ER-08 完整发布切片要求的本卡具名例外，不代表版本发布或网站部署已完成，不扩展至其它实现卡。网站交付按用户此前决定转入 DEFER-SP-DOCS-01，独立 patch 发布转入 DEFER-SP-REL-01，均保留为未执行的后续交付项，不作为本次修复卡关闭条件。
@@ -224,7 +232,7 @@ Phase 0 基线：SP-00；Phase 1 正确性与 stat：SP-01..03；Phase 2 核心�
 
 **Release boundary:** independent（发布交付在 DEFER-SP-REL-01 单独跟踪；本次修复卡按 EX-SP-01-CLOSE-01 收口）
 
-**C/D coverage from:** self（EX-SP-01-CLOSE-01 的修复/PR CI 完成口径）；本地 18 个不同用例、fmt/严格 Clippy 与本仓库文档检查通过；bb88db3 的 PR base/CodeQL 全绿，全量 nextest 10841 passed、23 skipped。发布构建/安装/tag/Release/CDN 等仍未执行，登记 DEFER-SP-REL-01，不称完整发布 C/D 通过。
+**C/D coverage from:** self（EX-SP-01-CLOSE-01 的修复/PR CI 完成口径）；本地 18 个不同用例、fmt/严格 Clippy 与本仓库文档检查通过；bb88db3 的 PR base/CodeQL 全绿，全量 nextest 10841 passed、23 skipped。后续 d9b5eee 的合并基线全量因已知上游架构守卫失败，按 EX-SP-01-UPSTREAM-CI-01 / #656 单独披露并获用户合并授权；不记作全绿。发布构建/安装/tag/Release/CDN 等仍未执行，登记 DEFER-SP-REL-01，不称完整发布 C/D 通过。
 
 **Granularity:** type=implementation; axis=status 递归子树加载返回错误而非 panic; recovery=前滚修复版; complete=yes; self-contained=yes; AC=4/8; VER=2/8; landing=3; prod-files=4; scope=M; deps=SP-00,DEP-SP-DOCS; writeset=按实施顺序串行; release=independent; split-from=N/A; exception=EX-SP-01-CLOSE-01
 
@@ -925,3 +933,5 @@ DEP-SP-DATA 按用户指定采用公开标准仓库 [`libra-tools/libra@d0a5c28`
 | 2026-10-30 用户澄清与 CI 交付 | 用户明确“在本机资源不足时候不触发，CI 不在此列”；32G 门槛仅适用于本机，CI 按现有 base.yml 运行，不修改工作流、不增加资源检查。SP-01 实现已 signed+DCO 提交 aaa2a986be5a6d613749aa78d27f000105a57700 并推送 origin/codex/SP-01；用户已授权创建 PR 和触发全量。 | 本轮同步澄清后推送并创建草稿 PR，触发现有 compat-offline-core 全量；CI 结果待实证，本机 nextest 仍 not-run，网站仍依用户决定搁置；版本发布与完整 C/D 未完成 |
 
 | 2026-10-30 SP-01 修复卡完成 | 用户明确要求设置卡片完成、推送更新 PR。依据 EX-SP-01-CLOSE-01，本仓库修复、文档、18 个不同定向用例、fmt/Clippy，以及 bb88db3 的全量 CI/CodeQL 均通过；nextest 10841/10841 passed、13 slow、23 skipped，577.819s。 | SP-01 done/complete；网站和独立版本发布仍未执行，分别登记 DEFER-SP-DOCS-01 / DEFER-SP-REL-01。PR #655 仍 open，未合并；本次仅文档更新，不回写旧 head 运行结果、不声称新 head CI 已成功 |
+
+| 2026-10-30 SP-01 合并授权与上游问题移交 | 用户授权先建 Issue、再合并 #655 并完成卡片；已创建 #656，登记 EX-SP-01-UPSTREAM-CI-01。新基线全量失败 1 项、2 项 flaky 的事实保留，extraction.rs 基线/merge blob 一致及上游 Hermes 新分支证据已核。 | 本次仅文档记账，SP-01 done/complete；允许带该已知上游失败合并，#656 保持 open。合并 SHA/Issue #640 关闭结果以后续实际回执为准，不在提交前伪造；不新增版本发布或网站部署完成声明 |

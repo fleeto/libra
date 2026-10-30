@@ -2585,6 +2585,7 @@ fn live_capture_port_and_store_boundaries() {
         "codex::CodexProvider",
         "gemini::GeminiProvider",
         "grok::GrokProvider",
+        "hermes::HermesProvider",
         "opencode::OpenCodeProvider",
         "grok::GrokProvider",
     ]

@@ -20,8 +20,6 @@ use super::super::{
     lifecycle::{LifecycleEvent, SessionHookEnvelope},
     provider::{HookProvider, ProviderHookCommand, ProviderInstallOptions},
 };
-use crate::internal::ai::observed_agents::AgentKind;
-
 pub static HERMES_PROVIDER: HermesProvider = HermesProvider;
 
 const SUPPORTED_COMMANDS: &[ProviderHookCommand] = &[ProviderHookCommand::Observe];
@@ -30,12 +28,6 @@ const DEDUP_KEYS: &[&str] = &["event_id", "turn_id", "message_id", "phase"];
 
 #[derive(Debug, Clone, Copy)]
 pub struct HermesProvider;
-
-impl crate::internal::ai::hooks::provider::HookProviderIdentity for HermesProvider {
-    fn agent_kind(&self) -> AgentKind {
-        AgentKind::Hermes
-    }
-}
 
 impl HookProvider for HermesProvider {
     fn provider_name(&self) -> &'static str {

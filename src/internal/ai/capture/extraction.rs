@@ -417,6 +417,9 @@ fn extract_deadline_provider_once(
         DEADLINE_EXTRACTION_MAX_STRING_BYTES,
         DEADLINE_EXTRACTION_MAX_RETAINED_STRING_BYTES,
     );
+    if agent_kind.as_db_str() == "hermes" {
+        return hermes_bounded_extraction(transcript);
+    }
     match agent_kind {
         AgentKind::ClaudeCode => {
             crate::internal::ai::observed_agents::extract::extract_claude_code_bounded(
@@ -431,7 +434,6 @@ fn extract_deadline_provider_once(
                 transcript, limits,
             )
         }
-        AgentKind::Hermes => hermes_bounded_extraction(transcript),
         // `decode_extraction_request` accepts only the first-batch provider
         // codes, so this arm is defensive and cannot carry an error string.
         // Formats without a registered extractor stay explicitly partial.

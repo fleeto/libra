@@ -724,7 +724,8 @@ mod tests {
                 AgentKind::ClaudeCode,
                 AgentKind::Codex,
                 AgentKind::OpenCode,
-                AgentKind::Grok
+                AgentKind::Grok,
+                AgentKind::Hermes,
             ]
         );
     }

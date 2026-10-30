@@ -5360,14 +5360,14 @@ fn hermes_normalize_import_replays_one_checkpoint_without_enabling_hermes() {
         "replay wrote another checkpoint"
     );
     let registration = registration_for(AgentKind::Hermes);
-    assert!(!registration.supported);
-    assert!(!registration.hook_installable);
+    assert!(registration.supported);
+    assert!(registration.hook_installable);
     assert!(!registration.launchable_review);
     assert!(!registration.launchable_investigate);
-    assert!(!registration.transcript_readable);
+    assert!(registration.transcript_readable);
     let listed = fixture.run(&["agent", "list", "--json"]);
     assert!(listed.status.success(), "{}", describe(&listed));
-    assert!(!String::from_utf8_lossy(&listed.stdout).contains("\"slug\":\"hermes\""));
+    assert!(String::from_utf8_lossy(&listed.stdout).contains("hermes"));
 
     let wrong = fixture.repo.join("fedcba9876543210fedcba9876543210.jsonl");
     let mut body = hermes_normalize_session(

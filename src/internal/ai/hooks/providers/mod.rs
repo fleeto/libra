@@ -55,6 +55,12 @@ impl HookProviderIdentity for grok::GrokProvider {
     }
 }
 
+impl HookProviderIdentity for hermes::HermesProvider {
+    fn agent_kind(&self) -> AgentKind {
+        AgentKind::Hermes
+    }
+}
+
 /// Singleton accessor for the Claude hook provider.
 pub fn claude_provider() -> &'static dyn HookProvider {
     &claude::CLAUDE_PROVIDER

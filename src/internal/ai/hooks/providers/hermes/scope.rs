@@ -130,6 +130,31 @@ pub(crate) fn hermes_local_operator_user(user: Option<&str>) -> bool {
     }
 }
 
+pub fn verified_hook_worktree(
+    reported_cwd: &str,
+    profile: &str,
+) -> anyhow::Result<HermesVerifiedWorktree> {
+    let invocation = std::env::current_dir()
+        .map_err(|_| anyhow::anyhow!("hermes scope cwd is not the verified worktree"))?;
+    let scope = crate::internal::worktree_scope::RequestScope::try_resolve(invocation)
+        .map_err(|_| anyhow::anyhow!("hermes scope cwd is not the verified worktree"))?
+        .ok_or_else(|| anyhow::anyhow!("hermes scope cwd is not the verified worktree"))?;
+    let root = scope
+        .worktree_root
+        .canonicalize()
+        .map_err(|_| anyhow::anyhow!("hermes scope cwd is not the verified worktree"))?;
+    let reported = std::path::Path::new(reported_cwd)
+        .canonicalize()
+        .map_err(|_| anyhow::anyhow!("hermes scope cwd is not the verified worktree"))?;
+    if reported != root {
+        anyhow::bail!("hermes scope cwd is not the verified worktree");
+    }
+    Ok(HermesVerifiedWorktree {
+        root: reported,
+        profile: profile.to_string(),
+    })
+}
+
 fn profile_matches(recorded: Option<&str>, caller: &str) -> bool {
     if caller.is_empty() {
         return false;

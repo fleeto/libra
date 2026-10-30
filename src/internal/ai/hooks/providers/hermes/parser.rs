@@ -93,7 +93,9 @@ pub fn parse_hermes_hook_event(
         let _ = key;
         bail!("hermes hook field is not allowed");
     }
-    let verified = verified_worktree(envelope)?;
+    let profile =
+        text_field(envelope.extra.get("profile_name")).unwrap_or_else(|| "default".to_string());
+    let verified = super::scope::verified_hook_worktree(&envelope.cwd, &profile)?;
     let decision = admit_receiver(
         &verified,
         &HermesScopeCandidate {
@@ -131,30 +133,6 @@ pub fn parse_hermes_hook_event(
         tool_response: None,
         assistant_message: None,
         timestamp: Utc::now(),
-    })
-}
-
-fn verified_worktree(envelope: &SessionHookEnvelope) -> Result<HermesVerifiedWorktree> {
-    let invocation = std::env::current_dir()
-        .map_err(|_| anyhow::anyhow!("hermes scope cwd is not the verified worktree"))?;
-    let scope = crate::internal::worktree_scope::RequestScope::try_resolve(invocation)
-        .map_err(|_| anyhow::anyhow!("hermes scope cwd is not the verified worktree"))?
-        .ok_or_else(|| anyhow::anyhow!("hermes scope cwd is not the verified worktree"))?;
-    let root = scope
-        .worktree_root
-        .canonicalize()
-        .map_err(|_| anyhow::anyhow!("hermes scope cwd is not the verified worktree"))?;
-    let reported = std::path::Path::new(&envelope.cwd)
-        .canonicalize()
-        .map_err(|_| anyhow::anyhow!("hermes scope cwd is not the verified worktree"))?;
-    if reported != root {
-        bail!("hermes scope cwd is not the verified worktree");
-    }
-    let profile =
-        text_field(envelope.extra.get("profile_name")).unwrap_or_else(|| "default".to_string());
-    Ok(HermesVerifiedWorktree {
-        root: reported,
-        profile,
     })
 }
 

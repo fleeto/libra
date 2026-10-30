@@ -714,7 +714,7 @@ Claude 审查实现 `VERDICT: PASS`。文档挂错常量之后的复核轮也是
 
 - [x] `source .env.test && cargo test --lib internal::ai::hooks::providers::hermes::scope::tests::hermes_scope_admission_ -- --test-threads=1`（拟新增过滤名；须列出实际匹配并确认非零）
 
-实现说明：`providers/mod.rs` 只声明 `pub mod hermes`，没有 `HookProvider`，也没有 `hermes_provider()`。`admit_producer` 与 `admit_receiver` 都调用 `admit_hermes_scope`。只接受 `source=cli`；`created_source` 出现时也必须是 `cli`。cwd 必须等于调用方已经验证的 worktree 根，子目录、相对路径和 `..` 都拒绝。`profile_name` 必须等于调用方给出的已记录 profile；缺记录时只匹配显式的 `default`。event 里的 `profile` 与 `event_cwd` 不参与。parser 在读取消息正文前返回。拒绝和放行都不写 `agent_session`。`supported`、`hook_installable`、`transcript_readable` 与 launch 仍是 false，`as_hooks()` 仍是 `None`。`hermes_scope_admission_` 匹配 4 条并全部通过。`libra_observer.py` 用同一矩阵得到相同结论，不打开 state.db。Claude `VERDICT: PASS`，正文 SHA-256 `be3a823314009bbaae4d3f18fb374598a14a7db33cd89137295e16545ab5741b`。无 P0/P1。发布窗口 `v0.30.100`。
+实现说明：`providers/mod.rs` 只声明 `pub mod hermes`，没有 `HookProvider`，也没有 `hermes_provider()`。`admit_producer` 与 `admit_receiver` 都调用 `admit_hermes_scope`。只接受 `source=cli`；`created_source` 出现时也必须是 `cli`。cwd 必须等于调用方已经验证的 worktree 根，子目录、相对路径和 `..` 都拒绝。`profile_name` 必须等于调用方给出的已记录 profile；缺记录时只匹配显式的 `default`。event 里的 `profile` 与 `event_cwd` 不参与。parser 在读取消息正文前返回。拒绝和放行都不写 `agent_session`。`supported`、`hook_installable`、`transcript_readable` 与 launch 仍是 false，`as_hooks()` 仍是 `None`。`hermes_scope_admission_` 匹配 4 条并全部通过。`libra_observer.py` 用同一矩阵得到相同结论，不打开 state.db。Claude `VERDICT: PASS`，正文 SHA-256 `be3a823314009bbaae4d3f18fb374598a14a7db33cd89137295e16545ab5741b`。无 P0/P1。发布 `v0.30.100`，commit `30c0e28ca82e3327be0377db259f76ea3a82a3a4`，release.yml run `40978568893` conclusion success。
 
 **Full-suite trigger:** T-1/T-4（共享采集、存储、CLI 或测试契约）；执行四 provider 契约的完整双环境 nextest 门
 

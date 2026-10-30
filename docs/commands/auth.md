@@ -37,6 +37,8 @@ written into argv or shell history:
 libra auth login --host github.com --username x-access-token --expires-in 90d
 ```
 
+Human `auth status` output runs the username through URL redaction and then replaces a value that starts with `sk-`, `ghp_`, or `github_pat_` with `[REDACTED]`. A host with no userinfo is unchanged. `--json` keeps the stored username.
+
 Paste the PAT at the hidden token prompt. For scripts, feed the token on
 stdin from an environment secret, password manager, or CI secret store:
 

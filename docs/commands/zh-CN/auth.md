@@ -13,6 +13,8 @@ libra auth clear
 
 ## 说明
 
+人读 `auth status` 会先对 username 做 URL 脱敏，再把以 `sk-`、`ghp_` 或 `github_pat_` 开头的值换成 `[REDACTED]`。没有 userinfo 的 host 保持原样。`--json` 仍输出存储的 username。
+
 `auth login` 为一个 host 存储 token。**刻意没有 `--token <value>` 标志** — argv 会落入 shell history 和 `/proc`；token 通过隐藏 prompt（TTY）或 `--with-token` stdin 传入：
 
 ```bash

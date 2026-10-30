@@ -16,6 +16,8 @@ permission error). It is independent of the credentials used by `cloud` /
 | `--host <url>` | Target host (defaults to the built-in host) |
 | `--refresh` | Accepted for forward compatibility; currently a no-op (identity is always validated against the host and the stored token is not rewritten) |
 
+Human output redacts credentials in the server host (`body.host`) before printing it. `--json` keeps that host unchanged.
+
 ## Examples
 
 ```bash

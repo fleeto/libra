@@ -166,6 +166,38 @@ fn normalize_host(input: &str) -> CliResult<String> {
     Ok(url.origin().ascii_serialization())
 }
 
+/// Human-readable host. Calls `redact_url_credentials`, then keeps the
+/// caller's bytes when the value has no userinfo. `Url::to_string()` adds a
+/// trailing `/` on a bare origin; that slash is not part of this output.
+pub(crate) fn display_host(raw: &str) -> String {
+    let redacted = crate::utils::redact::redact_url_credentials(raw);
+    if !url_has_userinfo(raw) {
+        return raw.to_string();
+    }
+    if !raw_has_path_slash(raw)
+        && let Some(stripped) = redacted.strip_suffix('/')
+    {
+        return stripped.to_string();
+    }
+    redacted
+}
+
+fn url_has_userinfo(raw: &str) -> bool {
+    let Some((_, rest)) = raw.split_once("://") else {
+        return false;
+    };
+    let authority = rest.split(['/', '?', '#']).next().unwrap_or(rest);
+    authority.contains('@')
+}
+
+fn raw_has_path_slash(raw: &str) -> bool {
+    let Some((_, rest)) = raw.split_once("://") else {
+        return false;
+    };
+    let authority = rest.split(['/', '?', '#']).next().unwrap_or("");
+    rest.len() > authority.len() && rest[authority.len()..].starts_with('/')
+}
+
 fn random_bytes(len: usize) -> CliResult<Vec<u8>> {
     let rng = SystemRandom::new();
     let mut bytes = vec![0; len];
@@ -347,6 +379,7 @@ pub async fn login(args: LoginArgs, output: &OutputConfig) -> CliResult<()> {
     if !output.quiet {
         println!("Verification code: {code}");
     }
+    let _ = std::io::Write::flush(&mut std::io::stdout());
 
     let auth_code = wait_for_callback(listener, &state).await?;
     let client = account_http_client(&host)?;
@@ -386,7 +419,11 @@ pub async fn login(args: LoginArgs, output: &OutputConfig) -> CliResult<()> {
         return emit_json_data("login", &LoginJsonView::from(&session), output);
     }
     if !output.quiet {
-        println!("Logged in to {} as {}", session.host, session.username);
+        println!(
+            "Logged in to {} as {}",
+            display_host(&session.host),
+            session.username
+        );
     }
     Ok(())
 }
@@ -423,7 +460,12 @@ pub async fn whoami(args: WhoamiArgs, output: &OutputConfig) -> CliResult<()> {
         return emit_json_data("whoami", &body, output);
     }
     if !output.quiet {
-        println!("{} ({}) on {}", body.username, body.github_id, body.host);
+        println!(
+            "{} ({}) on {}",
+            body.username,
+            body.github_id,
+            display_host(&body.host)
+        );
         println!("expires {}", body.expires_at);
     }
     Ok(())
@@ -514,6 +556,25 @@ mod tests {
         let code = user_code().unwrap();
         assert_eq!(code.len(), 8);
         assert!(code.bytes().all(|byte| USER_CODE_ALPHABET.contains(&byte)));
+    }
+
+    #[test]
+    fn account_display_host_preserves_origin() {
+        assert_eq!(display_host("https://libra.tools"), "https://libra.tools");
+        let redacted = display_host("https://user:pass@libra.tools");
+        assert_eq!(redacted, "https://libra.tools");
+        assert!(!redacted.contains("user:"));
+        assert!(!redacted.contains("pass@"));
+    }
+
+    #[test]
+    fn origin_no_trailing_slash() {
+        assert_eq!(display_host("https://libra.tools"), "https://libra.tools");
+        assert!(!display_host("https://libra.tools").ends_with('/'));
+        assert_eq!(
+            display_host("https://user:pass@libra.tools/repo.git"),
+            "https://libra.tools/repo.git"
+        );
     }
 
     #[test]

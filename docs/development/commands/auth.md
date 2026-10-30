@@ -1,5 +1,7 @@
 # auth 命令开发设计
 
+人读 `auth status` 对 username 先走 `redact_url_credentials`，再在调用点把最长匹配的 `github_pat_` / `ghp_` / `sk-` 前缀整值换成 `[REDACTED]`。无 userinfo 的 `host_display()` 逐字节不变。`--json` 的 username 不改。
+
 ## 命令实现目标
 
 lore.md §1.6：token-only auth v1，令牌**生命周期同 PR 闭环**——写入（加密

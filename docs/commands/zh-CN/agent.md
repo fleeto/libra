@@ -346,6 +346,10 @@ OpenCode 提取对空输入、非法 JSON 和非法 export 形状显式标记
 | `bridge --stdio` | 在 stdin/stdout 上运行仓库级 DeepSeek Harness 桥接（JSON-RPC 2.0 NDJSON）。这是 Harness 的**唯一**标准入站写入传输；它不是 `libra code --control`。stdout 每条只承载一个协议帧；诊断只写 stderr。协议 v1：20 个 method 的 allowlist、256 KiB 帧上限、64 个 in-flight 请求、默认 30 秒 deadline。20 个 method 全部已实现：`initialize` 握手；session/event ingress `session.open`、`event.append`（batch ack / 幂等 / digest conflict / 服务端脱敏）、`session.flush`、`session.close`、`evidence.append`、`provenance.append`；只读方法 `context.get`、`status.get`、`history.search`、`checkpoint.list`、`checkpoint.show` 与 `diff.get`；mutation `checkpoint.create`、`commit.create`、`checkpoint.restore` 与 `review.run`（均带 `operation_id` 幂等、actor binding 与 approval 门禁）；以及 workspace lease `workspace.claim` / `workspace.renew` / `workspace.release`（owner 从已认证的 bridge session 派生）。`diff.get` 只接受封闭的 `mode`（`worktree` / `staged` / `checkpoint`）加上经校验的仓库相对 `paths`——绝不接受自由形式的 revision 或 pathspec——并强制 `--no-ext-diff` / `--no-textconv`，使仓库配置无法转化为进程执行。`commit.create` 只提交当前 index（无 `-a`、无 pathspec、无 amend、无 author 覆盖），关联图写入 `agent_bridge_link` 而不是拼进 commit message。`checkpoint.restore` 必须携带显式 `expected_head` fence 且要求 index/worktree 干净，并且绝不移动 HEAD。`review.run` 启动只读 review 并返回 `run_id`；用同一个 `operation_id` 重放会返回该 run 的当前状态，而不会启动第二个 run。HEAD 漂移或 worktree 脏在任何写入之前以 `LBR-AGENT-038` 拒绝。ack 只表示脱敏 projection 已 durable，不代表 Harness 原始 transcript 已迁移到 Libra。不是 Git 命令。 |
 | `mcp --stdio` | 在 stdin/stdout 上提供仓库 MCP 服务（JSON-RPC 2.0，每行一条）。legacy 协议版本 `2025-11-25` 与 `2025-06-18` 支持 `initialize`、`notifications/initialized`、`ping`、`tools/list` 与 `tools/call`。协议失败是 JSON-RPC 错误；参数不符合工具输入 schema 时返回工具错误 `LBR-AGENT-027`（`isError: true`）。stdout 只写 JSON-RPC 消息。这不是 `libra agent bridge`，也不是已删除的 `libra code` MCP。 |
 
+## 已删除的 dry-run prompt 输出
+
+`--show-redacted-prompt` 不是旗标。promote 子命令保持删除，因此 dry-run 不会打印 prompt 正文。人读输出和 `--json` 都不包含 prompt。clap 拒绝该调用，而不是格式化 `<len=N>` 行。
+
 ## MCP server
 
 `libra agent mcp --stdio` 是给外部客户端用的仓库 MCP 服务。客户端配置形状为 `command` = `libra`，`args` = `["agent", "mcp", "--stdio"]`，`"cwd"` 为仓库目录：

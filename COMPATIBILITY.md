@@ -1997,6 +1997,10 @@ and separate 128 MiB scan and repair transcript-read budgets per page
 It refuses erased sessions and grants no native reasoning authority. New
 Codex acceptance cases remain local-only (`test-live-agent` plus `ignored`).
 
+## Promote dry-run prompt output (SC-03)
+
+`agent session promote --dry-run` is not a command. The subcommand stays deleted, so human output and JSON cannot print a prompt body. `--show-redacted-prompt` is not added.
+
 ## Human host redaction (SC-07)
 
 `auth status` human output redacts a username after the URL helper. A username whose longest prefix is `github_pat_`, `ghp_`, or `sk-` is shown as `[REDACTED]`. `login` human output redacts the server `exchanged.host`, and `whoami` human output redacts `body.host`. An origin with no userinfo stays byte-for-byte the same, with no added trailing slash. `--json` for auth, login, and whoami is unchanged. 人读 host 脱敏 applies only to those human lines.

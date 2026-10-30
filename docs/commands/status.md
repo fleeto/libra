@@ -780,11 +780,17 @@ priority in every output mode is **fatal (128/129) ≻ 9 (on-warning) ≻ 1 (dir
 
 ## Error Handling
 
-Every `StatusError` variant maps to an explicit `StableErrorCode`.
+Every `StatusError` variant maps to an explicit `StableErrorCode`. Missing or corrupt
+nested HEAD trees fail the entire status request before any status data is printed;
+they never produce a partial snapshot or a clean result. Human, JSON/machine,
+and porcelain v1/v2 output use the normal error contract on stderr with exit 128.
+Gitlinks remain leaf entries and do not require their target commits in the local
+object store.
 
 | Scenario | Error Code | Exit | Hint |
 |----------|-----------|------|------|
 | Index file corrupted | `LBR-REPO-002` | 128 | "the index file may be corrupted" |
+| Nested HEAD tree missing or corrupt | `LBR-REPO-002` | 128 | Affected tree OID; run `libra fsck` or restore the object, then retry |
 | Invalid path encoding | `LBR-CLI-003` | 129 | "path contains invalid characters" |
 | Failed to hash a file | `LBR-IO-001` | 128 | -- |
 | Cannot list working directory | `LBR-IO-001` | 128 | -- |

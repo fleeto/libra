@@ -109,6 +109,133 @@ async fn status_corrupt_head_reference_returns_repo_corrupt() {
 }
 
 // ---------------------------------------------------------------------------
+// Missing nested HEAD tree → LBR-REPO-002, never a panic or partial status
+// ---------------------------------------------------------------------------
+
+fn repo_with_nested_head_tree() -> (tempfile::TempDir, String, std::path::PathBuf) {
+    let repo = create_committed_repo_via_cli();
+    fs::create_dir_all(repo.path().join("outer/inner")).unwrap();
+    fs::write(repo.path().join("outer/inner/file.txt"), "nested content\n").unwrap();
+    assert_cli_success(
+        &run_libra_command(&["add", "outer"], repo.path()),
+        "stage nested fixture",
+    );
+    assert_cli_success(
+        &run_libra_command(&["commit", "-m", "nested tree", "--no-verify"], repo.path()),
+        "commit nested fixture",
+    );
+    let listing = run_libra_command(&["ls-tree", "HEAD:outer"], repo.path());
+    assert_cli_success(&listing, "list nested HEAD tree");
+    let listing = String::from_utf8(listing.stdout).unwrap();
+    let oid = listing
+        .lines()
+        .find(|line| line.ends_with("\tinner"))
+        .and_then(|line| line.split_whitespace().nth(2))
+        .expect("inner tree object ID")
+        .to_string();
+    let object = repo
+        .path()
+        .join(".libra/objects")
+        .join(&oid[..2])
+        .join(&oid[2..]);
+    assert!(object.is_file(), "fixture must contain a loose nested tree");
+    (repo, oid, object)
+}
+
+fn assert_nested_tree_error(repo: &std::path::Path, oid: &str) {
+    let index = fs::read(repo.join(".libra/index")).unwrap();
+    for args in [
+        vec!["status"],
+        vec!["status", "--no-renames"],
+        vec!["status", "--porcelain=v1"],
+        vec!["status", "--porcelain=v2"],
+        vec!["--json", "status"],
+        vec!["--machine", "status"],
+    ] {
+        let output = run_libra_command(&args, repo);
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert_eq!(output.status.code(), Some(128), "{args:?}: {stderr}");
+        assert!(!stderr.contains("panicked"), "{args:?}: {stderr}");
+        assert!(output.stdout.is_empty(), "{args:?}: partial status output");
+        let (_, report) = parse_cli_error_stderr(&output.stderr);
+        assert_eq!(report.error_code, "LBR-REPO-002", "{args:?}");
+        assert_eq!(report.exit_code, 128, "{args:?}");
+        assert!(report.message.contains(oid), "{args:?}: {report:?}");
+        assert!(
+            report.hints.iter().any(|hint| hint.contains("libra fsck")),
+            "{report:?}"
+        );
+        if args[0] == "--json" || args[0] == "--machine" {
+            serde_json::from_slice::<serde_json::Value>(&output.stderr)
+                .expect("structured modes must emit exactly one JSON error");
+        }
+        assert_eq!(
+            fs::read(repo.join(".libra/index")).unwrap(),
+            index,
+            "{args:?}: index changed"
+        );
+    }
+}
+
+#[test]
+fn status_nested_tree_missing_returns_repo_error() {
+    let (repo, oid, object) = repo_with_nested_head_tree();
+    fs::remove_file(object).unwrap();
+    assert_nested_tree_error(repo.path(), &oid);
+}
+
+#[test]
+fn status_nested_tree_corrupt_object_returns_repo_error() {
+    let (repo, oid, object) = repo_with_nested_head_tree();
+    fs::write(object, b"not a zlib object").unwrap();
+    assert_nested_tree_error(repo.path(), &oid);
+}
+
+#[test]
+fn status_nested_tree_invalid_entries_returns_repo_error() {
+    use std::io::Write;
+
+    use flate2::{Compression, write::ZlibEncoder};
+
+    let (repo, oid, object) = repo_with_nested_head_tree();
+    let mut encoder = ZlibEncoder::new(Vec::new(), Compression::default());
+    encoder.write_all(b"tree 3\0bad").unwrap();
+    fs::write(object, encoder.finish().unwrap()).unwrap();
+    assert_nested_tree_error(repo.path(), &oid);
+}
+
+#[test]
+fn status_nested_tree_gitlink_does_not_require_target_object() {
+    let (repo, _, _) = repo_with_nested_head_tree();
+    let phantom = "1111111111111111111111111111111111111111";
+    let spec = format!("160000,{phantom},outer/inner/module");
+    assert_cli_success(
+        &run_libra_command(
+            &["update-index", "--add", "--cacheinfo", &spec],
+            repo.path(),
+        ),
+        "stage nested gitlink with absent commit",
+    );
+    assert_cli_success(
+        &run_libra_command(
+            &["commit", "-m", "nested gitlink", "--no-verify"],
+            repo.path(),
+        ),
+        "commit nested gitlink",
+    );
+    for args in [
+        vec!["status"],
+        vec!["--json", "status"],
+        vec!["status", "--porcelain=v2"],
+    ] {
+        assert_cli_success(
+            &run_libra_command(&args, repo.path()),
+            "status with nested gitlink",
+        );
+    }
+}
+
+// ---------------------------------------------------------------------------
 // --exit-code: dirty → exit 1
 // ---------------------------------------------------------------------------
 

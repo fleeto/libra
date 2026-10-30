@@ -36,7 +36,7 @@ use crate::{
     utils::{
         error::{CliError, CliResult, StableErrorCode},
         ignore::IgnorePolicy,
-        object_ext::{CommitExt, TreeExt},
+        object_ext::{CommitExt, TreeExpansionError, TreeExt, try_get_plain_items_with_mode},
         output::{OutputConfig, emit_json_data},
         path,
         pathspec::{PathspecError, PathspecSet},
@@ -325,6 +325,8 @@ pub enum StatusError {
     ConfigRead { source: anyhow::Error },
     #[error("cannot read the HEAD {what} '{oid}': the object is missing or corrupt")]
     HeadObjectUnreadable { what: &'static str, oid: String },
+    #[error("cannot expand the HEAD tree: {source}")]
+    HeadTreeExpansion { source: TreeExpansionError },
 }
 
 impl From<StatusError> for CliError {
@@ -355,6 +357,9 @@ impl From<StatusError> for CliError {
             StatusError::ConfigRead { .. } => {
                 CliError::fatal(msg).with_stable_code(StableErrorCode::IoReadFailed)
             }
+            StatusError::HeadTreeExpansion { .. } => CliError::fatal(msg)
+                .with_stable_code(StableErrorCode::RepoCorrupt)
+                .with_hint("run 'libra fsck' or restore the object, then retry"),
             StatusError::HeadObjectUnreadable { .. } => CliError::fatal(msg)
                 .with_stable_code(StableErrorCode::RepoStateInvalid)
                 .with_hint("run 'libra fsck' or restore the object, then retry"),
@@ -1049,7 +1054,8 @@ pub async fn changes_to_be_committed_safe() -> Result<Changes, StatusError> {
             what: "tree",
             oid: commit.tree_id.to_string(),
         })?;
-    let tree_files = tree.get_plain_items_with_mode();
+    let tree_files = try_get_plain_items_with_mode(&tree)
+        .map_err(|source| StatusError::HeadTreeExpansion { source })?;
 
     for (item_path, item_hash, item_mode) in tree_files.iter() {
         // §B.6.1: a tree path that is not valid UTF-8 cannot match an index
@@ -1826,6 +1832,34 @@ mod argv_normalization_test {
 
 #[cfg(test)]
 mod test {
+
+    #[test]
+    fn nested_tree_error_display_and_code_are_stable() {
+        let oid = git_internal::hash::ObjectHash::new_for_kind(
+            git_internal::hash::HashKind::Sha1,
+            &[0x11; 20],
+        );
+        let error = super::StatusError::HeadTreeExpansion {
+            source: crate::utils::object_ext::TreeExpansionError {
+                oid,
+                source: git_internal::errors::GitError::InvalidObjectInfo(
+                    "invalid tree entry".into(),
+                ),
+            },
+        };
+        assert_eq!(
+            error.to_string(),
+            format!(
+                "cannot expand the HEAD tree: cannot read tree '{oid}': {}",
+                git_internal::errors::GitError::InvalidObjectInfo("invalid tree entry".into())
+            )
+        );
+        let error = crate::utils::error::CliError::from(error);
+        assert_eq!(
+            error.stable_code(),
+            crate::utils::error::StableErrorCode::RepoCorrupt
+        );
+    }
     use sea_orm::{ConnectionTrait, Statement};
     use serial_test::serial;
     use tempfile::tempdir;

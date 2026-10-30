@@ -8,6 +8,7 @@ use std::{
 
 use colored::Colorize;
 use git_internal::{
+    errors::GitError,
     hash::ObjectHash,
     internal::object::{
         ObjectTrait,
@@ -19,6 +20,15 @@ use git_internal::{
 
 use crate::utils::{lfs, util};
 
+/// A recursive tree expansion failed before a complete snapshot was available.
+#[derive(Debug, thiserror::Error)]
+#[error("cannot read tree '{oid}': {source}")]
+pub struct TreeExpansionError {
+    pub oid: ObjectHash,
+    #[source]
+    pub source: GitError,
+}
+
 pub trait TreeExt {
     fn load(hash: &ObjectHash) -> Tree;
     fn try_load(hash: &ObjectHash) -> Option<Tree>;
@@ -27,6 +37,37 @@ pub trait TreeExt {
     /// Returns (path, hash, mode) tuples
     fn get_plain_items_with_mode(&self) -> Vec<(PathBuf, ObjectHash, TreeItemMode)>;
     fn get_items_with_mode(&self) -> Vec<(PathBuf, ObjectHash, TreeItemMode)>;
+}
+
+/// Expand nested trees without panicking or returning a partial snapshot.
+/// Gitlinks remain leaf entries; their commit objects need not exist locally.
+pub fn try_get_plain_items_with_mode(
+    tree: &Tree,
+) -> Result<Vec<(PathBuf, ObjectHash, TreeItemMode)>, TreeExpansionError> {
+    let mut items = Vec::new();
+    for item in &tree.tree_items {
+        if item.mode != TreeItemMode::Tree {
+            items.push((PathBuf::from(&item.name), item.id, item.mode));
+            continue;
+        }
+
+        let load = || {
+            let storage = util::try_objects_storage().map_err(GitError::IOError)?;
+            let data = storage.get(&item.id)?;
+            Tree::from_bytes(&data, item.id)
+        };
+        let subtree = load().map_err(|source| TreeExpansionError {
+            oid: item.id,
+            source,
+        })?;
+        let entries = try_get_plain_items_with_mode(&subtree)?;
+        items.extend(
+            entries
+                .into_iter()
+                .map(|(path, hash, mode)| (PathBuf::from(&item.name).join(path), hash, mode)),
+        );
+    }
+    Ok(items)
 }
 
 pub trait CommitExt {

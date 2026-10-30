@@ -1359,7 +1359,8 @@ pub fn build_porcelain_v2_data(
 ) -> CliResult<PorcelainV2Data> {
     let head_tree_items = if let Some(commit_hash) = head_oid {
         let (_, tree) = load_head_commit_tree(commit_hash)?;
-        tree.get_plain_items_with_mode()
+        try_get_plain_items_with_mode(&tree)
+            .map_err(|source| StatusError::HeadTreeExpansion { source })?
             .into_iter()
             .map(|(path, hash, mode)| {
                 (

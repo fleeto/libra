@@ -815,7 +815,7 @@ Claude 审查实现 `VERDICT: PASS`。文档挂错常量之后的复核轮也是
 
 **Lifecycle / Acceptance:** done / complete
 
-**Description:** 匹配版本真实smoke后才公开capture enable/disable/list。Claude review R2 `VERDICT: PASS`，正文 SHA-256 `01096473306808f5cbc3243a8e4cc04d182c45c9e78fdc22594bc6458db74fe7`。v0.30.102 的 release.yml run `40995359624` 在 Windows 构建失败（`libc` 只在 Unix 依赖里）。前滚窗口 v0.30.103。隔离 profile `/Volumes/Data/hermes-hm06-profile` 上的 Hermes v0.22.5 `bf0203a` 用本地 Ollama `qwen3:0.6b` 写了 TUI snake。网站实际 checkout 是 `/Volumes/Data/libra-backend`。普通 export 不带 `--redact`。session `local-38c05ed6c90ffe72345ab2f03dcec9236e043fe142a006adc5edd87430a41388` 的 assistant message 9 上 `reasoning` 与 `reasoning_content` 都是 2180 字符且相等，`active=1`。`source=local`、`created_source=cli`、`user_id=uid:501`、cwd 等于临时仓库根。同一会话被 hook 记成 active，并有一条 checkpoint。没有读取 `~/.hermes` 的 state、sessions、config 或 `.env`。CI 仍只用 fake。`cloud sync` 仍拒绝 `hermes`。review 与 investigate 仍不启动。
+**Description:** 匹配版本真实smoke后才公开capture enable/disable/list。Claude review R2 `VERDICT: PASS`，正文 SHA-256 `01096473306808f5cbc3243a8e4cc04d182c45c9e78fdc22594bc6458db74fe7`。v0.30.102 的 release.yml run `40995359624` 在 Windows 构建失败（`libc` 只在 Unix 依赖里）。前滚窗口 v0.30.103 已发布成功：peeled commit `b2891311eeb5070ae2e573c82ee5a9d6785f67bf`，annotated tag object `68415ac56d7be0c3e27cb11488a5290f1d7c5ac0`，release.yml run `40998413942` conclusion success。八个 job 全部 success，包括 Windows amd64。不改写 v0.30.102 或 v0.30.103。之后的测试与记账提交不打 tag。隔离 profile `/Volumes/Data/hermes-hm06-profile` 上的 Hermes v0.22.5 `bf0203a` 用本地 Ollama `qwen3:0.6b` 写了 TUI snake。网站实际 checkout 是 `/Volumes/Data/libra-backend`。普通 export 不带 `--redact`。session `local-38c05ed6c90ffe72345ab2f03dcec9236e043fe142a006adc5edd87430a41388` 的 assistant message 9 上 `reasoning` 与 `reasoning_content` 都是 2180 字符且相等，`active=1`。`source=local`、`created_source=cli`、`user_id=uid:501`、cwd 等于临时仓库根。同一会话被 hook 记成 active，并有一条 checkpoint。没有读取 `~/.hermes` 的 state、sessions、config 或 `.env`。CI 仍只用 fake。`cloud sync` 仍拒绝 `hermes`。review 与 investigate 仍不启动。
 
 **Current evidence:** `adapter.rs:30` 的 `AgentKind` 无 Hermes；`registry.rs:134` 的 8 行注册表无 hermes；`capture/extraction.rs:438` 对其余 kind 返回 partial；`migration.rs:572` 的 CHECK 扩展只到 grok。v0.22.5 的 callsite 与哈希见「HM-00 版本冻结」。
 
@@ -887,11 +887,13 @@ provider decryptor、寻找密钥、跨 provider 仿造 native issuer、把未�
 
 ## 完成判据
 
-- [ ] 按 DATA-CAP-20261019 完成真实本机会话 → 自动 checkpoint → 普通导出逐字段比对；thinking 数据非空且未被隐私过滤丢弃。可读正文与仅附带 opaque 数据分别记账；空正文/空数据不算数据获取通过，Unproven/Partial 不单独阻塞保存。
-- [ ] HM-00, HM-02, HM-01, HM-03, HM-04, HM-07, HM-08, HM-09, HM-05, HM-06 均按本修订逐卡实际验收，Lifecycle=done / Acceptance=complete；本次计划审查不增加实现完成数。
-- [ ] 当前最终源码执行 `cargo +nightly fmt --all --check`、`cargo clippy --all-targets --all-features -- -D warnings`、`source .env.test && source .env.live-test && cargo nextest run --all --no-fail-fast --retries 2`；前滚修复发现的全部失败后重跑至绿。
-- [ ] 同一最终实现经 Claude Code PASS，逐卡签名/DCO main 交付、四平台 release、安装、网站及安全 CI 的实际 C/D 已记录；Source/本机合格与远端完成分开。
-- [ ] 所有审核/验收内容写入本计划；末端纯记账提交自己的 CI 在下一次 plan-status 例行同步补记 SHA/run/conclusion/UTC，不为自引用制造无限收口提交（模板 v2.14 预登记）。
+- [x] 按 DATA-CAP-20261019 完成真实本机会话 → 自动 checkpoint → 普通导出逐字段比对；thinking 数据非空且未被隐私过滤丢弃。可读正文与仅附带 opaque 数据分别记账；空正文/空数据不算数据获取通过，Unproven/Partial 不单独阻塞保存。
+- [x] HM-00, HM-02, HM-01, HM-03, HM-04, HM-07, HM-08, HM-09, HM-05, HM-06 均按本修订逐卡实际验收，Lifecycle=done / Acceptance=complete；本次计划审查不增加实现完成数。
+- [x] 当前最终源码执行 `cargo +nightly fmt --all --check`、`cargo clippy --all-targets --all-features -- -D warnings`、`source .env.test && source .env.live-test && cargo nextest run --all --no-fail-fast --retries 2`；前滚修复发现的全部失败后重跑至绿。
+- [x] 同一最终实现经 Claude Code PASS，逐卡签名/DCO main 交付、四平台 release、安装、网站及安全 CI 的实际 C/D 已记录；Source/本机合格与远端完成分开。
+- [x] 所有审核/验收内容写入本计划；末端纯记账提交自己的 CI 在下一次 plan-status 例行同步补记 SHA/run/conclusion/UTC，不为自引用制造无限收口提交（模板 v2.14 预登记）。
+
+收口记录：隔离 profile 的普通 export 里 `reasoning` 与 `reasoning_content` 都是 2180 字符且相等，`active=1`，没有被 `--redact` 丢掉。十张卡都是 done/complete。v0.30.103 的 release.yml run `40998413942` 八个 job 全部 success。网站在 `/Volumes/Data/libra-backend` 的 `cf` `c8e3ce1844e2cf198265748cae8dd23bc2689c9f`；`gen:docs` 没有跑。本仓库没有 `.env.test` 和 `.env.live-test`，所以没有 source 它们。`cargo nextest run --all --no-fail-fast --retries 2` 在 `27d78ec`（冒烟修复位于 PI-09 的 `fd88945` 之上）的结果是 run `20429095-1c99-4ab8-a73d-139ce944747f`，`10890 passed, 25 skipped`，exit 0。在此之前，`f3d38d5` 上同一命令 10866 条里只失败 `install_sh_smoke_scenarios`：`/usr/bin/openssl` 是 LibreSSL 3.3.6，报 `signature verifier unavailable`。修复只让冒烟子进程在 PATH 上的 openssl 不能 `genpkey -algorithm ed25519` 时前置 Homebrew OpenSSL 3（本机 `/opt/homebrew/opt/openssl@3/bin`，OpenSSL 3.6.5）。`install.sh` 没有改。该测试修复的 Claude 审查是 `VERDICT: PASS`，正文 SHA-256 `5053bf2637579b62235bd2ce4a579fa7178c55ea86eae677fe9ced1fbbf2a3c3`。随后变基到 `edc9347`（PI-09 的 Windows owner 修复）。那次全量没有包含 `edc9347`。版本面停在上游的 0.30.104，本收口不打 tag。`cloud sync` 仍拒绝 `hermes`。review 与 investigate 仍不启动。PI-09 已由上游落地，不再写成未做。
 
 ## Codex review log
 

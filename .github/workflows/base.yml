@@ -184,12 +184,12 @@ jobs:
               $actualHead[0].Trim() -ne $env:EXPECTED_EVENT_SHA) {
             throw 'Checked-out source does not match the event SHA'
           }
-          if ($env:EXPECTED_EVENT_NAME -eq 'push') {
+          if ($env:EXPECTED_EVENT_NAME -eq 'push' -or $env:EXPECTED_EVENT_NAME -eq 'workflow_dispatch') {
             if ($env:GITHUB_REF -ne 'refs/heads/main' -and
                 -not $env:GITHUB_REF.StartsWith('refs/heads/release/', [System.StringComparison]::Ordinal)) {
               throw 'Scoped Windows push tests require a main or release candidate ref'
             }
-            Write-Output "Scoped Windows source: ref=$($env:GITHUB_REF) sha=$($env:EXPECTED_EVENT_SHA) workflow=$($env:GITHUB_WORKFLOW_SHA) run=$($env:GITHUB_RUN_ID) attempt=$($env:GITHUB_RUN_ATTEMPT)"
+            Write-Output "Scoped Windows source: event=$($env:EXPECTED_EVENT_NAME) ref=$($env:GITHUB_REF) sha=$($env:EXPECTED_EVENT_SHA) workflow=$($env:GITHUB_WORKFLOW_SHA) run=$($env:GITHUB_RUN_ID) attempt=$($env:GITHUB_RUN_ATTEMPT)"
           } elseif ($env:EXPECTED_EVENT_NAME -eq 'pull_request') {
             if ([string]::IsNullOrWhiteSpace($env:EXPECTED_PR_NUMBER) -or
                 $env:GITHUB_REF -ne "refs/pull/$($env:EXPECTED_PR_NUMBER)/merge") {

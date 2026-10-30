@@ -91,7 +91,7 @@ impl Fixture {
             .expect("discover real repository");
         assert_eq!(main.scope, WorktreeScope::Main);
         assert!(!main.gitdir.join("HEAD").exists());
-        let storage = ClientStorage::init_local(gitdir.join("objects"));
+        let storage = ClientStorage::try_init_local(gitdir.join("objects")).expect("storage");
         let tree_oid = ObjectHash::from_type_and_data(ObjectType::Tree, b"");
         storage
             .put(&tree_oid, b"", ObjectType::Tree)

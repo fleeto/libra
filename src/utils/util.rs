@@ -1361,14 +1361,14 @@ pub fn require_repo() -> io::Result<()> {
 }
 
 /// Get `ClientStorage` for the `objects` directory
-pub fn objects_storage() -> ClientStorage {
+pub fn objects_storage() -> io::Result<ClientStorage> {
     cached_objects_storage(path::objects())
 }
 
 /// Get `ClientStorage` for the `objects` directory, returning a Result
 pub fn try_objects_storage() -> io::Result<ClientStorage> {
     let storage = try_get_storage_path(None)?;
-    Ok(cached_objects_storage(storage.join("objects")))
+    cached_objects_storage(storage.join("objects"))
 }
 
 /// Resolve object storage for a caller that can handle configuration failure.
@@ -1380,20 +1380,20 @@ pub fn resolve_configured_objects_storage()
     crate::utils::client_storage::ClientStorage::resolve_configured_storage(path::objects())
 }
 
-fn cached_objects_storage(base_path: PathBuf) -> ClientStorage {
+fn cached_objects_storage(base_path: PathBuf) -> io::Result<ClientStorage> {
     let mut cache = OBJECTS_STORAGE_CACHE
         .lock()
         .expect("objects storage cache mutex poisoned"); // panic is intentional: if poisoned, we cannot recover
     if let Some(storage) = cache.get(&base_path) {
-        return storage.clone();
+        return Ok(storage.clone());
     }
 
-    let storage = ClientStorage::init(base_path.clone());
+    let storage = ClientStorage::try_init(base_path.clone())?;
     if storage.configuration_variable().is_some() {
-        return storage;
+        return Ok(storage);
     }
     cache.insert(base_path, storage.clone());
-    storage
+    Ok(storage)
 }
 
 #[cfg(test)]
@@ -1915,6 +1915,12 @@ pub enum CommitBaseError {
     CorruptReference(String),
 }
 
+impl From<io::Error> for CommitBaseError {
+    fn from(error: io::Error) -> Self {
+        CommitBaseError::ReadFailure(error.to_string())
+    }
+}
+
 impl CommitBaseError {
     fn from_branch_store_error(context: String, error: BranchStoreError) -> Self {
         let message = format!("{context}: {error}");
@@ -2110,7 +2116,7 @@ pub fn require_object_exists_typed(
     object_id: ObjectHash,
     display_name: &str,
 ) -> Result<ObjectHash, CommitBaseError> {
-    object_type_typed(&objects_storage(), &object_id, display_name)?;
+    object_type_typed(&objects_storage()?, &object_id, display_name)?;
     Ok(object_id)
 }
 
@@ -2135,7 +2141,7 @@ async fn resolve_tag_atom_typed(
             "tag reference 'refs/tags/{tag_name}' has invalid object id '{target}': {error}"
         ))
     })?;
-    let storage = objects_storage();
+    let storage = objects_storage()?;
     let object_id = validate_referenced_object(&storage, object_id, display_name, None)?;
     Ok(Some(ResolvedAtom {
         object_id,
@@ -2156,7 +2162,7 @@ async fn resolve_local_branch_atom_typed(
     let Some(commit) = commit else {
         return Ok(None);
     };
-    let storage = objects_storage();
+    let storage = objects_storage()?;
     let object_id =
         validate_referenced_object(&storage, commit, display_name, Some(ObjectType::Commit))?;
     Ok(Some(ResolvedAtom {
@@ -2199,7 +2205,7 @@ async fn resolve_remote_branch_atom_typed(
             if let Some(commit) =
                 resolve_branch_commit_typed(candidate, candidate_remote, display_name).await?
             {
-                let storage = objects_storage();
+                let storage = objects_storage()?;
                 let object_id = validate_referenced_object(
                     &storage,
                     commit,
@@ -2252,7 +2258,7 @@ async fn resolve_remote_head_atom_typed(
         Some(Head::Detached(commit)) => (commit, format!("refs/remotes/{remote}/HEAD")),
         None => return Ok(None),
     };
-    let storage = objects_storage();
+    let storage = objects_storage()?;
     let object_id =
         validate_referenced_object(&storage, object_id, display_name, Some(ObjectType::Commit))?;
     Ok(Some(ResolvedAtom {
@@ -2279,7 +2285,7 @@ async fn resolve_hash_atom_typed(name: &str) -> Result<ResolvedAtom, CommitBaseE
         return Err(invalid_reference(name));
     }
 
-    let storage = objects_storage();
+    let storage = objects_storage()?;
     let matches = storage.search_result(name).await.map_err(|error| {
         CommitBaseError::classify_storage_failure(format!(
             "failed to search objects while resolving '{name}': {error}"
@@ -2371,7 +2377,7 @@ async fn resolve_object_atom_typed(name: &str) -> Result<ResolvedAtom, CommitBas
                 ));
             }
         };
-        let storage = objects_storage();
+        let storage = objects_storage()?;
         let object_id =
             validate_referenced_object(&storage, object_id, "HEAD", Some(ObjectType::Commit))?;
         return Ok(ResolvedAtom {
@@ -2431,7 +2437,7 @@ fn peel_object_to_type_typed(
     expected: Option<ObjectType>,
     display_name: &str,
 ) -> Result<ObjectHash, CommitBaseError> {
-    let storage = objects_storage();
+    let storage = objects_storage()?;
     let mut current = ensure_hash_kind(object_id, display_name, false)?;
     let mut seen = HashSet::new();
     // Whether the peel walked through at least one annotated tag: a type
@@ -2507,7 +2513,7 @@ fn nth_parent_commit_typed(
         .copied()
         .ok_or_else(|| invalid_reference(display_name))?;
     validate_referenced_object(
-        &objects_storage(),
+        &objects_storage()?,
         parent,
         display_name,
         Some(ObjectType::Commit),
@@ -2550,7 +2556,7 @@ async fn resolve_reflog_selector_typed(
                 entry.new_oid
             ))
         })?;
-    validate_referenced_object(&objects_storage(), object_id, display_name, None)
+    validate_referenced_object(&objects_storage()?, object_id, display_name, None)
 }
 
 fn first_revision_operator(spec: &str) -> Option<usize> {
@@ -2637,7 +2643,7 @@ async fn resolve_revision_expression_typed(spec: &str) -> Result<ObjectHash, Com
             }
             let expected = match &peel[..close] {
                 "" => None,
-                "object" => Some(object_type_typed(&objects_storage(), &current, spec)?),
+                "object" => Some(object_type_typed(&objects_storage()?, &current, spec)?),
                 "commit" => Some(ObjectType::Commit),
                 "tree" => Some(ObjectType::Tree),
                 "blob" => Some(ObjectType::Blob),
@@ -2718,7 +2724,7 @@ fn resolve_tree_path_typed(
                 ))
             })?;
         current = validate_referenced_object(
-            &objects_storage(),
+            &objects_storage()?,
             item.id,
             display_name,
             if index + 1 < components.len() {
@@ -3089,7 +3095,7 @@ pub fn peel_to_non_tag_typed(
     display_name: &str,
 ) -> Result<(ObjectHash, ObjectType), CommitBaseError> {
     let end = peel_object_to_type_typed(object_id, None, display_name)?;
-    let end_type = object_type_typed(&objects_storage(), &end, display_name)?;
+    let end_type = object_type_typed(&objects_storage()?, &end, display_name)?;
     Ok((end, end_type))
 }
 

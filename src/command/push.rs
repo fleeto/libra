@@ -2285,7 +2285,7 @@ async fn collect_objects_for_ref(
         .map_err(|error| PushError::ObjectCollection(error.to_string()))?
     {
         tag::TagObject::Commit(commit) => {
-            incremental_objs_from_haves(commit.id, &advertised_haves.commits)
+            incremental_objs_from_haves(commit.id, &advertised_haves.commits)?
         }
         tag::TagObject::Tag(tag_object) => {
             collect_tag_object_chain(tag_object, advertised_haves).await?
@@ -2293,7 +2293,7 @@ async fn collect_objects_for_ref(
         tag::TagObject::Tree(tree) => {
             let mut warnings = Vec::new();
             IncrementalObjsResult {
-                objs: diff_tree_objs(None, &tree.id, &mut warnings),
+                objs: diff_tree_objs(None, &tree.id, &mut warnings)?,
                 warnings,
             }
         }
@@ -2338,7 +2338,7 @@ async fn collect_tag_object_chain(
         {
             tag::TagObject::Commit(commit) => {
                 let commit_result =
-                    incremental_objs_from_haves(commit.id, &advertised_haves.commits);
+                    incremental_objs_from_haves(commit.id, &advertised_haves.commits)?;
                 result.objs.extend(commit_result.objs);
                 result.warnings.extend(commit_result.warnings);
                 return Ok(result);
@@ -2346,7 +2346,7 @@ async fn collect_tag_object_chain(
             tag::TagObject::Tree(tree) => {
                 result
                     .objs
-                    .extend(diff_tree_objs(None, &tree.id, &mut result.warnings));
+                    .extend(diff_tree_objs(None, &tree.id, &mut result.warnings)?);
                 return Ok(result);
             }
             tag::TagObject::Blob(blob) => {
@@ -2979,9 +2979,15 @@ async fn harvest_thin_bases(
         let Some(new_tree) = Tree::try_load(&new_commit.tree_id) else {
             continue;
         };
-        let old_items: HashMap<std::path::PathBuf, ObjectHash> =
-            old_tree.get_plain_items().into_iter().collect();
-        for (path, new_blob) in new_tree.get_plain_items() {
+        // Thin packs are an optimization. A tree that cannot be read is skipped.
+        let Ok(old_list) = old_tree.get_plain_items() else {
+            continue;
+        };
+        let old_items: HashMap<std::path::PathBuf, ObjectHash> = old_list.into_iter().collect();
+        let Ok(new_list) = new_tree.get_plain_items() else {
+            continue;
+        };
+        for (path, new_blob) in new_list {
             if let Some(old_blob) = old_items.get(&path)
                 && *old_blob != new_blob
                 && outgoing.contains(&new_blob)
@@ -2996,8 +3002,16 @@ async fn harvest_thin_bases(
 
 /// Load a local object's raw data (base blobs for thin deltas).
 fn load_object_data(hash: &ObjectHash) -> Result<Vec<u8>, GitError> {
-    let storage = crate::utils::client_storage::ClientStorage::init(crate::utils::path::objects());
+    let storage =
+        crate::utils::client_storage::ClientStorage::try_init(crate::utils::path::objects())
+            .map_err(GitError::IOError)?;
     storage.get(hash)
+}
+
+impl From<std::io::Error> for PushError {
+    fn from(error: std::io::Error) -> Self {
+        PushError::ObjectCollection(error.to_string())
+    }
 }
 
 fn encode_empty_pack(hash_kind: HashKind) -> Vec<u8> {
@@ -3085,11 +3099,10 @@ fn incremental_objs(local_ref: ObjectHash, remote_ref: ObjectHash) -> Incrementa
                         return empty;
                     }
                 };
-                objs.extend(diff_tree_objs(
-                    Some(&old_tree),
-                    &new_commit.tree_id,
-                    &mut warnings,
-                ));
+                objs.extend(
+                    diff_tree_objs(Some(&old_tree), &new_commit.tree_id, &mut warnings)
+                        .expect("storage"),
+                );
                 objs.insert(new_commit.into());
             }
             return IncrementalObjsResult { objs, warnings };
@@ -3097,13 +3110,13 @@ fn incremental_objs(local_ref: ObjectHash, remote_ref: ObjectHash) -> Incrementa
     }
 
     let exist_commits = collect_history_commits(&remote_ref);
-    incremental_objs_from_haves(local_ref, &exist_commits)
+    incremental_objs_from_haves(local_ref, &exist_commits).expect("storage")
 }
 
 fn incremental_objs_from_haves(
     local_ref: ObjectHash,
     exist_commits: &HashSet<ObjectHash>,
-) -> IncrementalObjsResult {
+) -> Result<IncrementalObjsResult, PushError> {
     let mut objs = HashSet::new();
     let mut warnings = Vec::new();
     let mut visit = HashSet::new();
@@ -3137,7 +3150,7 @@ fn incremental_objs_from_haves(
                 Some(&parent_tree),
                 &commit.tree_id,
                 &mut warnings,
-            ));
+            )?);
             if !exist_commits.contains(parent) && !visit.contains(parent) {
                 queue.push_back(*parent);
                 visit.insert(*parent);
@@ -3150,12 +3163,12 @@ fn incremental_objs_from_haves(
 
     // root commit has no parent
     if let Some(root_commit) = root_commit {
-        let root_tree = Commit::load(&root_commit).tree_id;
-        objs.extend(diff_tree_objs(None, &root_tree, &mut warnings));
+        let root_tree = Commit::load(&root_commit)?.tree_id;
+        objs.extend(diff_tree_objs(None, &root_tree, &mut warnings)?);
     }
 
     tracing::debug!("counting objects: {} done", objs.len());
-    IncrementalObjsResult { objs, warnings }
+    Ok(IncrementalObjsResult { objs, warnings })
 }
 
 fn zero_object_hash() -> ObjectHash {
@@ -3214,26 +3227,25 @@ fn diff_tree_objs(
     old_tree: Option<&ObjectHash>,
     new_tree: &ObjectHash,
     warnings: &mut Vec<String>,
-) -> HashSet<Entry> {
+) -> Result<HashSet<Entry>, PushError> {
     let mut objs = HashSet::new();
     if let Some(old_tree) = old_tree
         && old_tree == new_tree
     {
-        return objs;
+        return Ok(objs);
     }
 
-    let new_tree = Tree::load(new_tree);
+    let new_tree = Tree::load(new_tree)?;
     objs.insert(new_tree.clone().into());
 
-    let old_items = old_tree
-        .map(|tree| {
-            Tree::load(tree)
-                .tree_items
-                .into_iter()
-                .map(|item| (item.name, (item.id, item.mode)))
-                .collect::<HashMap<_, _>>()
-        })
-        .unwrap_or_default();
+    let old_items = match old_tree {
+        Some(tree) => Tree::load(tree)?
+            .tree_items
+            .into_iter()
+            .map(|item| (item.name, (item.id, item.mode)))
+            .collect::<HashMap<_, _>>(),
+        None => HashMap::new(),
+    };
 
     for item in new_tree.tree_items.iter() {
         let old_item = old_items.get(&item.name);
@@ -3246,19 +3258,19 @@ fn diff_tree_objs(
                 let old_subtree = old_item.and_then(|(old_id, old_mode)| {
                     (*old_mode == TreeItemMode::Tree).then_some(old_id)
                 });
-                objs.extend(diff_tree_objs(old_subtree, &item.id, warnings));
+                objs.extend(diff_tree_objs(old_subtree, &item.id, warnings)?);
             }
             TreeItemMode::Commit => {
                 warnings.push("submodule is not supported yet".to_string());
             }
             _ => {
-                let blob = Blob::load(&item.id);
+                let blob = Blob::load(&item.id)?;
                 objs.insert(blob.into());
             }
         }
     }
 
-    objs
+    Ok(objs)
 }
 
 #[cfg(test)]
@@ -4663,7 +4675,8 @@ mod test {
         )]);
 
         let mut warnings = Vec::new();
-        let objs = diff_tree_objs(Some(&old_root.id), &new_root.id, &mut warnings);
+        let objs =
+            diff_tree_objs(Some(&old_root.id), &new_root.id, &mut warnings).expect("storage");
         let hashes = objs.iter().map(|entry| entry.hash).collect::<HashSet<_>>();
 
         assert!(warnings.is_empty());

@@ -406,7 +406,7 @@ async fn sync_from_spool(
 
     // Initialize local storage for reading objects.
     let objects_path = path::objects();
-    let local_storage = LocalStorage::new(objects_path);
+    let local_storage = LocalStorage::try_new(objects_path)?;
 
     let mut synced_count = 0usize;
     let mut failed_count = 0usize;

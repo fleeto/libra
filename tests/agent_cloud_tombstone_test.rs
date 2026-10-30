@@ -574,7 +574,7 @@ async fn cloud_tombstone_propagates_for_agent_capture() {
 
     // Real local erase of the SAME session.
     let repo_dot = repo.path().join(".libra");
-    let storage = Arc::new(ClientStorage::init(repo_dot.join("objects")));
+    let storage = Arc::new(ClientStorage::try_init(repo_dot.join("objects")).expect("storage"));
     let history =
         HistoryManager::new_with_ref(storage, repo_dot, Arc::new(conn.clone()), TRACES_BRANCH);
     let outcome = history
@@ -1095,7 +1095,7 @@ async fn claude_legacy_revision_repair_is_idempotent_and_erases_with_the_old_che
     .await
     .expect("restore the old checkpoint row");
 
-    let storage = Arc::new(ClientStorage::init(libra_dir.join("objects")));
+    let storage = Arc::new(ClientStorage::try_init(libra_dir.join("objects")).expect("storage"));
     let history = HistoryManager::new_with_ref(
         storage,
         libra_dir.clone(),

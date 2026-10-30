@@ -7216,9 +7216,9 @@ pub(crate) mod tests {
                     // cleanup-owned markers. Doctor repairs those before
                     // retrying the retained terminal artifact.
                     let history = crate::internal::ai::history::HistoryManager::for_traces(
-                        std::sync::Arc::new(crate::utils::client_storage::ClientStorage::init(
+                        std::sync::Arc::new(crate::utils::client_storage::ClientStorage::try_init(
                             storage.join("objects"),
-                        )),
+                        ).expect("storage")),
                         storage.clone(),
                         std::sync::Arc::new(conn.clone()),
                     );

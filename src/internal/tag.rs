@@ -98,6 +98,12 @@ pub enum CreateTagError {
     VaultSign(String),
 }
 
+impl From<std::io::Error> for CreateTagError {
+    fn from(error: std::io::Error) -> Self {
+        CreateTagError::StoreObject(error)
+    }
+}
+
 /// The object a new tag points at, unpeeled, together with its actual type:
 /// a commit, or an annotated tag whose chain peels to a commit (the new tag is
 /// then a nested tag).
@@ -227,7 +233,7 @@ pub async fn create_with_target(
         let tag_data = git_internal_tag
             .to_data()
             .map_err(CreateTagError::SerializeTag)?;
-        let storage = ClientStorage::init(path::objects());
+        let storage = ClientStorage::try_init(path::objects())?;
         storage
             .put(&git_internal_tag.id, &tag_data, git_internal_tag.get_type())
             .map_err(CreateTagError::StoreObject)?;
@@ -473,7 +479,7 @@ pub async fn find_tag_and_commit(name: &str) -> Result<Option<(TagObject, Commit
 /// Load a Git object and return it as a `TagObject`.
 pub async fn load_object_trait(hash: &ObjectHash) -> Result<TagObject, GitError> {
     // Use ClientStorage to get the object type first
-    let storage = ClientStorage::init(path::objects());
+    let storage = ClientStorage::try_init(path::objects())?;
     let obj_type = storage
         .get_object_type(hash)
         .map_err(|e| GitError::ObjectNotFound(format!("{}: {}", hash, e)))?;

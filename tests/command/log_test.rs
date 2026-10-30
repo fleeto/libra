@@ -473,6 +473,7 @@ async fn test_log_patch_fails_when_commit_blob_is_missing() {
         let commit: Commit = load_object(&head).expect("expected HEAD commit object");
         let tree: Tree = load_object(&commit.tree_id).expect("expected HEAD tree");
         tree.get_plain_items()
+            .expect("storage")
             .into_iter()
             .find(|(path, _)| path == &std::path::PathBuf::from("tracked.txt"))
             .map(|(_, hash)| hash.to_string())
@@ -508,6 +509,7 @@ async fn test_log_quiet_patch_fails_when_commit_blob_is_missing() {
         let commit: Commit = load_object(&head).expect("expected HEAD commit object");
         let tree: Tree = load_object(&commit.tree_id).expect("expected HEAD tree");
         tree.get_plain_items()
+            .expect("storage")
             .into_iter()
             .find(|(path, _)| path == &std::path::PathBuf::from("tracked.txt"))
             .map(|(_, hash)| hash.to_string())
@@ -575,6 +577,7 @@ async fn test_log_quiet_stat_respects_selected_history_range() {
         let oldest: Commit = load_object(&oldest_id).expect("expected oldest commit");
         let tree: Tree = load_object(&oldest.tree_id).expect("expected oldest tree");
         tree.get_plain_items()
+            .expect("storage")
             .into_iter()
             .find(|(path, _)| path == &std::path::PathBuf::from("tracked.txt"))
             .map(|(_, hash)| hash.to_string())
@@ -1108,7 +1111,8 @@ async fn collect_combined_diff_for_commits(count: usize, paths: Vec<std::path::P
     let mut out = String::new();
     for commit in reachable_commits.into_iter().take(max_output_number) {
         let tree = load_object::<Tree>(&commit.tree_id).unwrap();
-        let new_blobs: Vec<(std::path::PathBuf, ObjectHash)> = tree.get_plain_items();
+        let new_blobs: Vec<(std::path::PathBuf, ObjectHash)> =
+            tree.get_plain_items().expect("storage");
 
         let old_blobs: Vec<(std::path::PathBuf, ObjectHash)> =
             if !commit.parent_commit_ids.is_empty() {
@@ -1116,7 +1120,7 @@ async fn collect_combined_diff_for_commits(count: usize, paths: Vec<std::path::P
                 let parent_hash = ObjectHash::from_str(&parent.to_string()).unwrap();
                 let parent_commit = load_object::<Commit>(&parent_hash).unwrap();
                 let parent_tree = load_object::<Tree>(&parent_commit.tree_id).unwrap();
-                parent_tree.get_plain_items()
+                parent_tree.get_plain_items().expect("storage")
             } else {
                 Vec::new()
             };

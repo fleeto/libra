@@ -443,7 +443,7 @@ async fn test_commit_with_all_flag_stages_tracked_changes() {
     let commit: Commit = load_object(&head_id).unwrap();
     assert_eq!(commit.message.trim(), "with -a");
     let tree: Tree = load_object(&commit.tree_id).unwrap();
-    let entries = tree.get_plain_items();
+    let entries = tree.get_plain_items().expect("storage");
     let tracked_blob_hash = calc_file_blob_hash("tracked.txt").unwrap();
     let tracked_entry = entries
         .iter()
@@ -528,7 +528,7 @@ async fn test_commit_with_all_flag_records_deletions() {
     let commit: Commit = load_object(&head_id).unwrap();
     assert_eq!(commit.message.trim(), "remove tracked");
     let tree: Tree = load_object(&commit.tree_id).unwrap();
-    let entries = tree.get_plain_items();
+    let entries = tree.get_plain_items().expect("storage");
     assert!(
         entries
             .iter()

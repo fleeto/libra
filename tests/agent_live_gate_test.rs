@@ -306,7 +306,7 @@ async fn live_m4_historical_import_three_provider_acceptance() {
         if tombstone_exists {
             let libra_dir = repo.join(".libra");
             let history = HistoryManager::new_with_ref(
-                Arc::new(ClientStorage::init(libra_dir.join("objects"))),
+                Arc::new(ClientStorage::try_init(libra_dir.join("objects")).expect("storage")),
                 libra_dir,
                 Arc::new(db.clone()),
                 TRACES_BRANCH,
@@ -411,7 +411,7 @@ async fn live_m4_historical_import_three_provider_acceptance() {
 
     let libra_dir = repo.join(".libra");
     let history = HistoryManager::new_with_ref(
-        Arc::new(ClientStorage::init(libra_dir.join("objects"))),
+        Arc::new(ClientStorage::try_init(libra_dir.join("objects")).expect("storage")),
         libra_dir,
         Arc::new(db),
         TRACES_BRANCH,

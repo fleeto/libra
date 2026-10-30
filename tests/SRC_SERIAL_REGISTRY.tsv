@@ -566,3 +566,15 @@ src/command/cloud.rs	capture_snapshot_paging_routes_a_background_upload_warning	
 src/command/cloud.rs	capture_snapshot_spool_retries_or_stops_when_rows_change	lane:cwd+env	PI-09: enter_isolated_libra_repo sets HOME/LIBRA_TEST_HOME and changes cwd; remote side is MockD1 plus InMemory R2 only
 src/command/cloud.rs	capture_snapshot_spool_keeps_a_row_promoted_after_the_freeze_unsynced	lane:cwd+env	PI-09: enter_isolated_libra_repo sets HOME/LIBRA_TEST_HOME and changes cwd; remote side is MockD1 plus InMemory R2 only
 src/command/cloud.rs	capture_snapshot_spool_retries_when_the_freeze_connection_is_replaced	lane:cwd+env	PI-09: enter_isolated_libra_repo sets HOME/LIBRA_TEST_HOME and changes cwd; remote side is MockD1 plus InMemory R2 only
+src/internal/obliteration/mod.rs	classify_presence_missing_root_is_absent	lane:cwd+env	unkeyed+touch;env:setup_with_new_libra_in;cwd;callees:classify_presence_missing_root_is_absent,blob_oid
+src/utils/client_storage.rs	try_init_ok	lane:cwd+env	unkeyed+touch;env:setup_with_new_libra_in;cwd;callees:try_init_ok
+src/utils/object_ext.rs	tree_load_returns_io_result_on_storage_err	lane:cwd+env	unkeyed+touch;env:setup_with_new_libra_in;cwd;callees:tree_load_returns_io_result_on_storage_err,with_repo
+src/utils/object_ext.rs	commit_load_returns_io_result_on_storage_err	lane:cwd+env	unkeyed+touch;env:setup_with_new_libra_in;cwd;callees:commit_load_returns_io_result_on_storage_err,with_repo
+src/utils/object_ext.rs	blob_load_returns_io_result_on_storage_err	lane:cwd+env	unkeyed+touch;env:setup_with_new_libra_in;cwd;callees:blob_load_returns_io_result_on_storage_err,with_repo
+src/utils/object_ext.rs	get_plain_items_propagates_subtree_load_err	lane:cwd+env	unkeyed+touch;env:setup_with_new_libra_in;cwd;callees:get_plain_items_propagates_subtree_load_err,with_repo,parent_of
+src/utils/object_ext.rs	get_plain_items_with_mode_propagates_subtree_load_err	lane:cwd+env	unkeyed+touch;env:setup_with_new_libra_in;cwd;callees:get_plain_items_with_mode_propagates_subtree_load_err,with_repo,parent_of
+src/utils/object_ext.rs	get_items_with_mode_propagates_subtree_load_err	lane:cwd+env	unkeyed+touch;env:setup_with_new_libra_in;cwd;callees:get_items_with_mode_propagates_subtree_load_err,with_repo,parent_of
+src/utils/object_ext.rs	tree_load_invalid_bytes_returns_err_not_panic	lane:cwd+env	unkeyed+touch;env:setup_with_new_libra_in;cwd;callees:tree_load_invalid_bytes_returns_err_not_panic,with_repo
+src/utils/object_ext.rs	commit_load_invalid_bytes_returns_err_not_panic	lane:cwd+env	unkeyed+touch;env:setup_with_new_libra_in;cwd;callees:commit_load_invalid_bytes_returns_err_not_panic,with_repo
+src/utils/object_ext.rs	blob_load_invalid_bytes_returns_err_not_panic	lane:cwd+env	unkeyed+touch;env:setup_with_new_libra_in;cwd;callees:blob_load_invalid_bytes_returns_err_not_panic,with_repo,write_loose_garbage
+src/utils/object_ext.rs	get_items_with_mode_corrupt_subtree_returns_err	lane:cwd+env	unkeyed+touch;env:setup_with_new_libra_in;cwd;callees:get_items_with_mode_corrupt_subtree_returns_err,with_repo,parent_of

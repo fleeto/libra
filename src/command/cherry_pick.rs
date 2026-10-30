@@ -421,6 +421,12 @@ enum CherryPickSingleError {
     GitlinkUnsupported(String),
 }
 
+impl From<std::io::Error> for CherryPickSingleError {
+    fn from(error: std::io::Error) -> Self {
+        CherryPickSingleError::LoadObject(error.to_string())
+    }
+}
+
 /// Serializable snapshot of the commit-modifier options for a cherry-pick
 /// sequence, persisted in the sequencer payload so `--continue`/`--skip`
 /// rebuild the same commit shape after a conflict.
@@ -2076,17 +2082,19 @@ async fn cherry_pick_single_commit(
     // stops the pick before anything is written. Pointers all three sides agree
     // on need no action — the pick only rewrites paths it changes, so the
     // existing index entry is carried through untouched.
+    let parent_gitlinks = merge::tree_gitlink_entries(&parent_tree)?;
+    let their_gitlinks = merge::tree_gitlink_entries(&their_tree)?;
     merge::ensure_gitlinks_not_arbitrated(
         "cherry-pick",
-        &merge::tree_gitlink_entries(&parent_tree),
+        &parent_gitlinks,
         &merge::index_gitlink_entries(&current_index),
-        &merge::tree_gitlink_entries(&their_tree),
+        &their_gitlinks,
     )
     .map_err(|refusal| CherryPickSingleError::GitlinkUnsupported(refusal.to_string()))?;
 
-    let their_index_modes = tree_index_modes(&their_tree);
-    let base_index_modes = tree_index_modes(&parent_tree);
-    let changes = diff_trees(&their_tree, &parent_tree);
+    let their_index_modes = tree_index_modes(&their_tree)?;
+    let base_index_modes = tree_index_modes(&parent_tree)?;
+    let changes = diff_trees(&their_tree, &parent_tree)?;
     let needs_content_driver = changes.iter().any(|(path, their_hash, base_hash)| {
         let ours_hash = ours_items.get(path).copied();
         ours_hash != *base_hash
@@ -2647,10 +2655,10 @@ async fn create_cherry_pick_commit(
 fn diff_trees(
     theirs: &Tree,
     base: &Tree,
-) -> Vec<(PathBuf, Option<ObjectHash>, Option<ObjectHash>)> {
+) -> Result<Vec<(PathBuf, Option<ObjectHash>, Option<ObjectHash>)>, CherryPickSingleError> {
     let mut diffs = Vec::new();
-    let their_items = mergeable_tree_items(theirs);
-    let base_items = mergeable_tree_items(base);
+    let their_items = mergeable_tree_items(theirs)?;
+    let base_items = mergeable_tree_items(base)?;
 
     let all_paths: HashSet<_> = their_items.keys().chain(base_items.keys()).collect();
 
@@ -2661,27 +2669,31 @@ fn diff_trees(
             diffs.push((path.clone(), their_hash, base_hash));
         }
     }
-    diffs
+    Ok(diffs)
 }
 
 /// Flatten a tree to its non-gitlink entries. Unlike `TreeExt::get_plain_items`
 /// this drops submodule pointers silently rather than warning on stderr: the
 /// ADR-MG-01 guard has already decided whether they are acceptable.
-fn mergeable_tree_items(tree: &Tree) -> HashMap<PathBuf, ObjectHash> {
-    tree.get_plain_items_with_mode()
+fn mergeable_tree_items(
+    tree: &Tree,
+) -> Result<HashMap<PathBuf, ObjectHash>, CherryPickSingleError> {
+    Ok(tree
+        .get_plain_items_with_mode()?
         .into_iter()
         .filter(|(_, _, mode)| *mode != TreeItemMode::Commit)
         .map(|(path, hash, _)| (path, hash))
-        .collect()
+        .collect())
 }
 
 /// Index-mode map for a tree's non-gitlink entries.
-fn tree_index_modes(tree: &Tree) -> HashMap<PathBuf, u32> {
-    tree.get_plain_items_with_mode()
+fn tree_index_modes(tree: &Tree) -> Result<HashMap<PathBuf, u32>, CherryPickSingleError> {
+    Ok(tree
+        .get_plain_items_with_mode()?
         .into_iter()
         .filter(|(_, _, mode)| *mode != TreeItemMode::Commit)
         .map(|(path, _, mode)| (path, tree_mode_to_index_mode(mode)))
-        .collect()
+        .collect())
 }
 
 fn tree_mode_to_index_mode(mode: TreeItemMode) -> u32 {
@@ -2767,7 +2779,7 @@ fn update_index_entry(
     hash: ObjectHash,
     mode: u32,
 ) -> Result<(), CherryPickSingleError> {
-    let blob = git_internal::internal::object::blob::Blob::load(&hash);
+    let blob = git_internal::internal::object::blob::Blob::load(&hash)?;
     let mut entry = IndexEntry::new_from_blob(
         path_to_utf8(path)?.to_string(),
         hash,
@@ -2786,7 +2798,7 @@ fn add_stage_entry(
     stage: u8,
     mode: u32,
 ) -> Result<(), CherryPickSingleError> {
-    let blob = git_internal::internal::object::blob::Blob::load(&hash);
+    let blob = git_internal::internal::object::blob::Blob::load(&hash)?;
     let mut entry = IndexEntry::new_from_blob(
         path_to_utf8(path)?.to_string(),
         hash,
@@ -2815,13 +2827,15 @@ fn write_conflict_markers_file(
     conflict_style: merge::ConflictStyle,
     driver: merge::BuiltinMergeDriver,
 ) -> Result<(), CherryPickSingleError> {
-    fn side_bytes(hash: &Option<ObjectHash>) -> Option<Vec<u8>> {
-        hash.as_ref()
-            .map(|h| git_internal::internal::object::blob::Blob::load(h).data)
+    fn side_bytes(hash: &Option<ObjectHash>) -> Result<Option<Vec<u8>>, CherryPickSingleError> {
+        Ok(match hash {
+            Some(h) => Some(git_internal::internal::object::blob::Blob::load(h)?.data),
+            None => None,
+        })
     }
-    let ours_bytes = side_bytes(ours_hash);
-    let theirs_bytes = side_bytes(their_hash);
-    let base_bytes = side_bytes(base_hash);
+    let ours_bytes = side_bytes(ours_hash)?;
+    let theirs_bytes = side_bytes(their_hash)?;
+    let base_bytes = side_bytes(base_hash)?;
 
     // Line-level merge applies only when both sides are present and text; the
     // shared helper returns None otherwise so we fall back to whole-file markers.
@@ -2973,7 +2987,7 @@ fn reset_workdir_tracked_only(
             if is_submodule_index_mode(entry.mode) {
                 continue;
             }
-            let blob = git_internal::internal::object::blob::Blob::load(&entry.hash);
+            let blob = git_internal::internal::object::blob::Blob::load(&entry.hash)?;
             let target_path = workdir.join(path_str);
             if entry.mode & 0o170000 == 0o120000 {
                 crate::utils::worktree_blob::write_worktree_symlink(&target_path, &blob.data)

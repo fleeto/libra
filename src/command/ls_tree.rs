@@ -175,7 +175,7 @@ pub async fn execute_safe(args: LsTreeArgs, output: &OutputConfig) -> CliResult<
 
 async fn resolve_ls_tree(args: &LsTreeArgs) -> CliResult<LsTreeOutput> {
     validate_args(args)?;
-    let storage = util::objects_storage();
+    let storage = util::objects_storage()?;
     let root_tree = resolve_treeish_to_tree(&args.treeish, &storage).await?;
     let path_context = LsTreePathContext::from_args(args)?;
     let filters = normalize_path_filters(&args.paths, &path_context)?;

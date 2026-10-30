@@ -2,7 +2,7 @@
 
 use std::{
     fs,
-    io::{BufReader, Read},
+    io::{self, BufReader, Read},
     path::{Path, PathBuf},
 };
 
@@ -30,13 +30,13 @@ pub struct TreeExpansionError {
 }
 
 pub trait TreeExt {
-    fn load(hash: &ObjectHash) -> Tree;
+    fn load(hash: &ObjectHash) -> io::Result<Tree>;
     fn try_load(hash: &ObjectHash) -> Option<Tree>;
-    fn get_plain_items(&self) -> Vec<(PathBuf, ObjectHash)>;
+    fn get_plain_items(&self) -> io::Result<Vec<(PathBuf, ObjectHash)>>;
     /// Get all the items in the tree recursively with mode information
     /// Returns (path, hash, mode) tuples
-    fn get_plain_items_with_mode(&self) -> Vec<(PathBuf, ObjectHash, TreeItemMode)>;
-    fn get_items_with_mode(&self) -> Vec<(PathBuf, ObjectHash, TreeItemMode)>;
+    fn get_plain_items_with_mode(&self) -> io::Result<Vec<(PathBuf, ObjectHash, TreeItemMode)>>;
+    fn get_items_with_mode(&self) -> io::Result<Vec<(PathBuf, ObjectHash, TreeItemMode)>>;
 }
 
 /// Expand nested trees without panicking or returning a partial snapshot.
@@ -71,12 +71,12 @@ pub fn try_get_plain_items_with_mode(
 }
 
 pub trait CommitExt {
-    fn load(hash: &ObjectHash) -> Commit;
+    fn load(hash: &ObjectHash) -> io::Result<Commit>;
     fn try_load(hash: &ObjectHash) -> Option<Commit>;
 }
 
 pub trait BlobExt {
-    fn load(hash: &ObjectHash) -> Blob;
+    fn load(hash: &ObjectHash) -> io::Result<Blob>;
     fn from_file(path: impl AsRef<Path>) -> Blob;
     fn from_lfs_file(path: impl AsRef<Path>) -> Blob;
     fn save(&self) -> std::io::Result<ObjectHash>;
@@ -86,24 +86,26 @@ pub trait BlobExt {
 }
 
 impl TreeExt for Tree {
-    /// Load a tree object by hash, panicking on missing or corrupt data.
+    /// Load a tree object by hash.
     ///
-    /// Callers that want to handle the "not found" / corruption case must use
-    /// [`TreeExt::try_load`]. The `.expect()` messages below intentionally name
-    /// the hash and operation so a panic produced through this fast-path API
-    /// stays actionable in logs / stack traces.
-    fn load(hash: &ObjectHash) -> Tree {
-        let storage = util::objects_storage();
-        let tree_data = storage.get(hash).unwrap_or_else(|err| {
-            panic!("Tree::load({hash}): failed to read object from storage: {err}")
-        });
-        Tree::from_bytes(&tree_data, *hash).unwrap_or_else(|err| {
-            panic!("Tree::load({hash}): failed to decode tree bytes: {err:?}")
+    /// A missing object, a storage read failure, or corrupt bytes returns
+    /// `Err` naming the hash. [`TreeExt::try_load`] maps those failures to `None`.
+    fn load(hash: &ObjectHash) -> io::Result<Tree> {
+        let storage = util::try_objects_storage()?;
+        let tree_data = storage.get(hash).map_err(|err| {
+            io::Error::other(format!(
+                "Tree::load({hash}): failed to read object from storage: {err}"
+            ))
+        })?;
+        Tree::from_bytes(&tree_data, *hash).map_err(|err| {
+            io::Error::other(format!(
+                "Tree::load({hash}): failed to decode tree bytes: {err:?}"
+            ))
         })
     }
 
     fn try_load(hash: &ObjectHash) -> Option<Tree> {
-        let storage = util::objects_storage();
+        let storage = util::try_objects_storage().ok()?;
         storage
             .get(hash)
             .ok()
@@ -111,7 +113,7 @@ impl TreeExt for Tree {
     }
 
     /// Get all the items in the tree recursively (to workdir path)
-    fn get_plain_items(&self) -> Vec<(PathBuf, ObjectHash)> {
+    fn get_plain_items(&self) -> io::Result<Vec<(PathBuf, ObjectHash)>> {
         let mut items = Vec::new();
         for item in self.tree_items.iter() {
             if item.mode != TreeItemMode::Tree {
@@ -133,8 +135,8 @@ impl TreeExt for Tree {
                 // Not Tree, maybe Blob, link, etc.
                 items.push((PathBuf::from(item.name.clone()), item.id));
             } else {
-                let sub_tree = Tree::load(&item.id);
-                let sub_entries = sub_tree.get_plain_items();
+                let sub_tree = Tree::load(&item.id)?;
+                let sub_entries = sub_tree.get_plain_items()?;
 
                 items.append(
                     sub_entries
@@ -145,19 +147,19 @@ impl TreeExt for Tree {
                 );
             }
         }
-        items
+        Ok(items)
     }
 
     /// Get all the items in the tree recursively with mode information
-    fn get_plain_items_with_mode(&self) -> Vec<(PathBuf, ObjectHash, TreeItemMode)> {
+    fn get_plain_items_with_mode(&self) -> io::Result<Vec<(PathBuf, ObjectHash, TreeItemMode)>> {
         let mut items = Vec::new();
         for item in self.tree_items.iter() {
             if item.mode != TreeItemMode::Tree {
                 // Not Tree, maybe Blob, link, etc.
                 items.push((PathBuf::from(item.name.clone()), item.id, item.mode));
             } else {
-                let sub_tree = Tree::load(&item.id);
-                let sub_entries = sub_tree.get_plain_items_with_mode();
+                let sub_tree = Tree::load(&item.id)?;
+                let sub_entries = sub_tree.get_plain_items_with_mode()?;
 
                 // Use extend() instead of append() to avoid intermediate allocation
                 items.extend(sub_entries.into_iter().map(|(path, hash, mode)| {
@@ -165,11 +167,11 @@ impl TreeExt for Tree {
                 }));
             }
         }
-        items
+        Ok(items)
     }
 
     /// Get all the items in the tree recursively with mode information
-    fn get_items_with_mode(&self) -> Vec<(PathBuf, ObjectHash, TreeItemMode)> {
+    fn get_items_with_mode(&self) -> io::Result<Vec<(PathBuf, ObjectHash, TreeItemMode)>> {
         let mut items = Vec::new();
         items.push((PathBuf::from("/"), self.id, TreeItemMode::Tree));
         for item in self.tree_items.iter() {
@@ -177,8 +179,8 @@ impl TreeExt for Tree {
                 // Not Tree, maybe Blob, link, etc.
                 items.push((PathBuf::from(item.name.clone()), item.id, item.mode));
             } else {
-                let sub_tree = Tree::load(&item.id);
-                let sub_entries = sub_tree.get_items_with_mode();
+                let sub_tree = Tree::load(&item.id)?;
+                let sub_entries = sub_tree.get_items_with_mode()?;
 
                 // Use extend() instead of append() to avoid intermediate allocation
                 items.extend(sub_entries.into_iter().map(|(path, hash, mode)| {
@@ -186,26 +188,31 @@ impl TreeExt for Tree {
                 }));
             }
         }
-        items
+        Ok(items)
     }
 }
 
 impl CommitExt for Commit {
-    /// Load a commit object by hash, panicking on missing or corrupt data.
-    /// Callers that need to handle the "not found" / corruption case must use
-    /// [`CommitExt::try_load`].
-    fn load(hash: &ObjectHash) -> Commit {
-        let storage = util::objects_storage();
-        let commit_data = storage.get(hash).unwrap_or_else(|err| {
-            panic!("Commit::load({hash}): failed to read object from storage: {err}")
-        });
-        Commit::from_bytes(&commit_data, *hash).unwrap_or_else(|err| {
-            panic!("Commit::load({hash}): failed to decode commit bytes: {err:?}")
+    /// Load a commit object by hash.
+    ///
+    /// A missing object, a storage read failure, or corrupt bytes returns
+    /// `Err` naming the hash. [`CommitExt::try_load`] maps those failures to `None`.
+    fn load(hash: &ObjectHash) -> io::Result<Commit> {
+        let storage = util::try_objects_storage()?;
+        let commit_data = storage.get(hash).map_err(|err| {
+            io::Error::other(format!(
+                "Commit::load({hash}): failed to read object from storage: {err}"
+            ))
+        })?;
+        Commit::from_bytes(&commit_data, *hash).map_err(|err| {
+            io::Error::other(format!(
+                "Commit::load({hash}): failed to decode commit bytes: {err:?}"
+            ))
         })
     }
 
     fn try_load(hash: &ObjectHash) -> Option<Commit> {
-        let storage = util::objects_storage();
+        let storage = util::try_objects_storage().ok()?;
         storage
             .get(hash)
             .ok()
@@ -214,14 +221,21 @@ impl CommitExt for Commit {
 }
 
 impl BlobExt for Blob {
-    /// Load a blob object by hash, panicking on missing or corrupt data.
-    fn load(hash: &ObjectHash) -> Blob {
-        let storage = util::objects_storage();
-        let blob_data = storage.get(hash).unwrap_or_else(|err| {
-            panic!("Blob::load({hash}): failed to read object from storage: {err}")
-        });
-        Blob::from_bytes(&blob_data, *hash).unwrap_or_else(|err| {
-            panic!("Blob::load({hash}): failed to decode blob bytes: {err:?}")
+    /// Load a blob object by hash.
+    ///
+    /// A missing object or a storage read failure returns `Err` naming the hash.
+    /// Blob payloads are unparsed bytes, so a readable payload does not fail decode.
+    fn load(hash: &ObjectHash) -> io::Result<Blob> {
+        let storage = util::try_objects_storage()?;
+        let blob_data = storage.get(hash).map_err(|err| {
+            io::Error::other(format!(
+                "Blob::load({hash}): failed to read object from storage: {err}"
+            ))
+        })?;
+        Blob::from_bytes(&blob_data, *hash).map_err(|err| {
+            io::Error::other(format!(
+                "Blob::load({hash}): failed to decode blob bytes: {err:?}"
+            ))
         })
     }
 
@@ -257,7 +271,7 @@ impl BlobExt for Blob {
     }
 
     fn save(&self) -> std::io::Result<ObjectHash> {
-        let storage = util::objects_storage();
+        let storage = util::objects_storage()?;
         let id = self.id;
         match storage.exist_checked(&id) {
             Ok(false) => {
@@ -277,10 +291,44 @@ impl BlobExt for Blob {
 
 #[cfg(test)]
 mod tests {
+    use std::path::Path;
+
+    use git_internal::internal::object::{tree::TreeItem, types::ObjectType};
     use serial_test::serial;
 
     use super::*;
     use crate::utils::test::{ChangeDirGuard, setup_with_new_libra_in};
+
+    fn with_repo<T>(body: impl FnOnce(&Path) -> T) -> T {
+        let tmp = tempfile::tempdir().expect("tmp");
+        let _guard = ChangeDirGuard::new(tmp.path());
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("runtime");
+        runtime.block_on(setup_with_new_libra_in(tmp.path()));
+        body(tmp.path())
+    }
+
+    fn plant_unindexed_pack(repo: &Path) {
+        let pack_dir = repo.join(".libra/objects/pack");
+        std::fs::create_dir_all(&pack_dir).expect("pack dir");
+        std::fs::write(pack_dir.join("orphan.pack"), b"not-a-pack").expect("unindexed pack");
+    }
+
+    fn parent_of(child: ObjectHash) -> Tree {
+        Tree {
+            id: ObjectHash::from_type_and_data(ObjectType::Tree, b"parent-tree"),
+            tree_items: vec![TreeItem::new(TreeItemMode::Tree, child, "sub".into())],
+        }
+    }
+
+    fn write_loose_garbage(repo: &Path, hash: &ObjectHash) {
+        let hex = hash.to_string();
+        let path = repo.join(".libra/objects").join(&hex[..2]).join(&hex[2..]);
+        std::fs::create_dir_all(path.parent().expect("shard parent")).expect("shard");
+        std::fs::write(&path, b"not-a-loose-object").expect("garbage loose object");
+    }
 
     #[test]
     #[serial(cwd, env)]
@@ -310,5 +358,155 @@ mod tests {
             error.to_string().contains("no complete index"),
             "unexpected error: {error}"
         );
+    }
+
+    #[test]
+    #[serial(cwd, env)]
+    fn tree_load_returns_io_result_on_storage_err() {
+        with_repo(|repo| {
+            plant_unindexed_pack(repo);
+            let hash = ObjectHash::from_type_and_data(ObjectType::Tree, b"tree-storage-err");
+            let error = Tree::load(&hash).expect_err("storage read must return Err");
+            let rendered = error.to_string();
+            assert!(rendered.contains(&hash.to_string()), "{rendered}");
+            assert!(rendered.contains("Tree::load"), "{rendered}");
+        });
+    }
+
+    #[test]
+    #[serial(cwd, env)]
+    fn commit_load_returns_io_result_on_storage_err() {
+        with_repo(|repo| {
+            plant_unindexed_pack(repo);
+            let hash = ObjectHash::from_type_and_data(ObjectType::Commit, b"commit-storage-err");
+            let error = Commit::load(&hash).expect_err("storage read must return Err");
+            let rendered = error.to_string();
+            assert!(rendered.contains(&hash.to_string()), "{rendered}");
+            assert!(rendered.contains("Commit::load"), "{rendered}");
+        });
+    }
+
+    #[test]
+    #[serial(cwd, env)]
+    fn blob_load_returns_io_result_on_storage_err() {
+        with_repo(|repo| {
+            plant_unindexed_pack(repo);
+            let hash = ObjectHash::from_type_and_data(ObjectType::Blob, b"blob-storage-err");
+            let error = Blob::load(&hash).expect_err("storage read must return Err");
+            let rendered = error.to_string();
+            assert!(rendered.contains(&hash.to_string()), "{rendered}");
+            assert!(rendered.contains("Blob::load"), "{rendered}");
+        });
+    }
+
+    #[test]
+    #[serial(cwd, env)]
+    fn get_plain_items_propagates_subtree_load_err() {
+        with_repo(|repo| {
+            plant_unindexed_pack(repo);
+            let child = ObjectHash::from_type_and_data(ObjectType::Tree, b"subtree-plain");
+            let error = parent_of(child)
+                .get_plain_items()
+                .expect_err("subtree load must return Err");
+            assert!(error.to_string().contains(&child.to_string()), "{error}");
+        });
+    }
+
+    #[test]
+    #[serial(cwd, env)]
+    fn get_plain_items_with_mode_propagates_subtree_load_err() {
+        with_repo(|repo| {
+            plant_unindexed_pack(repo);
+            let child = ObjectHash::from_type_and_data(ObjectType::Tree, b"subtree-mode");
+            let error = parent_of(child)
+                .get_plain_items_with_mode()
+                .expect_err("subtree load must return Err");
+            assert!(error.to_string().contains(&child.to_string()), "{error}");
+        });
+    }
+
+    #[test]
+    #[serial(cwd, env)]
+    fn get_items_with_mode_propagates_subtree_load_err() {
+        with_repo(|repo| {
+            plant_unindexed_pack(repo);
+            let child = ObjectHash::from_type_and_data(ObjectType::Tree, b"subtree-items");
+            let error = parent_of(child)
+                .get_items_with_mode()
+                .expect_err("subtree load must return Err");
+            assert!(error.to_string().contains(&child.to_string()), "{error}");
+        });
+    }
+
+    #[test]
+    #[serial(cwd, env)]
+    fn tree_load_invalid_bytes_returns_err_not_panic() {
+        with_repo(|_repo| {
+            let hash = ObjectHash::from_type_and_data(ObjectType::Tree, b"invalid-tree");
+            crate::utils::util::try_objects_storage()
+                .expect("storage")
+                .put(&hash, b"not a tree", ObjectType::Tree)
+                .expect("store invalid tree bytes");
+            let error = Tree::load(&hash).expect_err("corrupt tree bytes must return Err");
+            let rendered = error.to_string();
+            assert!(rendered.contains(&hash.to_string()), "{rendered}");
+            assert!(
+                rendered.contains("failed to decode tree bytes"),
+                "{rendered}"
+            );
+        });
+    }
+
+    #[test]
+    #[serial(cwd, env)]
+    fn commit_load_invalid_bytes_returns_err_not_panic() {
+        with_repo(|_repo| {
+            let hash = ObjectHash::from_type_and_data(ObjectType::Commit, b"invalid-commit");
+            crate::utils::util::try_objects_storage()
+                .expect("storage")
+                .put(&hash, b"not a commit", ObjectType::Commit)
+                .expect("store invalid commit bytes");
+            let error = Commit::load(&hash).expect_err("corrupt commit bytes must return Err");
+            let rendered = error.to_string();
+            assert!(rendered.contains(&hash.to_string()), "{rendered}");
+            assert!(
+                rendered.contains("failed to decode commit bytes"),
+                "{rendered}"
+            );
+        });
+    }
+
+    #[test]
+    #[serial(cwd, env)]
+    fn blob_load_invalid_bytes_returns_err_not_panic() {
+        with_repo(|repo| {
+            let hash = ObjectHash::from_type_and_data(ObjectType::Blob, b"invalid-blob");
+            write_loose_garbage(repo, &hash);
+            let error = Blob::load(&hash).expect_err("invalid blob bytes must return Err");
+            let rendered = error.to_string();
+            assert!(rendered.contains(&hash.to_string()), "{rendered}");
+            assert!(rendered.contains("Blob::load"), "{rendered}");
+        });
+    }
+
+    #[test]
+    #[serial(cwd, env)]
+    fn get_items_with_mode_corrupt_subtree_returns_err() {
+        with_repo(|_repo| {
+            let child = ObjectHash::from_type_and_data(ObjectType::Tree, b"corrupt-subtree");
+            crate::utils::util::try_objects_storage()
+                .expect("storage")
+                .put(&child, b"not-a-tree", ObjectType::Tree)
+                .expect("store corrupt subtree");
+            let error = parent_of(child)
+                .get_items_with_mode()
+                .expect_err("corrupt subtree must return Err");
+            let rendered = error.to_string();
+            assert!(rendered.contains(&child.to_string()), "{rendered}");
+            assert!(
+                rendered.contains("failed to decode tree bytes"),
+                "{rendered}"
+            );
+        });
     }
 }

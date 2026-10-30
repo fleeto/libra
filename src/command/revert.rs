@@ -250,6 +250,12 @@ impl RevertError {
     }
 }
 
+impl From<std::io::Error> for RevertError {
+    fn from(error: std::io::Error) -> Self {
+        RevertError::LoadObject(error.to_string())
+    }
+}
+
 impl From<RevertError> for CliError {
     fn from(error: RevertError) -> Self {
         let stable_code = error.stable_code();
@@ -1375,26 +1381,26 @@ async fn revert_single_commit(
         load_object(&parent_commit.tree_id).map_err(|e| RevertError::LoadObject(e.to_string()))?;
 
     let mut current_files: std::collections::HashMap<_, _> =
-        current_tree.get_plain_items().into_iter().collect();
+        current_tree.get_plain_items()?.into_iter().collect();
     let reverted_files: std::collections::HashMap<_, _> =
-        reverted_tree.get_plain_items().into_iter().collect();
+        reverted_tree.get_plain_items()?.into_iter().collect();
     let parent_files: std::collections::HashMap<_, _> =
-        parent_tree.get_plain_items().into_iter().collect();
+        parent_tree.get_plain_items()?.into_iter().collect();
     // Modes travel with the hashes: the revert result tree and the materialized
     // worktree must keep each entry's executable/symlink mode (plan issues/470
     // FM-02) instead of collapsing everything to a plain blob.
     let mut current_modes: std::collections::HashMap<PathBuf, TreeItemMode> = current_tree
-        .get_plain_items_with_mode()
+        .get_plain_items_with_mode()?
         .into_iter()
         .map(|(path, _, mode)| (path, mode))
         .collect();
     let reverted_modes: std::collections::HashMap<PathBuf, TreeItemMode> = reverted_tree
-        .get_plain_items_with_mode()
+        .get_plain_items_with_mode()?
         .into_iter()
         .map(|(path, _, mode)| (path, mode))
         .collect();
     let parent_modes: std::collections::HashMap<PathBuf, TreeItemMode> = parent_tree
-        .get_plain_items_with_mode()
+        .get_plain_items_with_mode()?
         .into_iter()
         .map(|(path, _, mode)| (path, mode))
         .collect();
@@ -1748,7 +1754,7 @@ fn rebuild_index_from_tree(
             })?;
             rebuild_index_from_tree(&subtree, index, full_path_str)?;
         } else {
-            let blob = git_internal::internal::object::blob::Blob::load(&item.id);
+            let blob = git_internal::internal::object::blob::Blob::load(&item.id)?;
             let mut entry = IndexEntry::new_from_blob(
                 full_path
                     .to_str()
@@ -1826,7 +1832,7 @@ fn reset_workdir_safely(current_index: &Index, new_index: &Index) -> Result<(), 
     for path_buf in new_index.tracked_files() {
         let path_str = path_to_utf8(&path_buf)?;
         if let Some(entry) = new_index.get(path_str, 0) {
-            let blob = git_internal::internal::object::blob::Blob::load(&entry.hash);
+            let blob = git_internal::internal::object::blob::Blob::load(&entry.hash)?;
             let target_path = workdir.join(path_str);
             if entry.mode & 0o170000 == 0o120000 {
                 crate::utils::worktree_blob::write_worktree_symlink(&target_path, &blob.data)

@@ -121,6 +121,10 @@ pub enum RestoreError {
     SymlinkUnsupported(String),
     #[error("{0}")]
     InvalidPathspec(String),
+    /// Object-store construction or a tree read failed. The string is the
+    /// I/O error, which names the storage path.
+    #[error("{0}")]
+    Storage(String),
 }
 
 /// Human label for a conflict stage used by [`RestoreError::MissingStageVersion`].
@@ -155,7 +159,14 @@ impl RestoreError {
             Self::UnsupportedConflictStyle(_) => StableErrorCode::CliInvalidArguments,
             Self::SymlinkUnsupported(_) => StableErrorCode::Unsupported,
             Self::InvalidPathspec(_) => StableErrorCode::CliInvalidTarget,
+            Self::Storage(_) => StableErrorCode::IoReadFailed,
         }
+    }
+}
+
+impl From<std::io::Error> for RestoreError {
+    fn from(error: std::io::Error) -> Self {
+        RestoreError::Storage(error.to_string())
     }
 }
 
@@ -489,7 +500,7 @@ async fn run_restore(mut args: RestoreArgs) -> Result<RestoreOutput, RestoreErro
         });
     }
 
-    let storage = util::objects_storage();
+    let storage = util::objects_storage()?;
     let mut target_blobs = resolve_target_blobs(source.as_deref(), staged, &storage).await?;
 
     // Unmerged guard: a plain restore must not silently act on a matched
@@ -624,7 +635,7 @@ async fn resolve_target_blobs(
                 .tree_id;
             Ok(load_object::<Tree>(&tree_id)
                 .map_err(|_| RestoreError::ReadObject)?
-                .get_plain_items_with_mode()
+                .get_plain_items_with_mode()?
                 .into_iter()
                 .map(|(path, hash, mode)| (path, RestoreTarget::new(hash, Some(mode))))
                 .collect())
@@ -758,7 +769,7 @@ fn restore_index_tracked(
             }
         }
         if !needed.is_empty() {
-            match util::objects_storage().decoded_object_sizes(&needed) {
+            match util::objects_storage()?.decoded_object_sizes(&needed) {
                 Ok(sizes) => {
                     let mut cache: HashMap<ObjectHash, u32> = HashMap::with_capacity(needed.len());
                     for (hash, size) in needed.into_iter().zip(sizes) {
@@ -849,7 +860,7 @@ pub async fn execute_checked(args: RestoreArgs) -> io::Result<()> {
         source = Some(HEAD.to_string());
     }
 
-    let storage = util::objects_storage();
+    let storage = util::objects_storage()?;
     let target_commit: Option<ObjectHash> = match source {
         None => {
             assert!(!staged);
@@ -899,9 +910,9 @@ pub async fn execute_checked(args: RestoreArgs) -> io::Result<()> {
                     .collect()
             }
             (Some(_), Some(commit)) => {
-                let tree_id = Commit::load(&commit).tree_id;
-                let tree = Tree::load(&tree_id);
-                tree.get_plain_items_with_mode()
+                let tree_id = Commit::load(&commit)?.tree_id;
+                let tree = Tree::load(&tree_id)?;
+                tree.get_plain_items_with_mode()?
                     .into_iter()
                     .map(|(path, hash, mode)| (path, RestoreTarget::new(hash, Some(mode))))
                     .collect()
@@ -982,7 +993,7 @@ async fn execute_checked_typed_at(
         source = Some(HEAD.to_string());
     }
 
-    let storage = util::objects_storage();
+    let storage = util::objects_storage()?;
     let target_blobs: Vec<(PathBuf, RestoreTarget)> = match source.as_ref() {
         None => {
             if staged {
@@ -1015,7 +1026,7 @@ async fn execute_checked_typed_at(
                 .tree_id;
             load_object::<Tree>(&tree_id)
                 .map_err(|_| RestoreError::ReadObject)?
-                .get_plain_items_with_mode()
+                .get_plain_items_with_mode()?
                 .into_iter()
                 .map(|(path, hash, mode)| (path, RestoreTarget::new(hash, Some(mode))))
                 .collect()
@@ -1709,7 +1720,7 @@ pub(crate) async fn preflight_worktree_restore_to_commit(
         .tree_id;
     let target_blobs: Vec<(PathBuf, RestoreTarget)> = load_object::<Tree>(&tree_id)
         .map_err(|_| RestoreError::ReadObject)?
-        .get_plain_items_with_mode()
+        .get_plain_items_with_mode()?
         .into_iter()
         .map(|(path, hash, mode)| (path, RestoreTarget::new(hash, Some(mode))))
         .collect();
@@ -1884,7 +1895,7 @@ fn write_restore_symlink(path: &Path, _target: &[u8]) -> Result<(), RestoreError
 /// If blob is an LFS pointer, download the actual file from LFS server.
 /// - `path` : to workdir
 pub async fn restore_to_file(hash: &ObjectHash, path: &PathBuf) -> io::Result<()> {
-    let blob = Blob::load(hash);
+    let blob = Blob::load(hash)?;
     let path_abs = util::workdir_to_absolute(path);
     if let Some(parent) = path_abs.parent() {
         fs::create_dir_all(parent)?;
@@ -1995,7 +2006,7 @@ pub fn restore_index(filter: &[PathBuf], target_blobs: &[(PathBuf, ObjectHash)])
         let path_str = path_to_utf8(path)?;
         if !index.tracked(path_str, 0) {
             if let Some(target) = target_blobs.get(path) {
-                let blob = Blob::load(&target.hash);
+                let blob = Blob::load(&target.hash)?;
                 crate::utils::index_ext::update_preserving_flags(
                     &mut index,
                     index_entry_from_target(path_str.to_string(), *target, blob.data.len() as u32),
@@ -2008,7 +2019,7 @@ pub fn restore_index(filter: &[PathBuf], target_blobs: &[(PathBuf, ObjectHash)])
             }
         } else if let Some(target) = target_blobs.get(path) {
             if !index.verify_hash(path_str, 0, &target.hash) {
-                let blob = Blob::load(&target.hash);
+                let blob = Blob::load(&target.hash)?;
                 crate::utils::index_ext::update_preserving_flags(
                     &mut index,
                     index_entry_from_target(path_str.to_string(), *target, blob.data.len() as u32),

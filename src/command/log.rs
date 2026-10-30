@@ -1714,7 +1714,7 @@ async fn commit_touches_path_follow(
 ) -> Result<Option<PathBuf>, CliError> {
     let tree = load_object::<Tree>(&commit.tree_id)
         .map_err(|e| log_repo_corrupt_error(format!("failed to load tree object: {e}")))?;
-    let current_items: HashMap<PathBuf, ObjectHash> = tree.get_plain_items().into_iter().collect();
+    let current_items: HashMap<PathBuf, ObjectHash> = tree.get_plain_items()?.into_iter().collect();
     let current_blob = current_items.get(target).copied();
 
     let Some(parent_id) = first_history_parent(commit)? else {
@@ -1726,7 +1726,7 @@ async fn commit_touches_path_follow(
     let parent_tree = load_object::<Tree>(&parent_commit.tree_id)
         .map_err(|e| log_repo_corrupt_error(format!("failed to load parent tree: {e}")))?;
     let parent_items: HashMap<PathBuf, ObjectHash> =
-        parent_tree.get_plain_items().into_iter().collect();
+        parent_tree.get_plain_items()?.into_iter().collect();
     let parent_blob = parent_items.get(target).copied();
 
     match (current_blob, parent_blob) {
@@ -1815,7 +1815,7 @@ async fn commit_affects_line_range(
     let _ = ranges;
     let tree = load_object::<Tree>(&commit.tree_id)
         .map_err(|e| log_repo_corrupt_error(format!("failed to load tree object: {e}")))?;
-    let current_items: HashMap<PathBuf, ObjectHash> = tree.get_plain_items().into_iter().collect();
+    let current_items: HashMap<PathBuf, ObjectHash> = tree.get_plain_items()?.into_iter().collect();
 
     let Some(current_hash) = current_items.get(path).copied() else {
         // File deleted; conservatively include if any range existed before.
@@ -1831,7 +1831,7 @@ async fn commit_affects_line_range(
     let parent_tree = load_object::<Tree>(&parent_commit.tree_id)
         .map_err(|e| log_repo_corrupt_error(format!("failed to load parent tree: {e}")))?;
     let parent_items: HashMap<PathBuf, ObjectHash> =
-        parent_tree.get_plain_items().into_iter().collect();
+        parent_tree.get_plain_items()?.into_iter().collect();
 
     let parent_hash = parent_items.get(path).copied();
     if parent_hash != Some(current_hash) {
@@ -2532,7 +2532,7 @@ fn commit_changes_string_count(commit: &Commit, needle: &str) -> Result<bool, Cl
     fn load_tree_blobs(tree_id: &ObjectHash) -> Result<HashMap<PathBuf, ObjectHash>, CliError> {
         let tree = load_object::<Tree>(tree_id)
             .map_err(|e| log_repo_corrupt_error(format!("failed to load tree {tree_id}: {e}")))?;
-        Ok(tree.get_plain_items().into_iter().collect())
+        Ok(tree.get_plain_items()?.into_iter().collect())
     }
 
     let new_blobs = load_tree_blobs(&commit.tree_id)?;
@@ -2601,7 +2601,7 @@ fn commit_diff_matches_regex(commit: &Commit, regex: &regex::Regex) -> Result<bo
     fn load_tree_blobs(tree_id: &ObjectHash) -> Result<HashMap<PathBuf, ObjectHash>, CliError> {
         let tree = load_object::<Tree>(tree_id)
             .map_err(|e| log_repo_corrupt_error(format!("failed to load tree {tree_id}: {e}")))?;
-        Ok(tree.get_plain_items().into_iter().collect())
+        Ok(tree.get_plain_items()?.into_iter().collect())
     }
     fn blob_lines(hash: &ObjectHash) -> Result<Vec<String>, CliError> {
         let blob = load_object::<Blob>(hash)
@@ -2810,7 +2810,7 @@ async fn changed_files_for_commit_with(
 ) -> Result<Vec<FileChange>, CliError> {
     let tree = load_object::<Tree>(&commit.tree_id)
         .map_err(|e| log_repo_corrupt_error(format!("failed to load tree object: {e}")))?;
-    let new_blobs: Vec<(PathBuf, ObjectHash)> = tree.get_plain_items();
+    let new_blobs: Vec<(PathBuf, ObjectHash)> = tree.get_plain_items()?;
 
     let old_blobs: Vec<(PathBuf, ObjectHash)> = if let Some(parent) = first_history_parent(commit)?
     {
@@ -2818,7 +2818,7 @@ async fn changed_files_for_commit_with(
             .map_err(|e| log_repo_corrupt_error(format!("failed to load parent commit: {e}")))?;
         let parent_tree = load_object::<Tree>(&parent_commit.tree_id)
             .map_err(|e| log_repo_corrupt_error(format!("failed to load parent tree: {e}")))?;
-        parent_tree.get_plain_items()
+        parent_tree.get_plain_items()?
     } else {
         Vec::new()
     };
@@ -2947,7 +2947,7 @@ pub async fn compute_commit_stat(
 ) -> Result<Vec<FileStat>, CliError> {
     let tree = load_object::<Tree>(&commit.tree_id)
         .map_err(|e| log_repo_corrupt_error(format!("failed to load tree object: {e}")))?;
-    let new_blobs: Vec<(PathBuf, ObjectHash)> = tree.get_plain_items();
+    let new_blobs: Vec<(PathBuf, ObjectHash)> = tree.get_plain_items()?;
 
     let old_blobs: Vec<(PathBuf, ObjectHash)> = if let Some(parent) = first_history_parent(commit)?
     {
@@ -2955,7 +2955,7 @@ pub async fn compute_commit_stat(
             .map_err(|e| log_repo_corrupt_error(format!("failed to load parent commit: {e}")))?;
         let parent_tree = load_object::<Tree>(&parent_commit.tree_id)
             .map_err(|e| log_repo_corrupt_error(format!("failed to load parent tree: {e}")))?;
-        parent_tree.get_plain_items()
+        parent_tree.get_plain_items()?
     } else {
         Vec::new()
     };
@@ -3240,7 +3240,7 @@ pub(crate) async fn generate_diff_with_options(
     // new_blobs from commit tree
     let tree = load_object::<Tree>(&commit.tree_id)
         .map_err(|e| log_repo_corrupt_error(format!("failed to load tree object: {e}")))?;
-    let new_blobs: Vec<(PathBuf, ObjectHash)> = tree.get_plain_items();
+    let new_blobs: Vec<(PathBuf, ObjectHash)> = tree.get_plain_items()?;
 
     // old_blobs from first parent if exists
     let old_blobs: Vec<(PathBuf, ObjectHash)> = if let Some(parent) = first_history_parent(commit)?
@@ -3249,7 +3249,7 @@ pub(crate) async fn generate_diff_with_options(
             .map_err(|e| log_repo_corrupt_error(format!("failed to load parent commit: {e}")))?;
         let parent_tree = load_object::<Tree>(&parent_commit.tree_id)
             .map_err(|e| log_repo_corrupt_error(format!("failed to load parent tree: {e}")))?;
-        parent_tree.get_plain_items()
+        parent_tree.get_plain_items()?
     } else {
         Vec::new()
     };

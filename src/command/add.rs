@@ -263,6 +263,16 @@ pub enum AddError {
     /// The shared Git-style pathspec parser rejected the user input.
     #[error("{source}")]
     Pathspec { source: PathspecError },
+    /// Object-store construction or a tree read failed. The string is the
+    /// I/O error, which names the storage path.
+    #[error("{0}")]
+    Storage(String),
+}
+
+impl From<std::io::Error> for AddError {
+    fn from(error: std::io::Error) -> Self {
+        AddError::Storage(error.to_string())
+    }
 }
 
 impl From<AddError> for CliError {
@@ -324,6 +334,9 @@ impl From<AddError> for CliError {
             AddError::Pathspec { .. } => CliError::fatal(error.to_string())
                 .with_stable_code(StableErrorCode::CliInvalidTarget)
                 .with_hint("use supported pathspec magic: top, exclude, icase, literal, glob"),
+            AddError::Storage(_) => {
+                CliError::fatal(error.to_string()).with_stable_code(StableErrorCode::IoReadFailed)
+            }
         }
     }
 }
@@ -579,10 +592,10 @@ pub async fn execute_safe(mut args: AddArgs, output: &OutputConfig) -> CliResult
     // ADR-OI-04: accumulate marker publication for the whole staging pass.
     // `run_add` flushes right before each index write so durable markers
     // never lag behind index content; the end flush publishes any remainder.
-    util::objects_storage().begin_object_index_batch();
+    util::objects_storage()?.begin_object_index_batch();
     let result = match run_add(&args).await {
         Ok(result) => {
-            let batch_storage = util::objects_storage();
+            let batch_storage = util::objects_storage()?;
             let stored_objects = batch_storage.pending_object_index_batch_count();
             batch_storage.end_object_index_batch().map_err(|source| {
                 AddError::ObjectIndexBatchFlush {
@@ -593,7 +606,7 @@ pub async fn execute_safe(mut args: AddArgs, output: &OutputConfig) -> CliResult
             result
         }
         Err(error) => {
-            util::objects_storage().abort_object_index_batch();
+            util::objects_storage()?.abort_object_index_batch();
             return Err(error);
         }
     };
@@ -1009,7 +1022,7 @@ fn worktree_index_mode(path: &Path) -> Option<u32> {
 }
 
 fn load_index_blob_bytes(hash: &ObjectHash, path: &str) -> Result<Vec<u8>, AddError> {
-    let storage = util::objects_storage();
+    let storage = util::objects_storage()?;
     let data = storage.get(hash).map_err(|source| AddError::ObjectSave {
         path: PathBuf::from(path),
         source: io::Error::other(source.to_string()),
@@ -1327,7 +1340,7 @@ async fn run_add_patch(
             }
         }
     }
-    let batch_storage = util::objects_storage();
+    let batch_storage = util::objects_storage()?;
     let stored_objects = batch_storage.pending_object_index_batch_count();
     batch_storage
         .flush_object_index_batch()
@@ -1454,7 +1467,7 @@ async fn run_add_resolved(
             }
         }
     }
-    let batch_storage = util::objects_storage();
+    let batch_storage = util::objects_storage()?;
     let stored_objects = batch_storage.pending_object_index_batch_count();
     batch_storage
         .flush_object_index_batch()
@@ -1868,7 +1881,7 @@ pub async fn run_add(args: &AddArgs) -> CliResult<AddOutput> {
                 .iter()
                 .map(|f| f.display().to_string())
                 .collect();
-            let batch_storage = util::objects_storage();
+            let batch_storage = util::objects_storage()?;
             let stored_objects = batch_storage.pending_object_index_batch_count();
             batch_storage.flush_object_index_batch().map_err(|source| {
                 AddError::ObjectIndexBatchFlush {
@@ -2174,7 +2187,7 @@ pub async fn run_add(args: &AddArgs) -> CliResult<AddOutput> {
         )?;
     }
 
-    let batch_storage = util::objects_storage();
+    let batch_storage = util::objects_storage()?;
     let stored_objects = batch_storage.pending_object_index_batch_count();
     batch_storage
         .flush_object_index_batch()

@@ -23,7 +23,7 @@ fn registry_contains_index_sequencer_and_sparse_facets() {
     };
     let registry = registry_for_scope(
         scope,
-        ClientStorage::init_local(root.path().join("objects")),
+        ClientStorage::try_init_local(root.path().join("objects")).expect("storage"),
     )
     .unwrap();
     assert_eq!(registry.len(), 3);

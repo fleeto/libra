@@ -2028,9 +2028,9 @@ async fn ensure_agent_capture_objects_remote(
     // verified; an empty checkpoint projection needs no local storage.
     if !required.is_empty() {
         let local_storage =
-            LocalStorage::new(path::try_objects().map_err(|error| {
+            LocalStorage::try_new(path::try_objects().map_err(|error| {
                 local_agent_capture_failure("resolve local object store", error)
-            })?);
+            })?)?;
         let verification_rows = required.iter().zip(&hashes).collect::<Vec<_>>();
         for page in agent_capture_object_verification_batches(&verification_rows) {
             // Full content verification remains mandatory, but a fixed-size page

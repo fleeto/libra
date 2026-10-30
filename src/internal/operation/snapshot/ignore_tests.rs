@@ -65,7 +65,7 @@ impl Fixture {
                     listing::ordered_listing,
                 ),
             )),
-            storage: ClientStorage::init_local(storage.join("objects")),
+            storage: ClientStorage::try_init_local(storage.join("objects")).expect("storage"),
         }
     }
 }

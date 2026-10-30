@@ -119,7 +119,7 @@ pub async fn execute_safe(args: HydrateArgs, output: &OutputConfig) -> CliResult
             .with_stable_code(StableErrorCode::RepoStateInvalid)
     })?;
     let tree_map: std::collections::HashMap<String, (ObjectHash, TreeItemMode)> = tree
-        .get_plain_items_with_mode()
+        .get_plain_items_with_mode()?
         .into_iter()
         .map(|(p, oid, mode)| (p.to_string_lossy().replace('\\', "/"), (oid, mode)))
         .collect();
@@ -166,7 +166,7 @@ pub async fn execute_safe(args: HydrateArgs, output: &OutputConfig) -> CliResult
     let sparse_active = sparse.is_active() && !args.ignore_sparse;
 
     let workdir = util::working_dir();
-    let storage = ClientStorage::init(path::objects());
+    let storage = ClientStorage::try_init(path::objects())?;
 
     // §C.4.3 AntiRoot: an obliterated object must never be re-materialized.
     // `storage.get` resolves through alternates and the durable tier, either

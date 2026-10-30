@@ -241,7 +241,7 @@ pub fn get_oid_by_path(path: &str) -> Option<String> {
         }
     };
     let hash = index.get_hash(path, 0)?;
-    let storage = util::objects_storage();
+    let storage = util::objects_storage().ok()?;
     let data = match storage.get(&hash) {
         Ok(data) => data,
         Err(err) => {

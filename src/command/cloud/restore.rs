@@ -283,7 +283,7 @@ pub(crate) async fn run_cloud_restore(args: RestoreArgs) -> CloudResult<CloudRes
 
     let r2_storage = create_r2_storage(&repo_id).await?;
     let objects_path = path::objects();
-    let local_storage = LocalStorage::new(objects_path);
+    let local_storage = LocalStorage::try_new(objects_path)?;
 
     let object_report =
         restore_indexed_objects_from_remote(&indexes, &r2_storage, &local_storage, repository_kind)
@@ -474,7 +474,7 @@ pub(crate) async fn execute_restore(args: RestoreArgs) -> CloudResult<()> {
     // Download objects from R2
     let r2_storage = create_r2_storage(&repo_id).await?;
     let objects_path = path::objects();
-    let local_storage = LocalStorage::new(objects_path);
+    let local_storage = LocalStorage::try_new(objects_path)?;
 
     let report =
         restore_indexed_objects_from_remote(&indexes, &r2_storage, &local_storage, repository_kind)

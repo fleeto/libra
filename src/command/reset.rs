@@ -831,6 +831,16 @@ impl ResetError {
     }
 }
 
+impl From<std::io::Error> for ResetError {
+    fn from(error: std::io::Error) -> Self {
+        ResetError::ObjectLoad {
+            kind: "object",
+            object_id: "storage".to_string(),
+            detail: error.to_string(),
+        }
+    }
+}
+
 impl From<ResetError> for CliError {
     fn from(error: ResetError) -> Self {
         match error {
@@ -2367,7 +2377,7 @@ async fn reset_working_directory_to_commit(
     // would look "removed" and the loop below would try to `remove_file` the
     // submodule DIRECTORY (ADR-MG-01: submodule working trees are not Libra's
     // to delete).
-    let target_files = tree.get_plain_items_with_mode();
+    let target_files = tree.get_plain_items_with_mode()?;
     let target_files_set: HashSet<_> = target_files
         .iter()
         .map(|(path, _, _)| path.clone())
@@ -2468,7 +2478,7 @@ fn rebuild_index_from_tree_typed(
                 // Add file to index - but don't modify working directory files
                 // Use the blob hash from the tree, not from working directory
                 // Get blob size for IndexEntry
-                let blob = git_internal::internal::object::blob::Blob::load(&item.id);
+                let blob = git_internal::internal::object::blob::Blob::load(&item.id)?;
 
                 // Create IndexEntry with the tree's blob hash
                 let mut entry =
@@ -2844,7 +2854,7 @@ fn tracked_paths_from_commit(commit_id: &ObjectHash) -> Result<HashSet<PathBuf>,
     let tree: Tree = load_object(&commit.tree_id)
         .map_err(|e| object_load_error("tree", commit.tree_id.to_string(), e.to_string()))?;
     Ok(tree
-        .get_plain_items()
+        .get_plain_items()?
         .into_iter()
         .map(|(path, _)| path)
         .collect())

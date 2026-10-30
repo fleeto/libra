@@ -198,7 +198,7 @@ async fn seed_checkpoint_commit(
     created_at: i64,
 ) -> String {
     let repo_path = repo.join(".libra");
-    let storage = Arc::new(ClientStorage::init(repo_path.join("objects")));
+    let storage = Arc::new(ClientStorage::try_init(repo_path.join("objects")).expect("storage"));
     let history = HistoryManager::new_with_ref(
         storage,
         repo_path.clone(),

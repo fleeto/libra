@@ -5466,10 +5466,12 @@ pub(crate) mod tests {
                         marker.cleanup_pending,
                         "failed append with unpublished objects must keep recoverable ownership"
                     );
-                    let storage =
-                        std::sync::Arc::new(crate::utils::client_storage::ClientStorage::init(
+                    let storage = std::sync::Arc::new(
+                        crate::utils::client_storage::ClientStorage::try_init(
                             fixture.dir.path().join("objects"),
-                        ));
+                        )
+                        .expect("storage"),
+                    );
                     let manager = crate::internal::ai::history::HistoryManager::for_traces(
                         storage,
                         fixture.dir.path().to_path_buf(),
@@ -6980,9 +6982,12 @@ pub(crate) mod tests {
             .unwrap(),
             StoredReasoningMap::LegacyAbsent
         ));
-        let storage = std::sync::Arc::new(crate::utils::client_storage::ClientStorage::init(
-            fixture.dir.path().join("objects"),
-        ));
+        let storage = std::sync::Arc::new(
+            crate::utils::client_storage::ClientStorage::try_init(
+                fixture.dir.path().join("objects"),
+            )
+            .expect("storage"),
+        );
         let manager = crate::internal::ai::history::HistoryManager::for_traces(
             storage,
             fixture.dir.path().to_path_buf(),

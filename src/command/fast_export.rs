@@ -371,7 +371,7 @@ async fn load_export_tags() -> CliResult<Vec<ExportTag>> {
                 .with_exit_code(128)
                 .with_stable_code(StableErrorCode::IoReadFailed)
         })?;
-    let storage = util::objects_storage();
+    let storage = util::objects_storage()?;
     let mut tags = Vec::new();
     for row in rows {
         let ref_name = row.name.ok_or_else(|| {

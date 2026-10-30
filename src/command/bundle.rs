@@ -358,7 +358,7 @@ fn collect_reachable_object(
     entries: &mut Vec<Entry>,
     raw_object_bytes: &mut u64,
 ) -> CliResult<()> {
-    let storage = util::objects_storage();
+    let storage = util::objects_storage()?;
     let mut stack = vec![*root];
     while let Some(oid) = stack.pop() {
         if seen.contains(&oid) {
@@ -661,7 +661,7 @@ fn unbundle(file: &Path) -> CliResult<()> {
         }
     }
 
-    let storage = util::objects_storage();
+    let storage = util::objects_storage()?;
     for (oid, name) in &header.heads {
         let oid = crate::internal::object_format::parse_repo_oid(oid).map_err(|error| {
             CliError::fatal(format!(
@@ -777,7 +777,7 @@ pub(crate) fn read_bundle_bounded(file: &Path, exit_code: i32) -> CliResult<Vec<
 }
 
 pub(crate) fn verify_prerequisites(header: &BundleHeader, exit_code: i32) -> CliResult<()> {
-    let storage = util::objects_storage();
+    let storage = util::objects_storage()?;
     let mut missing = Vec::new();
     for (oid, _) in &header.prerequisites {
         match crate::internal::object_format::parse_repo_oid(oid) {

@@ -11447,7 +11447,7 @@ mod tests {
             .try_get_by("current_checkpoint_id")
             .expect("current checkpoint");
         let manager = HistoryManager::new_with_ref(
-            Arc::new(ClientStorage::init(storage_root.join("objects"))),
+            Arc::new(ClientStorage::try_init(storage_root.join("objects")).expect("storage")),
             storage_root.clone(),
             Arc::new(conn.clone()),
             crate::internal::branch::TRACES_BRANCH,
@@ -11619,7 +11619,7 @@ mod tests {
             .try_get_by("current_checkpoint_id")
             .expect("current checkpoint");
         let manager = HistoryManager::new_with_ref(
-            Arc::new(ClientStorage::init(storage_root.join("objects"))),
+            Arc::new(ClientStorage::try_init(storage_root.join("objects")).expect("storage")),
             storage_root,
             Arc::new(conn),
             crate::internal::branch::TRACES_BRANCH,
@@ -12944,7 +12944,7 @@ mod tests {
                 deadline,
             };
             let manager = HistoryManager::new_with_ref(
-                Arc::new(ClientStorage::init(storage.join("objects"))),
+                Arc::new(ClientStorage::try_init(storage.join("objects"))?),
                 storage.to_path_buf(),
                 Arc::new(conn.clone()),
                 crate::internal::branch::TRACES_BRANCH,

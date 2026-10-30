@@ -1084,7 +1084,7 @@ async fn reclaim_findings_objects(
 
     let storage_path = util::try_get_storage_path(None)
         .map_err(|e| CliError::fatal(format!("not in a libra repository: {e}")))?;
-    let storage = ClientStorage::init(storage_path.join("objects"));
+    let storage = ClientStorage::try_init(storage_path.join("objects"))?;
     // One reachability sweep for the whole batch, and only when there is
     // something to reclaim — it is far too expensive to run per candidate.
     let reachable = crate::command::maintenance::collect_reachable_objects(&storage).await?;

@@ -423,7 +423,7 @@ async fn cov2_identity_v2_lifecycle_erasure_and_gc_exclusion() {
         .await
         .expect("open DB for local erasure");
     let history = HistoryManager::new_with_ref(
-        Arc::new(ClientStorage::init(store.join("objects"))),
+        Arc::new(ClientStorage::try_init(store.join("objects")).expect("storage")),
         store,
         Arc::new(conn.clone()),
         TRACES_BRANCH,

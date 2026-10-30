@@ -315,7 +315,7 @@ async fn run_lfs(cmd: LfsCmds) -> CliResult<LfsOutput> {
             let index = Index::load(&idx_file)
                 .map_err(|e| CliError::io(format!("failed to load index: {e}")))?;
             let entries = index.tracked_entries(0);
-            let storage = util::objects_storage();
+            let storage = util::objects_storage()?;
             let mut files = Vec::new();
             for entry in entries {
                 let path_abs = util::workdir_to_absolute(&entry.name);

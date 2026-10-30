@@ -876,7 +876,7 @@ async fn resolve_short_commit(
     requested_len: Option<usize>,
 ) -> CliResult<String> {
     let full = commit.to_string();
-    let storage = util::objects_storage();
+    let storage = util::objects_storage()?;
 
     let min_len = requested_len.unwrap_or(SHORT_HASH_LEN).max(1);
 

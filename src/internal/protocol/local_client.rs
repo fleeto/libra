@@ -404,7 +404,7 @@ impl LocalClient {
                         }
                     };
 
-                    let storage = ClientStorage::init(crate::utils::path::objects());
+                    let storage = ClientStorage::try_init(crate::utils::path::objects())?;
                     let mut entries: Vec<(String, String)> = Vec::new();
                     let mut warnings: Vec<String> = Vec::new();
                     for note in notes {
@@ -591,7 +591,7 @@ impl LocalClient {
                 let hash_kind = git_repo_hash_kind(&self.repo_path).map_err(IoError::other)?;
                 // A strictly local store — never route a foreign repo's reads
                 // through cloud storage or write objects back into it.
-                let storage = ClientStorage::init_local(self.repo_path.join("objects"));
+                let storage = ClientStorage::try_init_local(self.repo_path.join("objects"))?;
                 // Collect synchronously with the foreign hash kind active, then
                 // drop the (thread-local) guard before the async encode so it is
                 // never held across an `.await`.
@@ -687,11 +687,17 @@ impl LocalClient {
                             _ => IoError::other(format!("{}", giterror)),
                         })?
                         .into_iter()
-                        .flat_map(|t| {
-                            t.get_items_with_mode()
-                                .into_iter()
-                                .map(|(_, hash, mode)| (hash, mode))
+                        .map(|t| {
+                            t.get_items_with_mode().map(|items| {
+                                items
+                                    .into_iter()
+                                    .map(|(_, hash, mode)| (hash, mode))
+                                    .collect::<Vec<_>>()
+                            })
                         })
+                        .collect::<Result<Vec<_>, IoError>>()?
+                        .into_iter()
+                        .flatten()
                         .filter(|(hash, _)| seen.insert(hash.to_string()))
                         .partition(|(_, mode)| *mode == TreeItemMode::Tree);
 
@@ -907,7 +913,7 @@ fn read_git_repo_refs(repo_path: &Path) -> std::io::Result<Vec<DiscRef>> {
     // Advertise the peeled commit of every annotated tag as `<ref>^{}`, like
     // `git-upload-pack`. Always dereference the *advertised* tag object through
     // the (strictly local) object store, so loose/packed shadowing is correct.
-    let storage = ClientStorage::init_local(repo_path.join("objects"));
+    let storage = ClientStorage::try_init_local(repo_path.join("objects"))?;
     let tag_refs: Vec<(String, String)> = out
         .iter()
         .filter(|r| r._ref.starts_with("refs/tags/"))
@@ -2061,7 +2067,8 @@ mod tests {
     ) -> (Vec<String>, Vec<String>) {
         let hash_kind = git_repo_hash_kind(&gdeep.git_dir).expect("gdeep fixture is sha1");
         let _hash_guard = HashKindRestoreGuard::switch_to(hash_kind);
-        let storage = ClientStorage::init_local(gdeep.git_dir.join("objects"));
+        let storage =
+            ClientStorage::try_init_local(gdeep.git_dir.join("objects")).expect("storage");
         let wants: Vec<String> = want.iter().map(|oid| (*oid).to_string()).collect();
         let (entries, shallow) =
             collect_git_repo_entries(&storage, &gdeep.git_dir, &wants, &[], depth).unwrap();

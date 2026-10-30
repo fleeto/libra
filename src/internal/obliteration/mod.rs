@@ -262,8 +262,9 @@ pub fn classify_presence(hash: &ObjectHash) -> CliResult<ObjectPresence> {
     // classifies as Absent here and the driver refuses it. A local pack
     // (present locally, not loose) is PackedOnly. A storage read error is not
     // absence and must not authorize a delete.
-    let storage =
-        crate::utils::client_storage::ClientStorage::init_local(crate::utils::path::objects());
+    let storage = crate::utils::client_storage::ClientStorage::init_local_existing(
+        crate::utils::path::objects(),
+    );
     match storage.exist_checked(hash) {
         Ok(true) => Ok(ObjectPresence::PackedOnly),
         Ok(false) => Ok(ObjectPresence::Absent),
@@ -313,7 +314,7 @@ pub async fn delete_payload(hash: &ObjectHash) -> CliResult<()> {
         );
     }
     // Durable tier + in-memory LRU (no-op for a local-only store).
-    let storage = util::objects_storage();
+    let storage = util::objects_storage()?;
     storage.delete_payload(hash).await.map_err(|e| {
         CliError::fatal(format!(
             "failed to purge durable-tier payload for {hash}: {e}"
@@ -471,5 +472,26 @@ mod tests {
         assert!(!rendered.contains("absent"), "{rendered}");
         assert!(!rendered.contains("loose"), "{rendered}");
         assert!(!rendered.contains("packed"), "{rendered}");
+    }
+
+    #[test]
+    #[serial_test::serial(cwd, env)]
+    fn classify_presence_missing_root_is_absent() {
+        let tmp = tempfile::tempdir().expect("tmp");
+        let _guard = ChangeDirGuard::new(tmp.path());
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("runtime");
+        runtime.block_on(setup_with_new_libra_in(tmp.path()));
+        let objects = tmp.path().join(".libra/objects");
+        std::fs::remove_dir_all(&objects).expect("remove objects root");
+        let hash = blob_oid(b"missing-root");
+        let presence = classify_presence(&hash).expect("missing objects root is absence");
+        assert_eq!(presence, ObjectPresence::Absent);
+        assert!(
+            !objects.exists(),
+            "init_local_existing must not create a missing objects root"
+        );
     }
 }

@@ -232,7 +232,7 @@ pub(crate) async fn run_diff(
     let first_map: HashMap<PathBuf, ObjectHash> = first_blobs.iter().cloned().collect();
     let second_map: HashMap<PathBuf, ObjectHash> = second_blobs.iter().cloned().collect();
     if preview_object::is_active() {
-        let storage = ClientStorage::init(path::objects());
+        let storage = ClientStorage::try_init(path::objects())?;
         let mut hashes = HashSet::new();
         for (path, hash) in &first_map {
             if second_map.get(path) != Some(hash) {

@@ -319,6 +319,13 @@ fn cat_file_exit_error(error: CliError) -> ! {
     std::process::exit(error.exit_code())
 }
 
+fn cat_file_storage() -> ClientStorage {
+    match ClientStorage::try_init(path::objects()) {
+        Ok(storage) => storage,
+        Err(error) => cat_file_exit_error(CliError::io(error.to_string())),
+    }
+}
+
 pub async fn execute(args: CatFileArgs) {
     // ── AI modes (no positional object arg required) ────────────────────
     if args.ai_list_types {
@@ -346,7 +353,7 @@ pub async fn execute(args: CatFileArgs) {
         )),
     };
 
-    let storage = ClientStorage::init(path::objects());
+    let storage = cat_file_storage();
     let hash = resolve_object(object_ref, &storage).await;
 
     if args.check_exist {
@@ -512,7 +519,7 @@ async fn execute_with_output_contract(args: CatFileArgs, output: &OutputConfig) 
         // `resolve_object_safe`, the same code as the non-JSON `-e` path; this
         // is Libra's standard invalid-target code, intentionally different from
         // Git's 128) and emits no `exists` envelope.
-        let storage = ClientStorage::init(path::objects());
+        let storage = ClientStorage::try_init(path::objects())?;
         let hash = resolve_object_safe(object_ref, &storage).await?;
         let exists = storage.exist_checked(&hash).map_err(|error| {
             CliError::fatal(format!(
@@ -534,7 +541,7 @@ async fn execute_with_output_contract(args: CatFileArgs, output: &OutputConfig) 
         return Ok(());
     }
 
-    let storage = ClientStorage::init(path::objects());
+    let storage = ClientStorage::try_init(path::objects())?;
     let hash = resolve_object_safe(object_ref, &storage).await?;
     let obj_type = storage
         .get_object_type(&hash)
@@ -698,7 +705,7 @@ async fn run_batch(include_content: bool, format: &str, buffer: bool) -> CliResu
     } else {
         "--batch-check"
     };
-    let storage = ClientStorage::init(path::objects());
+    let storage = ClientStorage::try_init(path::objects())?;
     let mut input = std::io::stdin().lock();
     let mut out = BatchOutput::new(std::io::stdout().lock(), buffer, mode);
     let mut line = Vec::new();
@@ -791,7 +798,7 @@ async fn build_batch_object(
 /// Objects are emitted in ascending object-id order, each flushed as it is
 /// produced unless `buffer` is set.
 async fn run_batch_all_objects(include_content: bool, format: &str, buffer: bool) -> CliResult<()> {
-    let storage = ClientStorage::init(path::objects());
+    let storage = ClientStorage::try_init(path::objects())?;
     let ids = collect_all_object_ids(&storage)?;
 
     let mut out = BatchOutput::new(std::io::stdout().lock(), buffer, "--batch-all-objects");
@@ -888,7 +895,7 @@ fn collect_all_object_ids(storage: &ClientStorage) -> CliResult<Vec<ObjectHash>>
 async fn run_batch_command(format: &str, buffer: bool) -> CliResult<()> {
     const MODE: &str = "--batch-command";
 
-    let storage = ClientStorage::init(path::objects());
+    let storage = ClientStorage::try_init(path::objects())?;
     let mut input = std::io::stdin().lock();
     let mut out = BatchOutput::new(std::io::stdout().lock(), buffer, MODE);
     let mut queued: Vec<(bool, Vec<u8>)> = Vec::new();
@@ -1101,7 +1108,7 @@ fn emit_pretty_print_json(
             Ok(())
         }
         ObjectType::Tag => {
-            let storage = ClientStorage::init(path::objects());
+            let storage = ClientStorage::try_init(path::objects())?;
             let data = storage.get(hash).map_err(|e| {
                 CliError::fatal(format!("could not read tag {hash}: {e}"))
                     .with_stable_code(StableErrorCode::IoReadFailed)
@@ -1175,7 +1182,7 @@ async fn ai_list_objects_data(type_name: &str) -> CliResult<Vec<serde_json::Valu
 async fn ai_pretty_print_data(uuid: &str) -> CliResult<serde_json::Value> {
     let (hash, type_name) = resolve_ai_object(uuid).await?;
 
-    let storage = ClientStorage::init(path::objects());
+    let storage = ClientStorage::try_init(path::objects())?;
     let data = storage.get(&hash).map_err(|e| {
         CliError::fatal(format!("could not read AI object blob {hash}: {e}"))
             .with_stable_code(StableErrorCode::IoReadFailed)
@@ -1319,7 +1326,7 @@ fn print_tree(hash: &ObjectHash) {
 /// header (including `gpgsig`, `encoding`, `mergetag`, …) and the message are
 /// emitted byte-for-byte rather than re-rendered from parsed fields.
 fn print_commit(hash: &ObjectHash) {
-    let storage = ClientStorage::init(path::objects());
+    let storage = cat_file_storage();
     let data = match storage.get(hash) {
         Ok(d) => d,
         Err(e) => cat_file_exit_error(
@@ -1355,7 +1362,7 @@ fn commit_message_body(after_committer: &str) -> &str {
 
 /// Print a tag object in human-readable format.
 fn print_tag(hash: &ObjectHash) {
-    let storage = ClientStorage::init(path::objects());
+    let storage = cat_file_storage();
     let data = match storage.get(hash) {
         Ok(d) => d,
         Err(e) => cat_file_exit_error(
@@ -1390,7 +1397,7 @@ async fn build_history_manager() -> CliResult<HistoryManager> {
             ))
             .with_stable_code(StableErrorCode::RepoCorrupt)
         })?;
-    let storage = Arc::new(LocalStorage::new(objects_dir));
+    let storage = Arc::new(LocalStorage::try_new(objects_dir)?);
     Ok(HistoryManager::new(storage, repo_path, Arc::new(db_conn)))
 }
 
@@ -1467,7 +1474,7 @@ async fn ai_pretty_print(uuid: &str) {
     };
 
     // Read raw blob JSON
-    let storage = ClientStorage::init(path::objects());
+    let storage = cat_file_storage();
     let data = match storage.get(&hash) {
         Ok(d) => d,
         Err(e) => cat_file_exit_error(

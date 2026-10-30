@@ -2453,3 +2453,10 @@ mod tests {
         );
     }
 }
+
+impl From<std::io::Error> for CliError {
+    fn from(error: std::io::Error) -> Self {
+        // The I/O error already names the storage path and the failed call.
+        CliError::io(error.to_string())
+    }
+}

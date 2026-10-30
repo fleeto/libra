@@ -4965,12 +4965,13 @@ pub(crate) fn commit_gitlink_entries(commit: &Commit) -> Result<GitlinkEntries, 
 /// Collect the gitlink entries of a commit's tree without flattening the
 /// mergeable half — used by consumers that take one side from the index rather
 /// than from a tree (`cherry-pick`).
-pub(crate) fn tree_gitlink_entries(tree: &Tree) -> GitlinkEntries {
-    tree.get_plain_items_with_mode()
+pub(crate) fn tree_gitlink_entries(tree: &Tree) -> std::io::Result<GitlinkEntries> {
+    Ok(tree
+        .get_plain_items_with_mode()?
         .into_iter()
         .filter(|(_, _, mode)| *mode == TreeItemMode::Commit)
         .map(|(path, hash, _)| (path, hash))
-        .collect()
+        .collect())
 }
 
 /// Gitlink entries recorded at stage 0 of an index — the "ours" side for
@@ -4997,7 +4998,13 @@ fn commit_tree_split(
         tree_id: commit.tree_id.to_string(),
         detail: error.to_string(),
     })?;
-    Ok(split_gitlink_entries(tree.get_plain_items_with_mode()))
+    Ok(split_gitlink_entries(
+        tree.get_plain_items_with_mode()
+            .map_err(|error| PullMergeError::TreeLoad {
+                tree_id: commit.tree_id.to_string(),
+                detail: error.to_string(),
+            })?,
+    ))
 }
 
 fn commit_tree_items(commit: &Commit) -> Result<HashMap<PathBuf, MergeTreeEntry>, PullMergeError> {

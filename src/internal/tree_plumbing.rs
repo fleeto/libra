@@ -66,6 +66,12 @@ pub enum TreePlumbingError {
     Storage(String),
 }
 
+impl From<std::io::Error> for TreePlumbingError {
+    fn from(error: std::io::Error) -> Self {
+        TreePlumbingError::Storage(error.to_string())
+    }
+}
+
 impl From<GitError> for TreePlumbingError {
     fn from(error: GitError) -> Self {
         TreePlumbingError::Storage(error.to_string())
@@ -134,7 +140,7 @@ pub fn validate_index_objects_with(
     index: &Index,
     missing_ok: bool,
 ) -> Result<(), TreePlumbingError> {
-    let storage = util::objects_storage();
+    let storage = util::objects_storage()?;
     // Intent-to-add entries never reach a tree, so their placeholder object
     // does not need to exist. Excluding them keeps the preflight aligned with
     // `write_tree_from_leaves` (WT-07).
@@ -338,7 +344,7 @@ fn build_tree_recursively(
 
 /// Persist a tree object to the local object store.
 fn save_tree_object(tree: &Tree) -> Result<(), TreePlumbingError> {
-    let storage = util::objects_storage();
+    let storage = util::objects_storage()?;
     let data = tree
         .to_data()
         .map_err(|error| TreePlumbingError::Tree(error.to_string()))?;
@@ -354,7 +360,7 @@ fn collect_tree_leaves(
     prefix: &str,
     out: &mut Vec<(String, TreeItem)>,
 ) -> Result<(), TreePlumbingError> {
-    let storage = util::objects_storage();
+    let storage = util::objects_storage()?;
     let data = storage
         .get(tree_id)
         .map_err(|error| TreePlumbingError::Storage(error.to_string()))?;

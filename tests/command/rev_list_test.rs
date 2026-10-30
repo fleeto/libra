@@ -956,7 +956,7 @@ fn test_rev_list_objects_skips_gitlinks() {
     let repo = tempfile::tempdir().unwrap();
     init_repo_via_cli(repo.path());
     let _kind = set_hash_kind_for_test(HashKind::Sha1);
-    let storage = ClientStorage::init(repo.path().join(".libra/objects"));
+    let storage = ClientStorage::try_init(repo.path().join(".libra/objects")).expect("storage");
 
     let blob_oid = ObjectHash::from_bytes(&[0x11; 20]).unwrap();
     let gitlink_oid = ObjectHash::from_bytes(&[0x22; 20]).unwrap();
@@ -1024,7 +1024,7 @@ fn test_rev_list_objects_errors_on_corrupt_subtree() {
     let repo = tempfile::tempdir().unwrap();
     init_repo_via_cli(repo.path());
     let _kind = set_hash_kind_for_test(HashKind::Sha1);
-    let storage = ClientStorage::init(repo.path().join(".libra/objects"));
+    let storage = ClientStorage::try_init(repo.path().join(".libra/objects")).expect("storage");
 
     // Root tree points at a subtree that is never stored.
     let missing_subtree = ObjectHash::from_bytes(&[0x33; 20]).unwrap();

@@ -1204,7 +1204,7 @@ async fn live_and_import_snapshot_hashes_match() {
     .expect("open writable repo db");
     let libra_dir = fixture.repo.join(".libra");
     let history = HistoryManager::new_with_ref(
-        Arc::new(ClientStorage::init(libra_dir.join("objects"))),
+        Arc::new(ClientStorage::try_init(libra_dir.join("objects")).expect("storage")),
         libra_dir,
         Arc::new(conn.clone()),
         TRACES_BRANCH,
@@ -2852,7 +2852,7 @@ async fn agent_import_tombstone_blocks_resurrection_until_audited_restore() {
     .expect("seed legacy unkeyed source fingerprint");
     let libra_dir = fixture.repo.join(".libra");
     let history = HistoryManager::new_with_ref(
-        Arc::new(ClientStorage::init(libra_dir.join("objects"))),
+        Arc::new(ClientStorage::try_init(libra_dir.join("objects")).expect("storage")),
         libra_dir,
         Arc::new(conn.clone()),
         TRACES_BRANCH,
@@ -3012,7 +3012,7 @@ async fn agent_import_tombstone_update_clears_legacy_source_fingerprint() {
 
     let libra_dir = fixture.repo.join(".libra");
     let history = HistoryManager::new_with_ref(
-        Arc::new(ClientStorage::init(libra_dir.join("objects"))),
+        Arc::new(ClientStorage::try_init(libra_dir.join("objects")).expect("storage")),
         libra_dir,
         Arc::new(conn.clone()),
         TRACES_BRANCH,

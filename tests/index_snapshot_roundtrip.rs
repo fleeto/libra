@@ -15,7 +15,7 @@ fn raw_index_facet_preserves_exact_bytes() {
     std::fs::create_dir_all(&gitdir).unwrap();
     let bytes = b"index-with-intent-add-skip-worktree-assume-unchanged-stat\n";
     std::fs::write(gitdir.join("index"), bytes).unwrap();
-    let storage = ClientStorage::init_local(root.path().join("objects"));
+    let storage = ClientStorage::try_init_local(root.path().join("objects")).expect("storage");
     let scope = RequestScope {
         scope: WorktreeScope::Main,
         workdir: root.path().to_path_buf(),

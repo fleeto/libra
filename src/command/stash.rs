@@ -166,6 +166,12 @@ impl StashError {
     }
 }
 
+impl From<std::io::Error> for StashError {
+    fn from(error: std::io::Error) -> Self {
+        StashError::ReadObject(error.to_string())
+    }
+}
+
 impl From<StashError> for CliError {
     fn from(error: StashError) -> Self {
         let stable_code = error.stable_code();
@@ -807,7 +813,7 @@ async fn run_push_pathspec(options: StashPushOptions) -> Result<StashOutput, Sta
 
     // HEAD file map — the baseline every stash tree starts from.
     let head_map: HashMap<PathBuf, MergeTreeEntry> = head_tree
-        .get_plain_items_with_mode()
+        .get_plain_items_with_mode()?
         .into_iter()
         .map(|(path, hash, mode)| (path, MergeTreeEntry::new(hash, mode)))
         .collect();
@@ -2843,6 +2849,7 @@ async fn perform_hard_reset(target_commit_id: &ObjectHash) -> Result<(), String>
         .map_err(|e| format!("failed to load target tree: {e}"))?;
     let files_in_target_tree: HashSet<PathBuf> = target_tree
         .get_plain_items()
+        .map_err(|error| error.to_string())?
         .into_iter()
         .map(|(p, _)| p)
         .collect();

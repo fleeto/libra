@@ -34,7 +34,8 @@ async fn operation_store_round_trips_objects_journal_and_head_cas() {
     let db = db::create_database(db_path.to_str().expect("UTF-8 database path"))
         .await
         .expect("database initializes");
-    let storage = libra::utils::client_storage::ClientStorage::init_local(object_path);
+    let storage =
+        libra::utils::client_storage::ClientStorage::try_init_local(object_path).expect("storage");
     storage
         .put(&view().refs_facet_oid, b"refs", ObjectType::Blob)
         .expect("refs facet object writes");
@@ -267,7 +268,8 @@ async fn operation_store_round_trips_objects_journal_and_head_cas() {
     let reopened = OperationStoreV2::new_for_repo(
         "repo-1",
         reopened_db,
-        libra::utils::client_storage::ClientStorage::init_local(reopened_object_path),
+        libra::utils::client_storage::ClientStorage::try_init_local(reopened_object_path)
+            .expect("storage"),
     );
     assert_eq!(
         reopened

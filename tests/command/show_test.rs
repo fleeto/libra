@@ -355,6 +355,7 @@ async fn test_show_quiet_still_validates_patch_generation() {
         let commit: Commit = load_object(&head).expect("expected HEAD commit object");
         let tree: Tree = load_object(&commit.tree_id).expect("expected HEAD tree");
         tree.get_plain_items()
+            .expect("storage")
             .into_iter()
             .find(|(path, _)| path == &PathBuf::from("tracked.txt"))
             .map(|(_, hash)| hash.to_string())
@@ -423,6 +424,7 @@ async fn test_show_quiet_stat_succeeds_with_missing_blob_like_human_path() {
         let commit: Commit = load_object(&head).expect("expected HEAD commit object");
         let tree: Tree = load_object(&commit.tree_id).expect("expected HEAD tree");
         tree.get_plain_items()
+            .expect("storage")
             .into_iter()
             .find(|(path, _)| path == &PathBuf::from("tracked.txt"))
             .map(|(_, hash)| hash.to_string())
@@ -523,6 +525,7 @@ async fn test_show_patch_fails_when_commit_blob_is_missing() {
         let commit: Commit = load_object(&head).expect("expected HEAD commit object");
         let tree: Tree = load_object(&commit.tree_id).expect("expected HEAD tree");
         tree.get_plain_items()
+            .expect("storage")
             .into_iter()
             .find(|(path, _)| path == &PathBuf::from("tracked.txt"))
             .map(|(_, hash)| hash.to_string())
@@ -1020,6 +1023,7 @@ async fn test_show_json_blob_output_includes_content() {
     let tree: Tree = load_object(&commit.tree_id).unwrap();
     let blob_hash = tree
         .get_plain_items()
+        .expect("storage")
         .into_iter()
         .find(|(path, _)| path == &PathBuf::from("tracked.txt"))
         .map(|(_, hash)| hash.to_string())

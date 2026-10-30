@@ -746,7 +746,7 @@ fn ref_object_size(entry: &RefEntry) -> CliResult<i64> {
             ))
             .with_stable_code(StableErrorCode::RepoCorrupt)
         })?;
-    let data = util::objects_storage().get(&hash).map_err(|source| {
+    let data = util::objects_storage()?.get(&hash).map_err(|source| {
         CliError::fatal(format!(
             "failed to read object {} for ref '{}': {source}",
             entry.objectname, entry.refname
@@ -775,7 +775,7 @@ fn ref_raw_content(entry: &RefEntry) -> CliResult<String> {
             ))
             .with_stable_code(StableErrorCode::RepoCorrupt)
         })?;
-    let data = util::objects_storage().get(&hash).map_err(|source| {
+    let data = util::objects_storage()?.get(&hash).map_err(|source| {
         CliError::fatal(format!(
             "failed to read object {} for ref '{}': {source}",
             entry.objectname, entry.refname
@@ -963,7 +963,7 @@ fn ref_commit(entry: &RefEntry) -> Option<Commit> {
 /// still resolves) before giving up; returns `None` for a chain ending at a
 /// tree/blob or an unreadable object.
 fn peel_to_commit(start: ObjectHash) -> Option<Commit> {
-    let storage = util::objects_storage();
+    let storage = util::objects_storage().ok()?;
     let mut current = start;
     // `..=` so the terminal commit can be checked after the deepest allowed tag.
     for _ in 0..=MAX_TAG_PEEL_DEPTH {
@@ -1006,7 +1006,7 @@ fn ref_deref_objectsize(entry: &RefEntry) -> CliResult<Option<i64>> {
     let Some((target, _)) = ref_deref_target(entry)? else {
         return Ok(None);
     };
-    let data = util::objects_storage().get(&target).map_err(|source| {
+    let data = util::objects_storage()?.get(&target).map_err(|source| {
         CliError::fatal(format!(
             "failed to read the object {target} dereferenced from ref '{}': {source}",
             entry.refname

@@ -925,6 +925,11 @@ fn map_checkout_error(source: RestoreError) -> CliError {
             "internal error: clone checkout reported an invalid pathspec: {detail}"
         ))
         .with_stable_code(StableErrorCode::RepoStateInvalid),
+        RestoreError::Storage(detail) => CliError::fatal(format!(
+            "working tree checkout could not open object storage: {detail}"
+        ))
+        .with_stable_code(StableErrorCode::IoReadFailed)
+        .with_hint("check permissions on the repository objects directory and retry"),
     }
 }
 

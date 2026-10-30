@@ -996,7 +996,7 @@ async fn get_tree_files(tree_ref: &str, pathspec: &[String]) -> CliResult<Vec<Se
     })?;
 
     // Get all files from the tree with their blob hashes.
-    let all_files: Vec<(PathBuf, git_internal::hash::ObjectHash)> = tree.get_plain_items();
+    let all_files: Vec<(PathBuf, git_internal::hash::ObjectHash)> = tree.get_plain_items()?;
 
     let pathspecs = compile_repo_pathspecs(pathspec)?;
 

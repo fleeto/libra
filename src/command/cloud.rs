@@ -805,6 +805,12 @@ pub(crate) enum CloudError {
     Generic(String),
 }
 
+impl From<std::io::Error> for CloudError {
+    fn from(error: std::io::Error) -> Self {
+        CloudError::Generic(error.to_string())
+    }
+}
+
 /// Recovery for [`CloudError::RemoteCaptureKindRefused`]. Default sync only
 /// uploads rows with `is_synced = 0`, so a new database needs `--force`.
 pub(super) const REMOTE_CAPTURE_KIND_RECOVERY_HINT: &str = "create a new D1 database, point LIBRA_D1_DATABASE_ID at it, and run `libra cloud sync --force` to backfill it completely";
@@ -3263,7 +3269,8 @@ mod tests {
 
         let repo_id = ensure_repo_id().await;
         let hash = ObjectHash::from_type_and_data(ObjectType::Blob, data);
-        LocalStorage::new(path::objects())
+        LocalStorage::try_new(path::objects())
+            .expect("storage")
             .put(&hash, data, ObjectType::Blob)
             .await
             .expect("write local object");
@@ -3523,7 +3530,7 @@ mod tests {
 
         let _repo = enter_isolated_libra_repo().await;
         let repo_id = ensure_repo_id().await;
-        let local = LocalStorage::new(path::objects());
+        let local = LocalStorage::try_new(path::objects()).expect("storage");
         let conn = db::get_db_conn_instance().await;
         let mut expected = Vec::new();
         for data in [
@@ -9282,7 +9289,7 @@ mod tests {
         let _repo = enter_isolated_libra_repo().await;
         let remote = RemoteStorage::new(Arc::new(InMemory::new()));
         let local_dir = tempdir().unwrap();
-        let local = LocalStorage::new(local_dir.path().to_path_buf());
+        let local = LocalStorage::try_new(local_dir.path().to_path_buf()).expect("storage");
         let data = b"hello\n";
         let hash = ObjectHash::from_type_and_data(ObjectType::Blob, data);
         let row = test_object_index_row(hash, data.len() as i64);
@@ -9329,7 +9336,7 @@ mod tests {
         let _repo = enter_isolated_libra_repo().await;
         let remote = RemoteStorage::new(Arc::new(InMemory::new()));
         let local_dir = tempdir().unwrap();
-        let local = LocalStorage::new(local_dir.path().to_path_buf());
+        let local = LocalStorage::try_new(local_dir.path().to_path_buf()).expect("storage");
         let expected_data = b"expected\n";
         let wrong_data = b"wrong\n";
         let expected_hash = ObjectHash::from_type_and_data(ObjectType::Blob, expected_data);
@@ -9368,7 +9375,7 @@ mod tests {
     async fn capture_publication_replaces_and_verifies_corrupt_existing_remote_object() {
         let remote = RemoteStorage::new(Arc::new(InMemory::new()));
         let local_dir = tempdir().expect("create local object directory");
-        let local = LocalStorage::new(local_dir.path().to_path_buf());
+        let local = LocalStorage::try_new(local_dir.path().to_path_buf()).expect("storage");
         let expected = b"validated capture object\n";
         let hash = ObjectHash::from_type_and_data(ObjectType::Blob, expected);
         local

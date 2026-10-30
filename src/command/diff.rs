@@ -685,6 +685,16 @@ pub(crate) enum DiffError {
     Pathspec(String),
 }
 
+impl From<std::io::Error> for DiffError {
+    fn from(error: std::io::Error) -> Self {
+        DiffError::ObjectLoad {
+            kind: "object",
+            object_id: "storage".to_string(),
+            detail: error.to_string(),
+        }
+    }
+}
+
 impl From<DiffError> for CliError {
     fn from(error: DiffError) -> Self {
         let message = error.to_string();
@@ -2903,7 +2913,7 @@ fn load_repo_blob_content(hash: &ObjectHash) -> Result<Vec<u8>, DiffError> {
         return Ok(content);
     }
     if preview_object::is_active() {
-        let storage = ClientStorage::init(path::objects());
+        let storage = ClientStorage::try_init(path::objects())?;
         let data = storage
             .get_with_limit(hash, preview_object::MAX_OBJECT_BYTES)
             .map_err(|error| DiffError::ObjectLoad {

@@ -3739,37 +3739,63 @@ mod tests {
         }
     }
 
-    /// Give `dir` a protected DACL granting only the current user and SYSTEM,
-    /// and make the current user its owner, as the refusal's remedy says (an
-    /// elevated runner's new files are owned by the Administrators group).
+    /// Give `dir` a protected DACL granting only the current user and SYSTEM
+    /// and make the current user its owner, exactly as the refusal's remedy
+    /// says: grant, set the owner (an elevated runner's new files are owned
+    /// by the Administrators group), then remove any other account `icacls`
+    /// still lists. The final listing goes to stderr for a failing test.
     #[cfg(windows)]
     fn make_private_with_icacls(dir: &std::path::Path) {
         let user = env::var("USERNAME").expect("USERNAME");
-        let grant = std::process::Command::new("icacls")
-            .arg(dir)
-            .args([
-                "/inheritance:r",
-                "/grant:r",
-                &format!("{user}:(OI)(CI)F"),
-                "SYSTEM:(OI)(CI)F",
-            ])
-            .status()
-            .expect("run icacls");
-        assert!(
-            grant.success(),
-            "icacls /grant failed for {}",
-            dir.display()
-        );
-        let owner = std::process::Command::new("icacls")
-            .arg(dir)
-            .args(["/setowner", &user])
-            .status()
-            .expect("run icacls");
-        assert!(
-            owner.success(),
-            "icacls /setowner failed for {}",
-            dir.display()
-        );
+        let icacls = |args: &[&str]| {
+            let output = std::process::Command::new("icacls")
+                .arg(dir)
+                .args(args)
+                .output()
+                .expect("run icacls");
+            assert!(
+                output.status.success(),
+                "icacls {args:?} failed for {}: {}",
+                dir.display(),
+                String::from_utf8_lossy(&output.stderr)
+            );
+            String::from_utf8_lossy(&output.stdout).into_owned()
+        };
+        icacls(&[
+            "/inheritance:r",
+            "/grant:r",
+            &format!("{user}:(OI)(CI)F"),
+            "SYSTEM:(OI)(CI)F",
+        ]);
+        icacls(&["/setowner", &user]);
+        // `icacls <dir>` prints `<dir> <principal>:(...)` and then one
+        // `<principal>:(...)` per line.
+        let shown = dir.display().to_string();
+        let listing = icacls(&[]);
+        let lowered_user = user.to_lowercase();
+        for line in listing.lines() {
+            let entry = line.strip_prefix(shown.as_str()).unwrap_or(line).trim();
+            let Some((principal, _)) = entry.split_once(":(") else {
+                continue;
+            };
+            let principal = principal.trim();
+            let lowered = principal.to_lowercase();
+            if principal.is_empty()
+                || lowered == lowered_user
+                || lowered.ends_with(&format!("\\{lowered_user}"))
+                || lowered == "nt authority\\system"
+                || lowered == "system"
+            {
+                continue;
+            }
+            let target = if principal.starts_with("S-1-") {
+                format!("*{principal}")
+            } else {
+                principal.to_string()
+            };
+            icacls(&["/remove:g", &target]);
+        }
+        eprintln!("icacls {shown} after making it private:\n{}", icacls(&[]));
     }
 
     #[cfg(windows)]

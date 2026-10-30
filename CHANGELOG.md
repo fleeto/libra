@@ -4,6 +4,7 @@
 
 ### Fixed
 
+- Session store path entry points reject an unsafe session id before joining it onto the sessions directory. `SessionStore::file_history` now returns `io::Result<FileHistoryStore>`; callers write `file_history(id)?`. There is no deprecation window.
 - Index entries no longer carry Git's assume-unchanged bit (issues/637).
   Libra now depends on `git-internal` 0.10.4, whose `Flags::new()` no longer
   sets `CE_VALID` (`0x8000`). Every entry written by clone, add, reset,

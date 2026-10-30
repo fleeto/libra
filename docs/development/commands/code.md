@@ -11,3 +11,5 @@ development index entry so `docs/development/commands/README.md` can list every
 public CLI command without duplicating the Code planning document.
 
 Task shell toolchain-root handling is documented in the [command reference](../../commands/code.md#rust-toolchains-in-task-worktrees) and [runtime contract](../internal/code-agent-runtime.md#task-shell-rustup-root-preservation-fix-pkt-04). On Unix, preserve the user's installed Rustup root before task HOME isolation, with explicit `RUSTUP_HOME` values taking precedence and existing sandbox policy governing access.
+
+`is_safe_session_path_id` is the single session-id guard for store path entry points (`load`, `delete`, `lock_session`, `file_history`, `session_modified_time`, adopt, and archive). It keeps the blacklist (empty, `.`, `..`, `/`, `\`, NUL), requires exactly one normal path component, and rejects a leading `A:`–`Z:` drive form on every platform. Unsafe ids fail with `InvalidInput` and the error text does not include the raw id. `file_history` returns `io::Result`.

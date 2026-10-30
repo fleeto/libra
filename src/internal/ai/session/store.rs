@@ -4,7 +4,7 @@ use std::{
     collections::BTreeSet,
     fs::{self, OpenOptions},
     io::{self, Write},
-    path::{Path, PathBuf},
+    path::{Component, Path, PathBuf},
     thread,
     time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
@@ -131,6 +131,9 @@ impl SessionStore {
     ///   path; carrying over a possibly-stale lock would cause that
     ///   fresh acquisition to wait the full timeout on a held lock.
     pub fn adopt_legacy_subdir_session_if_needed(&self, id: &str) -> io::Result<bool> {
+        if !is_safe_session_path_id(id) {
+            return Err(unsafe_session_id_error());
+        }
         if !self.partitioned {
             return Ok(false);
         }
@@ -192,20 +195,17 @@ impl SessionStore {
     }
 
     /// Return the file-history store for a session.
-    pub fn file_history(&self, id: &str) -> FileHistoryStore {
-        FileHistoryStore::new(self.session_root(id))
+    pub fn file_history(&self, id: &str) -> io::Result<FileHistoryStore> {
+        if !is_safe_session_path_id(id) {
+            return Err(unsafe_session_id_error());
+        }
+        Ok(FileHistoryStore::new(self.session_root(id)))
     }
 
     /// Save a session to disk.
     pub fn save(&self, session: &SessionState) -> io::Result<()> {
         if !is_safe_session_path_id(&session.id) {
-            return Err(io::Error::new(
-                io::ErrorKind::InvalidInput,
-                format!(
-                    "refusing to save session with unsafe id '{}': session ids must be a single relative path component",
-                    session.id
-                ),
-            ));
+            return Err(unsafe_session_id_error());
         }
         self.ensure_dir()?;
         SessionJsonlStore::new(self.session_root(&session.id))
@@ -248,7 +248,7 @@ impl SessionStore {
         if index_path.exists() {
             for line in fs::read_to_string(&index_path)?.lines() {
                 let line = line.trim();
-                if !line.is_empty() {
+                if !line.is_empty() && is_safe_session_path_id(line) {
                     ids.insert(line.to_string());
                 }
             }
@@ -371,16 +371,22 @@ impl SessionStore {
 
     /// Load a session by ID.
     pub fn load(&self, id: &str) -> io::Result<SessionState> {
+        if !is_safe_session_path_id(id) {
+            return Err(unsafe_session_id_error());
+        }
         self.migrate_legacy_session_if_needed(id)?;
         let jsonl = SessionJsonlStore::new(self.session_root(id));
         if let Some(session) = jsonl.load_state()? {
-            return Ok(session);
+            return accepted_loaded_session(id, session);
         }
 
         let path = self.session_path(id);
         match fs::read_to_string(&path) {
-            Ok(content) => serde_json::from_str(&content)
-                .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e)),
+            Ok(content) => {
+                let session = serde_json::from_str(&content)
+                    .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
+                accepted_loaded_session(id, session)
+            }
             Err(err) if err.kind() == io::ErrorKind::NotFound => {
                 let events_path = jsonl.events_path();
                 if events_path.exists() {
@@ -412,7 +418,7 @@ impl SessionStore {
         for info in sessions {
             match self.load(&info.id) {
                 Ok(session) => {
-                    let modified = self.session_modified_time(&info.id);
+                    let modified = self.session_modified_time(&info.id)?;
 
                     if latest
                         .as_ref()
@@ -445,7 +451,7 @@ impl SessionStore {
         for info in sessions {
             match self.load(&info.id) {
                 Ok(session) if session.working_dir == working_dir => {
-                    let modified = self.session_modified_time(&info.id);
+                    let modified = self.session_modified_time(&info.id)?;
 
                     if latest
                         .as_ref()
@@ -482,7 +488,7 @@ impl SessionStore {
                     if session.working_dir == working_dir
                         && session_matches_thread_id(&session, thread_id) =>
                 {
-                    let modified = self.session_modified_time(&info.id);
+                    let modified = self.session_modified_time(&info.id)?;
 
                     if latest
                         .as_ref()
@@ -561,6 +567,9 @@ impl SessionStore {
 
     /// Delete a session by ID.
     pub fn delete(&self, id: &str) -> io::Result<()> {
+        if !is_safe_session_path_id(id) {
+            return Err(unsafe_session_id_error());
+        }
         let mut removed = false;
         let legacy_path = self.session_path(id);
         match fs::remove_file(&legacy_path) {
@@ -607,6 +616,9 @@ impl SessionStore {
     /// The lock is implemented via a lock file in the sessions directory and
     /// is automatically released when the returned guard is dropped.
     pub fn lock_session(&self, id: &str) -> io::Result<SessionFileLock> {
+        if !is_safe_session_path_id(id) {
+            return Err(unsafe_session_id_error());
+        }
         self.ensure_dir()?;
         let lock_path = self.session_lock_path(id);
         let start = Instant::now();
@@ -674,6 +686,9 @@ impl SessionStore {
 
     /// Move a malformed session file out of the way so ingestion can continue.
     pub fn archive_corrupt_session(&self, id: &str) -> io::Result<Option<PathBuf>> {
+        if !is_safe_session_path_id(id) {
+            return Err(unsafe_session_id_error());
+        }
         let legacy_source = self.session_path(id);
         let session_root = self.session_root(id);
         let (source, archived) = if legacy_source.exists() {
@@ -783,14 +798,17 @@ impl SessionStore {
             .migrate_if_needed(id, &self.session_root(id))
     }
 
-    fn session_modified_time(&self, id: &str) -> SystemTime {
+    fn session_modified_time(&self, id: &str) -> io::Result<SystemTime> {
+        if !is_safe_session_path_id(id) {
+            return Err(unsafe_session_id_error());
+        }
         let events_path = SessionJsonlStore::new(self.session_root(id)).events_path();
-        fs::metadata(&events_path)
+        Ok(fs::metadata(&events_path)
             .and_then(|metadata| metadata.modified())
             .or_else(|_| {
                 fs::metadata(self.session_path(id)).and_then(|metadata| metadata.modified())
             })
-            .unwrap_or(SystemTime::UNIX_EPOCH)
+            .unwrap_or(SystemTime::UNIX_EPOCH))
     }
 
     fn session_lock_path(&self, id: &str) -> PathBuf {
@@ -896,9 +914,26 @@ fn is_safe_thread_index_id(thread_id: &str) -> bool {
         && !thread_id.contains('\0')
 }
 
-fn is_safe_session_path_id(session_id: &str) -> bool {
-    // Session ids are used as directory/file names under sessions/. Reject
-    // path escape and absolute components.
+fn unsafe_session_id_error() -> io::Error {
+    io::Error::new(
+        io::ErrorKind::InvalidInput,
+        "refusing session id that is not a single relative path component",
+    )
+}
+
+fn accepted_loaded_session(requested_id: &str, session: SessionState) -> io::Result<SessionState> {
+    if session.id != requested_id || !is_safe_session_path_id(&session.id) {
+        return Err(unsafe_session_id_error());
+    }
+    Ok(session)
+}
+
+/// Session ids are directory and file names under `sessions/`.
+///
+/// The blacklist (empty, `.`, `..`, `/`, `\`, NUL) stays, and a single
+/// `Component::Normal` is required. A leading `A:`–`Z:` drive form is
+/// rejected on every platform: Unix parses `C:` as one normal component.
+pub(crate) fn is_safe_session_path_id(session_id: &str) -> bool {
     if session_id.is_empty()
         || session_id == "."
         || session_id == ".."
@@ -908,8 +943,15 @@ fn is_safe_session_path_id(session_id: &str) -> bool {
     {
         return false;
     }
-    let path = Path::new(session_id);
-    !path.is_absolute() && path.components().count() == 1
+    let bytes = session_id.as_bytes();
+    if bytes.len() >= 2 && bytes[0].is_ascii_alphabetic() && bytes[1] == b':' {
+        return false;
+    }
+    let mut components = Path::new(session_id).components();
+    matches!(
+        (components.next(), components.next()),
+        (Some(Component::Normal(_)), None)
+    )
 }
 
 /// Brief info about a saved session.
@@ -1350,5 +1392,281 @@ mod tests {
         let loaded = store.load(&session.id).unwrap();
         assert_eq!(loaded.recorded_provider_id(), Some("zhipu"));
         assert_eq!(loaded.recorded_model_id(), Some("glm-test"));
+    }
+
+    const TRAVERSAL_TOKEN: &str = "TRAVERSAL_TOKEN_SC02";
+
+    fn traversal_ids() -> Vec<String> {
+        vec![
+            format!("../{TRAVERSAL_TOKEN}"),
+            format!("{TRAVERSAL_TOKEN}/child"),
+            format!("/{TRAVERSAL_TOKEN}"),
+            ".".to_string(),
+            "..".to_string(),
+            String::new(),
+            format!("a/{TRAVERSAL_TOKEN}"),
+            format!("{TRAVERSAL_TOKEN}\\child"),
+            format!("a\0{TRAVERSAL_TOKEN}"),
+            "C:".to_string(),
+            "D:".to_string(),
+            format!("C:\\{TRAVERSAL_TOKEN}"),
+        ]
+    }
+
+    fn assert_rejects_without_echo(error: &std::io::Error, raw_id: &str) {
+        assert_eq!(error.kind(), std::io::ErrorKind::InvalidInput);
+        let rendered = error.to_string();
+        if !raw_id.is_empty() {
+            assert!(
+                !rendered.contains(raw_id),
+                "error echoed the raw id {raw_id:?}: {rendered}"
+            );
+        }
+        if raw_id.contains(TRAVERSAL_TOKEN) {
+            assert!(!rendered.contains(TRAVERSAL_TOKEN));
+        }
+    }
+
+    #[test]
+    fn session_store_rejects_traversal_ids_on_load() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let store = SessionStore::from_storage_path(tmp.path());
+        for id in traversal_ids() {
+            let error = store.load(&id).expect_err("load must reject");
+            assert_rejects_without_echo(&error, &id);
+            assert!(!tmp.path().join("sessions").exists());
+        }
+    }
+
+    #[test]
+    fn session_store_rejects_traversal_ids_on_delete() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let sentinel = tmp.path().join(TRAVERSAL_TOKEN);
+        fs::write(&sentinel, b"keep").unwrap();
+        let store = SessionStore::from_storage_path(tmp.path());
+        for id in traversal_ids() {
+            let error = store.delete(&id).expect_err("delete must reject");
+            assert_rejects_without_echo(&error, &id);
+        }
+        assert_eq!(fs::read(&sentinel).unwrap(), b"keep");
+        assert!(!tmp.path().join("sessions").exists());
+    }
+
+    #[test]
+    fn session_store_rejects_traversal_ids_on_lock() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let store = SessionStore::from_storage_path(tmp.path());
+        for id in traversal_ids() {
+            let error = store.lock_session(&id).expect_err("lock must reject");
+            assert_rejects_without_echo(&error, &id);
+        }
+        assert!(!tmp.path().join("sessions").exists());
+    }
+
+    #[test]
+    fn session_store_file_history_returns_result() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let store = SessionStore::from_storage_path(tmp.path());
+        let legal = SessionState::new("/repo").id;
+        assert!(store.file_history(&legal).is_ok());
+        let raw = format!("../{TRAVERSAL_TOKEN}");
+        let error = store
+            .file_history(&raw)
+            .expect_err("file_history must reject");
+        assert_rejects_without_echo(&error, &raw);
+    }
+
+    #[test]
+    fn session_store_mtime_returns_result() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let store = SessionStore::from_storage_path(tmp.path());
+        let missing = SessionState::new("/repo").id;
+        assert_eq!(
+            store.session_modified_time(&missing).unwrap(),
+            SystemTime::UNIX_EPOCH
+        );
+        let raw = format!("../{TRAVERSAL_TOKEN}");
+        let error = store
+            .session_modified_time(&raw)
+            .expect_err("mtime guard must reject");
+        assert_rejects_without_echo(&error, &raw);
+    }
+
+    #[test]
+    fn session_store_rejects_invalid_input_kind() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let store = SessionStore::from_storage_path(tmp.path());
+        let id = format!("../{TRAVERSAL_TOKEN}");
+        for error in [
+            store.load(&id).unwrap_err(),
+            store.delete(&id).unwrap_err(),
+            store.lock_session(&id).unwrap_err(),
+            store.file_history(&id).unwrap_err(),
+            store.session_modified_time(&id).unwrap_err(),
+            store
+                .adopt_legacy_subdir_session_if_needed(&id)
+                .unwrap_err(),
+            store.archive_corrupt_session(&id).unwrap_err(),
+        ] {
+            assert_eq!(error.kind(), std::io::ErrorKind::InvalidInput);
+        }
+    }
+
+    #[test]
+    fn session_store_error_omits_raw_id() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let store = SessionStore::from_storage_path(tmp.path());
+        let id = format!("../{TRAVERSAL_TOKEN}");
+        assert_rejects_without_echo(&store.load(&id).unwrap_err(), &id);
+        assert_rejects_without_echo(&store.delete(&id).unwrap_err(), &id);
+        assert_rejects_without_echo(&store.lock_session(&id).unwrap_err(), &id);
+    }
+
+    #[test]
+    fn session_store_rejects_traversal_ids_on_load_delete_lock() {
+        session_store_rejects_traversal_ids_on_load();
+        session_store_rejects_traversal_ids_on_delete();
+        session_store_rejects_traversal_ids_on_lock();
+    }
+
+    #[test]
+    fn session_store_guard_keeps_legal_ids_unchanged() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let store = SessionStore::from_storage_path(tmp.path());
+        let mut session = SessionState::new("/repo");
+        session.id = "provider__session".to_string();
+        store.save(&session).unwrap();
+        let loaded = store.load("provider__session").unwrap();
+        assert_eq!(loaded.id, "provider__session");
+        assert!(is_safe_session_path_id("provider__session"));
+        assert!(!is_safe_session_path_id("a/"));
+        assert!(!is_safe_session_path_id("a/."));
+        assert!(!is_safe_session_path_id("a\\b"));
+        assert!(!is_safe_session_path_id("a\0b"));
+    }
+
+    #[test]
+    fn session_store_load_rejects_mismatched_disk_id() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let store = SessionStore::from_storage_path(tmp.path());
+        let mut session = SessionState::new("/repo");
+        let requested = session.id.clone();
+        session.id = format!("../{TRAVERSAL_TOKEN}");
+        fs::create_dir_all(tmp.path().join("sessions")).unwrap();
+        let path = tmp
+            .path()
+            .join("sessions")
+            .join(format!("{requested}.json"));
+        fs::write(&path, serde_json::to_string(&session).unwrap()).unwrap();
+        let error = store.load(&requested).expect_err("mismatched id");
+        assert_rejects_without_echo(&error, &session.id);
+        assert!(path.exists(), "rejected load must not move the file");
+    }
+
+    #[test]
+    fn session_store_rejects_traversal_ids_on_adopt() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let sentinel = tmp.path().join(TRAVERSAL_TOKEN);
+        fs::write(&sentinel, b"keep").unwrap();
+        let store = SessionStore::from_storage_path_with_subdir(tmp.path(), "agent");
+        for id in traversal_ids() {
+            let error = store
+                .adopt_legacy_subdir_session_if_needed(&id)
+                .expect_err("adopt must reject");
+            assert_rejects_without_echo(&error, &id);
+        }
+        assert_eq!(fs::read(&sentinel).unwrap(), b"keep");
+    }
+
+    #[test]
+    fn session_store_rejects_traversal_ids_on_archive() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let sentinel = tmp.path().join(TRAVERSAL_TOKEN);
+        fs::write(&sentinel, b"keep").unwrap();
+        let store = SessionStore::from_storage_path(tmp.path());
+        for id in traversal_ids() {
+            let error = store
+                .archive_corrupt_session(&id)
+                .expect_err("archive must reject");
+            assert_rejects_without_echo(&error, &id);
+        }
+        assert_eq!(fs::read(&sentinel).unwrap(), b"keep");
+        assert!(!tmp.path().join("sessions").exists());
+    }
+
+    #[test]
+    fn session_store_rejects_windows_drive_prefix() {
+        for id in [
+            "C:",
+            "D:",
+            "c:",
+            "C:\\windows",
+            "a/",
+            "a/.",
+            "has\\slash",
+            "has\0nul",
+        ] {
+            assert!(!is_safe_session_path_id(id), "{id} must be rejected");
+        }
+        assert!(is_safe_session_path_id("provider__session"));
+        assert!(is_safe_session_path_id("abc-def"));
+    }
+
+    #[test]
+    fn session_ids_for_thread_skips_unsafe_index_rows() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let store = SessionStore::from_storage_path(tmp.path());
+        let mut session = SessionState::new("/repo");
+        let thread_id = "11111111-1111-1111-1111-111111111111";
+        session
+            .metadata
+            .insert("thread_id".to_string(), serde_json::json!(thread_id));
+        store.save(&session).unwrap();
+        fs::create_dir_all(store.thread_index_dir()).unwrap();
+        fs::write(store.thread_index_backfill_marker_path(), b"1\n").unwrap();
+        let malicious = format!("../{TRAVERSAL_TOKEN}");
+        fs::write(
+            store.thread_index_path(thread_id),
+            format!("{}\n{malicious}\nC:\na/.\n", session.id),
+        )
+        .unwrap();
+        let sentinel = tmp.path().join(TRAVERSAL_TOKEN);
+        fs::write(&sentinel, b"keep").unwrap();
+        let ids = store.session_ids_for_thread(thread_id).unwrap();
+        assert!(ids.contains(&session.id));
+        assert!(
+            !ids.iter()
+                .any(|id| id.contains(TRAVERSAL_TOKEN) || id.contains('/'))
+        );
+        assert_eq!(fs::read(&sentinel).unwrap(), b"keep");
+    }
+
+    #[test]
+    fn session_store_migration_entry_rejects_traversal_before_join() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let store = SessionStore::from_storage_path(tmp.path());
+        let id = format!("../{TRAVERSAL_TOKEN}");
+        let error = store.load(&id).expect_err("migration entry must reject");
+        assert_rejects_without_echo(&error, &id);
+        assert!(
+            !tmp.path().join("sessions").exists(),
+            "traversal id must not join onto the sessions directory"
+        );
+    }
+
+    #[test]
+    fn headless_lease_uses_shared_guard() {
+        // RC-23 deleted src/internal/ai/web/headless.rs. The matrix guard
+        // requires that file to stay deleted, so this test exercises the
+        // shared guard for the shapes that lease used to accept.
+        assert!(
+            !Path::new(env!("CARGO_MANIFEST_DIR"))
+                .join("src/internal/ai/web/headless.rs")
+                .exists()
+        );
+        for id in ["a/", "a/.", "a\\b", "a\0b", "C:", "D:"] {
+            assert!(!is_safe_session_path_id(id), "{id}");
+        }
+        assert!(is_safe_session_path_id("provider__session"));
     }
 }

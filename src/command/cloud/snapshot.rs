@@ -1,0 +1,1053 @@
+//! Frozen cloud-sync snapshot spool (plan-20260911 PI-09).
+//!
+//! Before its first remote write, `cloud sync` freezes the object identities,
+//! the refs projection and the project name it is about to upload into a
+//! private, per-run spool under `.libra/cloud-sync/snapshots/<run>`. Every
+//! read is its own short statement on one dedicated read connection, and an
+//! unchanged `PRAGMA data_version` around them proves they saw one database
+//! state (otherwise the freeze is retried), so the spool is one consistent
+//! snapshot without holding the database lock for the whole scan. Upload, metadata and the `is_synced` update read only that
+//! spool. Pages bound memory without capping how many objects a repository
+//! may hold.
+//!
+//! The run directory is created exclusively with owner-only modes and holds
+//! an owner marker from the start, so a later cleanup can tell whose run a
+//! leftover was. The `cloud-sync` / `snapshots` parents must be real
+//! directories inside `.libra`, owned by the current user and not writable
+//! by group or others (a symlink is never followed), so no other user can
+//! swap a path under the spool. The spool is removed when the
+//! [`SnapshotSpool`] is released or dropped, so success and failure both
+//! clean up.
+
+use std::{
+    fs::{self, File, OpenOptions},
+    io::{BufRead, BufReader, BufWriter, Write},
+    path::{Path, PathBuf},
+};
+
+use sea_orm::{QueryOrder, QuerySelect};
+use serde::Deserialize;
+
+use super::{metadata::serialize_reference_projection, *};
+
+/// Directory under `.libra` that holds cloud-sync working state.
+pub(super) const SPOOL_ROOT_DIR: &str = "cloud-sync";
+/// Directory under [`SPOOL_ROOT_DIR`] holding one directory per sync run.
+pub(super) const SPOOL_SNAPSHOTS_DIR: &str = "snapshots";
+const OBJECTS_FILE: &str = "objects.jsonl";
+const REFS_FILE: &str = "refs.json";
+const REPOSITORY_FILE: &str = "repository.json";
+/// Owner marker written into every run directory when it is created.
+pub(super) const OWNER_MARKER_FILE: &str = "owner.json";
+/// `tool` value of [`OwnerMarker`].
+pub(super) const OWNER_MARKER_TOOL: &str = "libra-cloud-sync";
+/// Rows read from SQLite, and identities read back from the spool, per page.
+pub(super) const DEFAULT_SPOOL_PAGE_SIZE: usize = 1024;
+
+/// Per-run knobs. Production uses `Default`; tests shrink the page size and
+/// pause between the freeze and the first remote write.
+#[derive(Default)]
+pub(super) struct SnapshotTuning {
+    pub(super) page_size: Option<usize>,
+    #[cfg(test)]
+    pub(super) after_freeze: Option<AfterFreezeHook>,
+    /// Fail the first spool write as if the disk were full.
+    #[cfg(test)]
+    pub(super) fail_spool_write: bool,
+    /// Fail every local `is_synced` update.
+    #[cfg(test)]
+    pub(super) fail_status_update: bool,
+    /// Fail the removal of this run's spool.
+    #[cfg(test)]
+    pub(super) fail_spool_release: bool,
+    /// Fail writing the owner marker.
+    #[cfg(test)]
+    pub(super) fail_marker_write: bool,
+    /// Fail reading `cloud.name` inside the freeze.
+    #[cfg(test)]
+    pub(super) fail_config_read: bool,
+    /// Use this run directory name instead of a random one.
+    #[cfg(test)]
+    pub(super) run_name: Option<String>,
+    /// Run after each object page of the freeze.
+    #[cfg(test)]
+    pub(super) between_pages: Option<BetweenPagesHook>,
+    /// Run after each ref page of the freeze.
+    #[cfg(test)]
+    pub(super) between_ref_pages: Option<BetweenPagesHook>,
+    /// Make the first freeze attempt end on what looks like a replaced
+    /// connection.
+    #[cfg(test)]
+    pub(super) simulate_reconnect: bool,
+}
+
+/// Called with the freeze attempt number (1-based) after each page.
+#[cfg(test)]
+pub(super) type BetweenPagesHook =
+    std::sync::Arc<dyn Fn(usize) -> futures::future::BoxFuture<'static, ()> + Send + Sync>;
+
+#[cfg(test)]
+pub(super) type AfterFreezeHook =
+    std::sync::Arc<dyn Fn(PathBuf) -> futures::future::BoxFuture<'static, ()> + Send + Sync>;
+
+impl SnapshotTuning {
+    pub(super) fn page_size(&self) -> usize {
+        self.page_size.unwrap_or(DEFAULT_SPOOL_PAGE_SIZE).max(1)
+    }
+}
+
+/// Freeze attempts before a database that keeps changing stops the run.
+pub(super) const MAX_FREEZE_ATTEMPTS: usize = 3;
+
+/// `PRAGMA data_version`: changes on this connection exactly when another
+/// connection commits to the database.
+async fn data_version(conn: &sea_orm::DatabaseConnection) -> Result<i64, sea_orm::DbErr> {
+    let row = conn
+        .query_one_raw(sea_orm::Statement::from_string(
+            conn.get_database_backend(),
+            "PRAGMA data_version",
+        ))
+        .await?
+        .ok_or_else(|| sea_orm::DbErr::Custom("PRAGMA data_version returned no row".into()))?;
+    row.try_get::<i64>("", "data_version")
+}
+
+/// Record `attempt` in a TEMP table private to this physical connection.
+async fn mark_freeze_connection(
+    conn: &sea_orm::DatabaseConnection,
+    attempt: usize,
+) -> Result<(), sea_orm::DbErr> {
+    conn.execute_unprepared(
+        "CREATE TEMP TABLE IF NOT EXISTS libra_cloud_sync_freeze (attempt INTEGER NOT NULL)",
+    )
+    .await?;
+    conn.execute_unprepared("DELETE FROM temp.libra_cloud_sync_freeze")
+        .await?;
+    conn.execute_unprepared(&format!(
+        "INSERT INTO temp.libra_cloud_sync_freeze (attempt) VALUES ({attempt})"
+    ))
+    .await?;
+    Ok(())
+}
+
+/// Whether the connection now answering is the one [`mark_freeze_connection`]
+/// marked for `attempt` (a replacement has no such TEMP table).
+async fn same_freeze_connection(
+    conn: &sea_orm::DatabaseConnection,
+    attempt: usize,
+) -> Result<bool, sea_orm::DbErr> {
+    let row = match conn
+        .query_one_raw(sea_orm::Statement::from_string(
+            conn.get_database_backend(),
+            "SELECT attempt FROM temp.libra_cloud_sync_freeze",
+        ))
+        .await
+    {
+        Ok(row) => row,
+        Err(error) if error.to_string().contains("no such table") => return Ok(false),
+        Err(error) => return Err(error),
+    };
+    match row {
+        Some(row) => Ok(row.try_get::<i64>("", "attempt")? == attempt as i64),
+        None => Ok(false),
+    }
+}
+
+/// Replace a spool file left by an earlier freeze attempt of this run.
+fn recreate_private_file(path: &Path) -> std::io::Result<File> {
+    match fs::remove_file(path) {
+        Err(error) if error.kind() != std::io::ErrorKind::NotFound => return Err(error),
+        _ => {}
+    }
+    create_private_file(path)
+}
+
+/// One frozen `object_index` identity, as written to the spool.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub(super) struct FrozenObject {
+    pub(super) id: i64,
+    pub(super) o_id: String,
+    pub(super) o_type: String,
+    pub(super) o_size: i64,
+    pub(super) repo_id: String,
+    pub(super) created_at: i64,
+}
+
+impl From<object_index::Model> for FrozenObject {
+    fn from(model: object_index::Model) -> Self {
+        Self {
+            id: model.id,
+            o_id: model.o_id,
+            o_type: model.o_type,
+            o_size: model.o_size,
+            repo_id: model.repo_id,
+            created_at: model.created_at,
+        }
+    }
+}
+
+/// Who created a run directory. Written once, when the directory is created.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub(super) struct OwnerMarker {
+    pub(super) tool: String,
+    pub(super) pid: u32,
+    /// The PID namespace `pid` belongs to (`/proc/self/ns/pid` on Linux;
+    /// `None` where the platform has no PID namespaces).
+    pub(super) pid_namespace: Option<String>,
+    /// Identity of the current boot of this host (Linux
+    /// `/proc/sys/kernel/random/boot_id`, macOS `kern.bootsessionuuid`);
+    /// `None` when it cannot be read.
+    pub(super) boot_id: Option<String>,
+    pub(super) host: String,
+    pub(super) started_at_unix_ms: i64,
+    pub(super) libra_version: String,
+}
+
+impl OwnerMarker {
+    fn for_this_process() -> Self {
+        Self {
+            tool: OWNER_MARKER_TOOL.to_string(),
+            pid: std::process::id(),
+            pid_namespace: pid_namespace(),
+            boot_id: boot_id(),
+            host: host_name(),
+            started_at_unix_ms: chrono::Utc::now().timestamp_millis(),
+            libra_version: env!("CARGO_PKG_VERSION").to_string(),
+        }
+    }
+}
+
+/// This process's PID namespace identity, e.g. `pid:[4026531836]`.
+pub(super) fn pid_namespace() -> Option<String> {
+    #[cfg(target_os = "linux")]
+    {
+        fs::read_link("/proc/self/ns/pid")
+            .ok()
+            .map(|link| link.to_string_lossy().into_owned())
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        None
+    }
+}
+
+/// This host's current boot identity.
+pub(super) fn boot_id() -> Option<String> {
+    #[cfg(target_os = "linux")]
+    {
+        fs::read_to_string("/proc/sys/kernel/random/boot_id")
+            .ok()
+            .map(|id| id.trim().to_string())
+            .filter(|id| !id.is_empty())
+    }
+    #[cfg(target_os = "macos")]
+    {
+        let mut buffer = [0u8; 64];
+        let mut len = buffer.len();
+        // SAFETY: the name is NUL-terminated; `buffer` is valid for `len`
+        // bytes and sysctlbyname writes at most that many.
+        let status = unsafe {
+            libc::sysctlbyname(
+                c"kern.bootsessionuuid".as_ptr(),
+                buffer.as_mut_ptr().cast(),
+                &mut len,
+                std::ptr::null_mut(),
+                0,
+            )
+        };
+        if status != 0 {
+            return None;
+        }
+        let bytes = &buffer[..len.min(buffer.len())];
+        let end = bytes
+            .iter()
+            .position(|byte| *byte == 0)
+            .unwrap_or(bytes.len());
+        let id = String::from_utf8_lossy(&bytes[..end]).trim().to_string();
+        (!id.is_empty()).then_some(id)
+    }
+    #[cfg(not(any(target_os = "linux", target_os = "macos")))]
+    {
+        None
+    }
+}
+
+#[cfg(unix)]
+fn host_name() -> String {
+    let mut buffer = [0u8; 256];
+    // SAFETY: the buffer is valid for `buffer.len()` bytes; gethostname
+    // writes at most that many bytes.
+    let status = unsafe { libc::gethostname(buffer.as_mut_ptr().cast(), buffer.len()) };
+    if status != 0 {
+        return String::new();
+    }
+    let end = buffer
+        .iter()
+        .position(|byte| *byte == 0)
+        .unwrap_or(buffer.len());
+    String::from_utf8_lossy(&buffer[..end]).into_owned()
+}
+
+#[cfg(not(unix))]
+fn host_name() -> String {
+    std::env::var("COMPUTERNAME").unwrap_or_default()
+}
+
+/// Repository metadata frozen with the snapshot: the project name to
+/// register, i.e. the configured `cloud.name` or, when unset, the working
+/// directory's name.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub(super) struct FrozenRepository {
+    pub(super) project_name: String,
+}
+
+/// The frozen refs projection: the JSON uploaded as repository metadata.
+pub(super) struct FrozenRefs {
+    pub(super) references: usize,
+    pub(super) json: Vec<u8>,
+}
+
+/// Where a spool dropped without [`SnapshotSpool::finish`] reports a
+/// directory it could not remove.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum SpoolWarningSink {
+    /// `warning:` text on stderr in every mode, like
+    /// `emit_post_envelope_warning`: a panicking or cancelled run renders no
+    /// envelope that could carry it.
+    Stderr,
+    /// One `cloud_sync.spool.warning` NDJSON line on the `--progress=json`
+    /// stream.
+    NdjsonProgress,
+}
+
+/// A private per-run spool. Dropping it removes the run directory.
+pub(super) struct SnapshotSpool {
+    dir: PathBuf,
+    warning_sink: SpoolWarningSink,
+    objects: u64,
+    references: usize,
+    released: bool,
+    #[cfg(test)]
+    fail_release: bool,
+}
+
+fn spool_failure(action: &str, path: &Path, error: impl fmt::Display) -> CloudError {
+    CloudError::Generic(format!(
+        "cloud sync could not {action} its local snapshot spool at {}: {error}; nothing was written to D1 or R2. Check free disk space and that the directory is a plain directory inside .libra, then retry",
+        path.display()
+    ))
+}
+
+/// The repository storage directory (`.libra`) anchors the spool: it must
+/// be a real directory (a symlink is not followed) owned by the current user
+/// and not writable by group or others (Windows: a protected DACL granting
+/// only the current user and SYSTEM), so no other user can swap the
+/// `cloud-sync` subtree between the checks below and the spool writes.
+fn ensure_trusted_root(storage: &Path) -> CloudResult<()> {
+    let meta =
+        fs::symlink_metadata(storage).map_err(|error| spool_failure("inspect", storage, error))?;
+    if meta.file_type().is_symlink() {
+        return Err(spool_failure(
+            "use",
+            storage,
+            "the repository storage directory is a symbolic link and is not followed",
+        ));
+    }
+    if !meta.is_dir() {
+        return Err(spool_failure(
+            "use",
+            storage,
+            "the repository storage path is not a directory",
+        ));
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::MetadataExt;
+        // SAFETY: geteuid has no preconditions.
+        let euid = unsafe { libc::geteuid() };
+        if meta.uid() != euid {
+            return Err(spool_failure(
+                "use",
+                storage,
+                format!(
+                    "the repository storage directory is owned by uid {} but cloud sync runs as uid {euid}",
+                    meta.uid()
+                ),
+            ));
+        }
+        if meta.mode() & 0o022 != 0 {
+            return Err(spool_failure(
+                "use",
+                storage,
+                "the repository storage directory is writable by group or others; run `chmod go-w` on it",
+            ));
+        }
+    }
+    #[cfg(windows)]
+    {
+        // Windows: `.libra` must already carry a protected DACL granting only
+        // the current user and SYSTEM (no reparse point); otherwise refuse.
+        crate::utils::windows_fs::open_private_directory(storage).map_err(|error| {
+            spool_failure(
+                "use",
+                storage,
+                format!(
+                    "{error}; cloud sync on Windows needs a private .libra: run `{}`, then retry",
+                    icacls_private_command(storage)
+                ),
+            )
+        })?;
+    }
+    Ok(())
+}
+
+/// A spool read after the freeze failed. Remote writes may already have
+/// happened, so this never claims otherwise.
+fn spool_read_failure(path: &Path, error: impl fmt::Display) -> CloudError {
+    CloudError::Generic(format!(
+        "cloud sync could not read its local snapshot spool at {}: {error}; part of this run may already have been sent to D1 or R2. Re-run `libra cloud sync`: objects not marked synced locally are sent again",
+        path.display()
+    ))
+}
+
+/// Refuse a `.libra` entry that is itself a symbolic link. Repository
+/// discovery resolves links, so the raw entry in the working directory is
+/// checked separately.
+fn ensure_raw_root_not_linked(raw_root: &Path) -> CloudResult<()> {
+    match fs::symlink_metadata(raw_root) {
+        Ok(meta) if meta.file_type().is_symlink() => Err(spool_failure(
+            "use",
+            raw_root,
+            "the repository storage directory is a symbolic link and is not followed",
+        )),
+        _ => Ok(()),
+    }
+}
+
+/// The `icacls` command that makes `dir` private: inheritance removed, full
+/// control for the current user (resolved now, so it runs in any shell) and
+/// SYSTEM only.
+#[cfg(windows)]
+fn icacls_private_command(dir: &Path) -> String {
+    let user = std::env::var("USERNAME").unwrap_or_else(|_| "<your user name>".to_string());
+    format!(
+        "icacls \"{}\" /inheritance:r /grant:r \"{user}:(OI)(CI)F\" \"SYSTEM:(OI)(CI)F\"",
+        dir.display()
+    )
+}
+
+/// Accept an existing parent only when it is a real directory (never a
+/// symlink) inside `.libra`, owned by the current user and not writable by
+/// group or others; create it owner-only when absent.
+fn ensure_spool_parent(storage: &Path, dir: &Path) -> CloudResult<()> {
+    let meta = match fs::symlink_metadata(dir) {
+        Ok(meta) => meta,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            create_parent_or_reuse(dir).map_err(|error| spool_failure("create", dir, error))?;
+            fs::symlink_metadata(dir).map_err(|error| spool_failure("inspect", dir, error))?
+        }
+        Err(error) => return Err(spool_failure("inspect", dir, error)),
+    };
+    if meta.file_type().is_symlink() {
+        return Err(spool_failure(
+            "use",
+            dir,
+            "the path is a symbolic link and is not followed",
+        ));
+    }
+    if !meta.is_dir() {
+        return Err(spool_failure("use", dir, "the path is not a directory"));
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::MetadataExt;
+        // SAFETY: geteuid has no preconditions.
+        let euid = unsafe { libc::geteuid() };
+        if meta.uid() != euid {
+            return Err(spool_failure(
+                "use",
+                dir,
+                format!(
+                    "the directory is owned by uid {} but cloud sync runs as uid {euid}",
+                    meta.uid()
+                ),
+            ));
+        }
+        if meta.mode() & 0o022 != 0 {
+            return Err(spool_failure(
+                "use",
+                dir,
+                "the directory is writable by group or others; run `chmod go-w` on it",
+            ));
+        }
+    }
+    #[cfg(windows)]
+    {
+        // Opened without following reparse points; the DACL must be protected
+        // and grant only the current user and SYSTEM.
+        crate::utils::windows_fs::open_private_directory(dir).map_err(|error| {
+            spool_failure(
+                "use",
+                dir,
+                format!(
+                    "{error}; make it private with `{}`, then retry",
+                    icacls_private_command(dir)
+                ),
+            )
+        })?;
+    }
+    let root = storage
+        .canonicalize()
+        .map_err(|error| spool_failure("resolve", storage, error))?;
+    let resolved = dir
+        .canonicalize()
+        .map_err(|error| spool_failure("resolve", dir, error))?;
+    if !resolved.starts_with(&root) {
+        return Err(spool_failure(
+            "use",
+            dir,
+            "the directory resolves outside .libra",
+        ));
+    }
+    Ok(())
+}
+
+/// Create a spool parent; a concurrent sync that created it first is not an
+/// error, because the caller validates whatever is there next.
+pub(super) fn create_parent_or_reuse(dir: &Path) -> std::io::Result<()> {
+    match create_private_dir(dir) {
+        Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => Ok(()),
+        result => result,
+    }
+}
+
+/// Create one directory (not its parents), failing if it already exists.
+/// Unix: mode 0700. Windows: a protected DACL granting only the current user
+/// and SYSTEM, inherited by the files created inside.
+pub(super) fn create_private_dir(dir: &Path) -> std::io::Result<()> {
+    #[cfg(windows)]
+    {
+        crate::utils::windows_fs::create_private_directory(dir)
+    }
+    #[cfg(not(windows))]
+    {
+        let mut builder = fs::DirBuilder::new();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::DirBuilderExt;
+            builder.mode(0o700);
+        }
+        builder.create(dir)
+    }
+}
+
+/// Create a new file that must not exist yet, owner-only (Unix mode 0600;
+/// on Windows it inherits the private run directory's DACL).
+fn create_private_file(path: &Path) -> std::io::Result<File> {
+    let mut options = OpenOptions::new();
+    options.write(true).create_new(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.mode(0o600);
+    }
+    options.open(path)
+}
+
+impl SnapshotSpool {
+    /// Create this run's spool directory under `<storage>/cloud-sync/snapshots`.
+    pub(super) fn create(
+        storage: &Path,
+        raw_root: &Path,
+        tuning: &SnapshotTuning,
+        warning_sink: SpoolWarningSink,
+    ) -> CloudResult<Self> {
+        ensure_raw_root_not_linked(raw_root)?;
+        ensure_trusted_root(storage)?;
+        let root = storage.join(SPOOL_ROOT_DIR);
+        ensure_spool_parent(storage, &root)?;
+        let snapshots = root.join(SPOOL_SNAPSHOTS_DIR);
+        ensure_spool_parent(storage, &snapshots)?;
+        #[cfg(test)]
+        let name = tuning
+            .run_name
+            .clone()
+            .unwrap_or_else(|| format!("run-{}", Uuid::new_v4()));
+        #[cfg(not(test))]
+        let name = format!("run-{}", Uuid::new_v4());
+        let dir = snapshots.join(name);
+        create_private_dir(&dir).map_err(|error| spool_failure("create", &dir, error))?;
+        // From here on, dropping the spool removes the directory.
+        #[cfg_attr(not(test), allow(unused_mut))]
+        let mut spool = Self {
+            dir,
+            warning_sink,
+            objects: 0,
+            references: 0,
+            released: false,
+            #[cfg(test)]
+            fail_release: tuning.fail_spool_release,
+        };
+        #[cfg(not(test))]
+        let _ = tuning;
+        match spool.write_marker(tuning) {
+            Ok(()) => Ok(spool),
+            // Remove the half-made run now so a removal failure is reported
+            // with the error instead of only being logged by `Drop`.
+            Err(error) => Err(match spool.finish() {
+                Some(note) => error.with_note(&note),
+                None => error,
+            }),
+        }
+    }
+
+    fn write_marker(&mut self, tuning: &SnapshotTuning) -> CloudResult<()> {
+        let marker_path = self.dir.join(OWNER_MARKER_FILE);
+        #[cfg(test)]
+        if tuning.fail_marker_write {
+            return Err(spool_failure(
+                "write",
+                &marker_path,
+                std::io::Error::other("injected marker write failure"),
+            ));
+        }
+        #[cfg(not(test))]
+        let _ = tuning;
+        let marker = serde_json::to_vec(&OwnerMarker::for_this_process())
+            .map_err(|error| spool_failure("write", &marker_path, error))?;
+        let mut marker_file = create_private_file(&marker_path)
+            .map_err(|error| spool_failure("create", &marker_path, error))?;
+        marker_file
+            .write_all(&marker)
+            .and_then(|()| marker_file.sync_all())
+            .map_err(|error| spool_failure("write", &marker_path, error))
+    }
+
+    #[cfg(test)]
+    pub(super) fn dir(&self) -> &Path {
+        &self.dir
+    }
+
+    pub(super) fn object_count(&self) -> u64 {
+        self.objects
+    }
+
+    /// Freeze what this run uploads: the object identities (unsynced ones, or
+    /// all of the repository's with `force`), the refs projection and the
+    /// project name.
+    ///
+    /// Every read runs as its own short statement on one dedicated read
+    /// connection, so no database lock is held across the scan and other
+    /// processes' writers wait at most one statement. SQLite's
+    /// `PRAGMA data_version` on that connection changes exactly when any
+    /// other connection commits, so an unchanged value before the first and
+    /// after the last read proves all of them saw one database state. A change
+    /// retries the freeze; after [`MAX_FREEZE_ATTEMPTS`] the run stops, still
+    /// before any remote write.
+    pub(super) async fn freeze(
+        &mut self,
+        db_path: &Path,
+        repo_id: &str,
+        force: bool,
+        tuning: &SnapshotTuning,
+    ) -> CloudResult<()> {
+        let db_path_text = db_path.to_str().ok_or_else(|| {
+            CloudError::Generic(format!(
+                "the repository database path {} is not valid UTF-8",
+                db_path.display()
+            ))
+        })?;
+        let conn = crate::internal::db::open_connection_without_schema_management(
+            db_path_text,
+            crate::internal::db::DEFAULT_CONNECTION_TIMEOUT,
+        )
+        .await
+        .map_err(|error| {
+            CloudError::Generic(format!(
+                "open the repository database for the snapshot: {error}; nothing was written to D1 or R2"
+            ))
+        })?;
+        let mut outcome = Err(CloudError::Generic(String::new()));
+        for attempt in 1..=MAX_FREEZE_ATTEMPTS {
+            match self
+                .freeze_once(&conn, repo_id, force, tuning, attempt)
+                .await
+            {
+                Ok(true) => {
+                    outcome = Ok(());
+                    break;
+                }
+                Ok(false) => {
+                    outcome = Err(CloudError::Generic(format!(
+                        "the local repository database kept changing while cloud sync took its snapshot ({MAX_FREEZE_ATTEMPTS} attempts); nothing was written to D1 or R2. Re-run `libra cloud sync` when other Libra commands in this repository have finished"
+                    )));
+                }
+                Err(error) => {
+                    outcome = Err(error);
+                    break;
+                }
+            }
+        }
+        let _ = conn.close().await;
+        outcome
+    }
+
+    /// One freeze attempt. Returns `false` when another connection committed
+    /// during the attempt, so its reads may mix two database states.
+    async fn freeze_once(
+        &mut self,
+        conn: &sea_orm::DatabaseConnection,
+        repo_id: &str,
+        force: bool,
+        tuning: &SnapshotTuning,
+        attempt: usize,
+    ) -> CloudResult<bool> {
+        let page_size = tuning.page_size();
+        let objects_path = self.dir.join(OBJECTS_FILE);
+        let file = recreate_private_file(&objects_path)
+            .map_err(|error| spool_failure("create", &objects_path, error))?;
+        let mut writer = BufWriter::new(file);
+        #[cfg(test)]
+        if tuning.fail_spool_write {
+            return Err(spool_failure(
+                "write",
+                &objects_path,
+                std::io::Error::new(
+                    std::io::ErrorKind::StorageFull,
+                    "no space left on device (injected)",
+                ),
+            ));
+        }
+        #[cfg(not(test))]
+        let _ = attempt;
+
+        let read_failure = |error: sea_orm::DbErr| {
+            CloudError::Generic(format!(
+                "read the repository for the snapshot: {error}; nothing was written to D1 or R2"
+            ))
+        };
+        // `data_version` values compare only on one physical connection, and
+        // the pool behind `conn` could replace it between statements. A row
+        // in a connection-private TEMP table proves the connection at the end
+        // is the one from the start; TEMP writes never touch the repository
+        // database or its lock.
+        mark_freeze_connection(conn, attempt)
+            .await
+            .map_err(read_failure)?;
+        let start = data_version(conn).await.map_err(read_failure)?;
+        let boundary = conn
+            .query_one_raw(sea_orm::Statement::from_sql_and_values(
+                conn.get_database_backend(),
+                "SELECT MAX(id) AS max_id FROM object_index WHERE repo_id = ?",
+                [repo_id.into()],
+            ))
+            .await
+            .map_err(read_failure)?
+            .map(|row| row.try_get::<Option<i64>>("", "max_id"))
+            .transpose()
+            .map_err(read_failure)?
+            .flatten();
+        // The refs up to their own boundary, a page per statement, so a large
+        // ref set never holds the read lock for long and refs inserted
+        // meanwhile cannot keep the scan going; the `data_version` check
+        // covers changes between pages. The projection sorts them before
+        // serializing.
+        let ref_boundary = conn
+            .query_one_raw(sea_orm::Statement::from_string(
+                conn.get_database_backend(),
+                "SELECT MAX(id) AS max_id FROM reference",
+            ))
+            .await
+            .map_err(read_failure)?
+            .map(|row| row.try_get::<Option<i64>>("", "max_id"))
+            .transpose()
+            .map_err(read_failure)?
+            .flatten();
+        let mut references = Vec::new();
+        let mut last_ref_id = i64::MIN;
+        while let Some(ref_boundary) = ref_boundary {
+            let page = reference::Entity::find()
+                .filter(reference::Column::Id.gt(last_ref_id))
+                .filter(reference::Column::Id.lte(ref_boundary))
+                .order_by_asc(reference::Column::Id)
+                .limit(page_size as u64)
+                .all(conn)
+                .await
+                .map_err(read_failure)?;
+            let Some(last) = page.last() else {
+                break;
+            };
+            last_ref_id = last.id;
+            let page_len = page.len();
+            references.extend(page);
+            #[cfg(test)]
+            if let Some(between_ref_pages) = &tuning.between_ref_pages {
+                between_ref_pages(attempt).await;
+            }
+            if page_len < page_size {
+                break;
+            }
+        }
+        #[cfg(test)]
+        if tuning.fail_config_read {
+            return Err(CloudError::Generic(
+                "read cloud.name for the snapshot: injected config read failure; nothing was written to D1 or R2".to_string(),
+            ));
+        }
+        let cloud_name = ConfigKv::get_with_conn(conn, "cloud.name")
+            .await
+            .map_err(|error| {
+                CloudError::Generic(format!(
+                    "read cloud.name for the snapshot: {error}; nothing was written to D1 or R2"
+                ))
+            })?
+            .map(|entry| entry.value);
+        let repository = FrozenRepository {
+            project_name: cloud_name.unwrap_or_else(|| {
+                util::working_dir()
+                    .file_name()
+                    .map(|name| name.to_string_lossy().to_string())
+                    .unwrap_or_else(|| "unknown-project".to_string())
+            }),
+        };
+
+        // The object identities up to the boundary (ids only grow), a page
+        // per statement.
+        let mut objects = 0u64;
+        if let Some(boundary) = boundary {
+            let mut last_id = i64::MIN;
+            loop {
+                let mut query = object_index::Entity::find()
+                    .filter(object_index::Column::RepoId.eq(repo_id))
+                    .filter(object_index::Column::Id.gt(last_id))
+                    .filter(object_index::Column::Id.lte(boundary));
+                if !force {
+                    query = query.filter(object_index::Column::IsSynced.eq(0));
+                }
+                let page = query
+                    .order_by_asc(object_index::Column::Id)
+                    .limit(page_size as u64)
+                    .all(conn)
+                    .await
+                    .map_err(read_failure)?;
+                let Some(last) = page.last() else {
+                    break;
+                };
+                last_id = last.id;
+                let page_len = page.len();
+                for model in page {
+                    serde_json::to_writer(&mut writer, &FrozenObject::from(model))
+                        .map_err(|error| spool_failure("write", &objects_path, error))?;
+                    writer
+                        .write_all(b"\n")
+                        .map_err(|error| spool_failure("write", &objects_path, error))?;
+                    objects += 1;
+                }
+                #[cfg(test)]
+                if let Some(between_pages) = &tuning.between_pages {
+                    between_pages(attempt).await;
+                }
+                if page_len < page_size {
+                    break;
+                }
+            }
+        }
+        #[cfg(test)]
+        if tuning.simulate_reconnect && attempt == 1 {
+            // What a fresh connection looks like: no TEMP marker.
+            conn.execute_unprepared("DROP TABLE temp.libra_cloud_sync_freeze")
+                .await
+                .map_err(read_failure)?;
+        }
+        if data_version(conn).await.map_err(read_failure)? != start
+            || !same_freeze_connection(conn, attempt)
+                .await
+                .map_err(read_failure)?
+        {
+            return Ok(false);
+        }
+
+        writer
+            .flush()
+            .map_err(|error| spool_failure("write", &objects_path, error))?;
+        writer
+            .get_ref()
+            .sync_all()
+            .map_err(|error| spool_failure("write", &objects_path, error))?;
+
+        let (sorted_refs, json) = serialize_reference_projection(references)?;
+        let refs_path = self.dir.join(REFS_FILE);
+        let mut refs_file = recreate_private_file(&refs_path)
+            .map_err(|error| spool_failure("create", &refs_path, error))?;
+        refs_file
+            .write_all(&json)
+            .and_then(|()| refs_file.sync_all())
+            .map_err(|error| spool_failure("write", &refs_path, error))?;
+
+        let repository_path = self.dir.join(REPOSITORY_FILE);
+        let repository_json = serde_json::to_vec(&repository)
+            .map_err(|error| spool_failure("write", &repository_path, error))?;
+        let mut repository_file = recreate_private_file(&repository_path)
+            .map_err(|error| spool_failure("create", &repository_path, error))?;
+        repository_file
+            .write_all(&repository_json)
+            .and_then(|()| repository_file.sync_all())
+            .map_err(|error| spool_failure("write", &repository_path, error))?;
+
+        self.objects = objects;
+        self.references = sorted_refs.len();
+        Ok(true)
+    }
+
+    /// The repository metadata frozen with this snapshot.
+    pub(super) fn repository(&self) -> CloudResult<FrozenRepository> {
+        let path = self.dir.join(REPOSITORY_FILE);
+        let bytes = fs::read(&path).map_err(|error| spool_read_failure(&path, error))?;
+        serde_json::from_slice(&bytes).map_err(|error| spool_read_failure(&path, error))
+    }
+
+    /// Read the frozen identities back, `page_size` at a time.
+    pub(super) fn object_pages(&self, page_size: usize) -> CloudResult<FrozenObjectPages> {
+        let path = self.dir.join(OBJECTS_FILE);
+        let file = File::open(&path).map_err(|error| spool_read_failure(&path, error))?;
+        Ok(FrozenObjectPages {
+            reader: BufReader::new(file),
+            path,
+            page_size: page_size.max(1),
+            remaining: self.objects,
+        })
+    }
+
+    /// The frozen refs projection.
+    pub(super) fn refs(&self) -> CloudResult<FrozenRefs> {
+        let path = self.dir.join(REFS_FILE);
+        let json = fs::read(&path).map_err(|error| spool_read_failure(&path, error))?;
+        Ok(FrozenRefs {
+            references: self.references,
+            json,
+        })
+    }
+
+    /// Remove the run directory now. Returns a user-facing note naming the
+    /// directory when it could not be removed; the caller reports it.
+    pub(super) fn finish(mut self) -> Option<String> {
+        self.remove()
+    }
+
+    fn remove(&mut self) -> Option<String> {
+        if self.released {
+            return None;
+        }
+        self.released = true;
+        #[cfg(test)]
+        let result = if self.fail_release {
+            Err(std::io::Error::other("injected removal failure"))
+        } else {
+            fs::remove_dir_all(&self.dir)
+        };
+        #[cfg(not(test))]
+        let result = fs::remove_dir_all(&self.dir);
+        let error = result.err()?;
+        tracing::warn!(
+            spool = %self.dir.display(),
+            error = %error,
+            "could not remove the cloud sync snapshot spool"
+        );
+        Some(format!(
+            "cloud sync could not remove its snapshot spool {}: {error}. It holds this run's object identities (id, type, size, repository id, timestamp), refs, project name and owner marker (pid, host, boot id); it is never reused, so delete that directory manually",
+            self.dir.display()
+        ))
+    }
+}
+
+/// Test-only capture of the plain-text drop warning, in place of stderr.
+#[cfg(test)]
+pub(super) static DROP_WARNING_CAPTURE: std::sync::Mutex<Option<Vec<String>>> =
+    std::sync::Mutex::new(None);
+
+/// Write one line to stderr without panicking (this runs during unwinding).
+fn write_drop_warning(line: &str) {
+    #[cfg(test)]
+    if let Ok(mut capture) = DROP_WARNING_CAPTURE.lock()
+        && let Some(lines) = capture.as_mut()
+    {
+        lines.push(line.to_string());
+        return;
+    }
+    let _ = writeln!(std::io::stderr(), "{line}");
+}
+
+impl Drop for SnapshotSpool {
+    /// Only reached without [`SnapshotSpool::finish`] (a panic or a cancelled
+    /// future). A removal failure is still reported to the user, through
+    /// calls that cannot panic again.
+    fn drop(&mut self) {
+        if let Some(note) = self.remove() {
+            crate::utils::output::record_warning_message(note.clone());
+            match self.warning_sink {
+                SpoolWarningSink::NdjsonProgress => {
+                    super::JsonCloudSyncProgress::emit(super::spool_warning_event(&note));
+                }
+                SpoolWarningSink::Stderr => write_drop_warning(&format!("warning: {note}")),
+            }
+        }
+    }
+}
+
+/// Paged reader over the frozen identities.
+/// Paged reader over the frozen identities. It yields exactly the number of
+/// identities the freeze recorded: a shorter, longer or unterminated spool is
+/// a read failure, never a silently smaller upload.
+pub(super) struct FrozenObjectPages {
+    reader: BufReader<File>,
+    path: PathBuf,
+    page_size: usize,
+    remaining: u64,
+}
+
+impl FrozenObjectPages {
+    pub(super) fn next_page(&mut self) -> CloudResult<Option<Vec<FrozenObject>>> {
+        let mut page = Vec::with_capacity(self.page_size);
+        let mut line = String::new();
+        while page.len() < self.page_size && self.remaining > 0 {
+            line.clear();
+            let read = self
+                .reader
+                .read_line(&mut line)
+                .map_err(|error| spool_read_failure(&self.path, error))?;
+            if read == 0 {
+                return Err(spool_read_failure(
+                    &self.path,
+                    format!(
+                        "the spool ended {} identities short of the frozen count",
+                        self.remaining
+                    ),
+                ));
+            }
+            let Some(record) = line.strip_suffix('\n') else {
+                return Err(spool_read_failure(
+                    &self.path,
+                    "the last spool record is not newline-terminated",
+                ));
+            };
+            let object: FrozenObject = serde_json::from_str(record)
+                .map_err(|error| spool_read_failure(&self.path, error))?;
+            page.push(object);
+            self.remaining -= 1;
+        }
+        if self.remaining == 0 && page.is_empty() {
+            line.clear();
+            let read = self
+                .reader
+                .read_line(&mut line)
+                .map_err(|error| spool_read_failure(&self.path, error))?;
+            if read != 0 {
+                return Err(spool_read_failure(
+                    &self.path,
+                    "the spool holds more identities than the freeze recorded",
+                ));
+            }
+        }
+        Ok((!page.is_empty()).then_some(page))
+    }
+}

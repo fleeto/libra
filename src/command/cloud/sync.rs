@@ -319,7 +319,7 @@ async fn sync_from_spool(
         // is a read failure.
         spool.object_pages(page_size)?.next_page()?;
         progress.on_no_objects();
-        let metadata = sync_metadata(&r2_storage, progress, &spool.refs()?).await?;
+        let metadata = sync_metadata(&r2_storage, progress, &spool.refs(tuning)?).await?;
         // CEX-EntireIO §10.2: even when there are no new git objects to
         // ship, the agent_session/agent_checkpoint catalog may have new
         // rows from local hook ingestion. Mirror them on every sync.
@@ -427,7 +427,7 @@ async fn sync_from_spool(
         });
     }
 
-    let metadata = sync_metadata(&r2_storage, progress, &spool.refs()?).await?;
+    let metadata = sync_metadata(&r2_storage, progress, &spool.refs(tuning)?).await?;
     // CEX-EntireIO §10.2: append agent capture catalog mirroring at the
     // tail of the sync flow per the plan. The report retains the detailed
     // phase outcome; `execute_sync` turns a failed mirror into a non-zero,

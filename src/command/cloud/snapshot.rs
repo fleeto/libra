@@ -28,7 +28,13 @@ use std::{
 use sea_orm::{QueryOrder, QuerySelect};
 use serde::Deserialize;
 
-use super::{metadata::serialize_reference_projection, *};
+use super::{
+    metadata::{
+        DigestWriter, ReferenceProjectionKey, ReferenceProjectionWriter, copy_reference_page,
+        metadata_hash_of_file, prepare_reference_copy, reference_projection_page,
+    },
+    *,
+};
 
 /// Directory under `.libra` that holds cloud-sync working state.
 pub(super) const SPOOL_ROOT_DIR: &str = "cloud-sync";
@@ -43,6 +49,11 @@ pub(super) const OWNER_MARKER_FILE: &str = "owner.json";
 pub(super) const OWNER_MARKER_TOOL: &str = "libra-cloud-sync";
 /// Rows read from SQLite, and identities read back from the spool, per page.
 pub(super) const DEFAULT_SPOOL_PAGE_SIZE: usize = 1024;
+
+/// Bytes of the frozen refs JSON hashed or uploaded at a time (PI-27); also
+/// the multipart part size, which S3-compatible stores require to be at
+/// least 5 MiB.
+pub(super) const DEFAULT_METADATA_CHUNK_SIZE: usize = 8 * 1024 * 1024;
 
 /// Per-run knobs. Production uses `Default`; tests shrink the page size and
 /// pause between the freeze and the first remote write.
@@ -72,13 +83,40 @@ pub(super) struct SnapshotTuning {
     /// Run after each object page of the freeze.
     #[cfg(test)]
     pub(super) between_pages: Option<BetweenPagesHook>,
-    /// Run after each ref page of the freeze.
+    /// Run after each ref page the freeze copies from the repository.
     #[cfg(test)]
     pub(super) between_ref_pages: Option<BetweenPagesHook>,
+    /// Run after each refs projection page the freeze writes to the spool.
+    #[cfg(test)]
+    pub(super) between_projection_pages: Option<BetweenPagesHook>,
     /// Make the first freeze attempt end on what looks like a replaced
     /// connection.
     #[cfg(test)]
     pub(super) simulate_reconnect: bool,
+    /// Make the first freeze attempt lose its TEMP objects after the first
+    /// copied ref page, as a replaced connection would.
+    #[cfg(test)]
+    pub(super) simulate_reconnect_during_refs: bool,
+    /// Make the first freeze attempt lose its TEMP objects while it creates
+    /// the ref copy, as a replaced connection would.
+    #[cfg(test)]
+    pub(super) simulate_reconnect_during_ref_setup: bool,
+    /// Make the first freeze attempt lose its TEMP marker while marking the
+    /// connection, as a replaced connection would.
+    #[cfg(test)]
+    pub(super) simulate_reconnect_during_mark: bool,
+    /// Fail writing the connection marker with an I/O error.
+    #[cfg(test)]
+    pub(super) fail_mark_write: bool,
+    /// Fail recording `cloud.metadata_hash` after the metadata upload.
+    #[cfg(test)]
+    pub(super) fail_metadata_hash_record: bool,
+    /// Hash and upload the refs JSON this many bytes at a time.
+    #[cfg(test)]
+    pub(super) metadata_chunk_size: Option<usize>,
+    /// Run between hashing the frozen refs and uploading them.
+    #[cfg(test)]
+    pub(super) before_metadata_upload: Option<AfterFreezeHook>,
 }
 
 /// Called with the freeze attempt number (1-based) after each page.
@@ -93,6 +131,14 @@ pub(super) type AfterFreezeHook =
 impl SnapshotTuning {
     pub(super) fn page_size(&self) -> usize {
         self.page_size.unwrap_or(DEFAULT_SPOOL_PAGE_SIZE).max(1)
+    }
+
+    pub(super) fn metadata_chunk_size(&self) -> usize {
+        #[cfg(test)]
+        if let Some(size) = self.metadata_chunk_size {
+            return size.max(1);
+        }
+        DEFAULT_METADATA_CHUNK_SIZE
     }
 }
 
@@ -128,6 +174,26 @@ async fn mark_freeze_connection(
     ))
     .await?;
     Ok(())
+}
+
+/// A statement on the connection's TEMP objects (the marker or the ref copy)
+/// failed. Only a statement that found its TEMP table missing on a
+/// connection without this attempt's marker is a replaced connection: a
+/// change like any other, so the attempt is retried (`Ok`). Any other failure
+/// (for example temporary storage that is full) stops the freeze with the
+/// original error.
+async fn replaced_connection(
+    conn: &sea_orm::DatabaseConnection,
+    attempt: usize,
+    error: sea_orm::DbErr,
+) -> Result<(), sea_orm::DbErr> {
+    if !error.to_string().contains("no such table") {
+        return Err(error);
+    }
+    match same_freeze_connection(conn, attempt).await {
+        Ok(false) => Ok(()),
+        _ => Err(error),
+    }
 }
 
 /// Whether the connection now answering is the one [`mark_freeze_connection`]
@@ -301,10 +367,76 @@ pub(super) struct FrozenRepository {
     pub(super) project_name: String,
 }
 
-/// The frozen refs projection: the JSON uploaded as repository metadata.
+/// What a freeze page holds; test builds count each kind separately.
+#[derive(Debug, Clone, Copy)]
+pub(super) enum PageKind {
+    Objects = 0,
+    Refs = 1,
+}
+
+/// One page of rows read for the freeze: the only rows of its kind it holds
+/// in memory at a time. Test builds count the pages alive at once.
+struct FreezePage<T> {
+    rows: Vec<T>,
+    #[cfg(test)]
+    kind: PageKind,
+}
+
+#[cfg(test)]
+static LIVE_PAGES: [std::sync::atomic::AtomicUsize; 2] = [
+    std::sync::atomic::AtomicUsize::new(0),
+    std::sync::atomic::AtomicUsize::new(0),
+];
+#[cfg(test)]
+static PEAK_PAGES: [std::sync::atomic::AtomicUsize; 2] = [
+    std::sync::atomic::AtomicUsize::new(0),
+    std::sync::atomic::AtomicUsize::new(0),
+];
+
+impl<T> FreezePage<T> {
+    fn new(rows: Vec<T>, kind: PageKind) -> Self {
+        #[cfg(test)]
+        {
+            use std::sync::atomic::Ordering;
+            let live = LIVE_PAGES[kind as usize].fetch_add(1, Ordering::SeqCst) + 1;
+            PEAK_PAGES[kind as usize].fetch_max(live, Ordering::SeqCst);
+            Self { rows, kind }
+        }
+        #[cfg(not(test))]
+        {
+            let _ = kind;
+            Self { rows }
+        }
+    }
+}
+
+#[cfg(test)]
+impl<T> Drop for FreezePage<T> {
+    fn drop(&mut self) {
+        LIVE_PAGES[self.kind as usize].fetch_sub(1, std::sync::atomic::Ordering::SeqCst);
+    }
+}
+
+/// The most `kind` pages alive at once since the last call; resets the count.
+#[cfg(test)]
+pub(super) fn take_peak_pages(kind: PageKind) -> usize {
+    PEAK_PAGES[kind as usize].swap(0, std::sync::atomic::Ordering::SeqCst)
+}
+
+/// The frozen refs projection: the spool file uploaded as repository
+/// metadata, its `cloud.metadata_hash` and how many refs it holds.
 pub(super) struct FrozenRefs {
     pub(super) references: usize,
-    pub(super) json: Vec<u8>,
+    pub(super) path: PathBuf,
+    pub(super) len: u64,
+    pub(super) hash: u64,
+    pub(super) upload_chunk_size: usize,
+    /// Where a background cleanup failure of the upload is reported.
+    pub(super) report: crate::utils::storage::remote::AbandonedUploadReport,
+    #[cfg(test)]
+    pub(super) before_upload: Option<AfterFreezeHook>,
+    #[cfg(test)]
+    pub(super) fail_hash_record: bool,
 }
 
 /// Where a spool dropped without [`SnapshotSpool::finish`] reports a
@@ -326,6 +458,8 @@ pub(super) struct SnapshotSpool {
     warning_sink: SpoolWarningSink,
     objects: u64,
     references: usize,
+    refs_bytes: u64,
+    refs_digest: u64,
     released: bool,
     #[cfg(test)]
     fail_release: bool,
@@ -586,6 +720,8 @@ impl SnapshotSpool {
             warning_sink,
             objects: 0,
             references: 0,
+            refs_bytes: 0,
+            refs_digest: 0,
             released: false,
             #[cfg(test)]
             fail_release: tuning.fail_spool_release,
@@ -669,6 +805,15 @@ impl SnapshotSpool {
                 "open the repository database for the snapshot: {error}; nothing was written to D1 or R2"
             ))
         })?;
+        // TEMP objects (the connection marker and the refs copy) live in a
+        // temporary file rather than memory, so a large ref set never has to
+        // fit in memory.
+        if let Err(error) = conn.execute_unprepared("PRAGMA temp_store = FILE").await {
+            let _ = conn.close().await;
+            return Err(CloudError::Generic(format!(
+                "prepare the repository database for the snapshot: {error}; nothing was written to D1 or R2"
+            )));
+        }
         let mut outcome = Err(CloudError::Generic(String::new()));
         for attempt in 1..=MAX_FREEZE_ATTEMPTS {
             match self
@@ -733,9 +878,34 @@ impl SnapshotSpool {
         // in a connection-private TEMP table proves the connection at the end
         // is the one from the start; TEMP writes never touch the repository
         // database or its lock.
-        mark_freeze_connection(conn, attempt)
-            .await
-            .map_err(read_failure)?;
+        let marked = mark_freeze_connection(conn, attempt).await;
+        #[cfg(test)]
+        let marked = if tuning.fail_mark_write {
+            Err(sea_orm::DbErr::Custom(
+                "disk I/O error writing the TEMP marker (injected)".to_string(),
+            ))
+        } else {
+            marked
+        };
+        #[cfg(test)]
+        let marked = if tuning.simulate_reconnect_during_mark && attempt == 1 {
+            // What a replacement in the middle of marking looks like: the
+            // marker table made on the old connection is gone.
+            conn.execute_unprepared("DROP TABLE temp.libra_cloud_sync_freeze")
+                .await
+                .map_err(read_failure)?;
+            conn.execute_unprepared("INSERT INTO temp.libra_cloud_sync_freeze (attempt) VALUES (1)")
+                .await
+                .map(|_| ())
+        } else {
+            marked
+        };
+        if let Err(error) = marked {
+            replaced_connection(conn, attempt, error)
+                .await
+                .map_err(read_failure)?;
+            return Ok(false);
+        }
         let start = data_version(conn).await.map_err(read_failure)?;
         let boundary = conn
             .query_one_raw(sea_orm::Statement::from_sql_and_values(
@@ -749,11 +919,20 @@ impl SnapshotSpool {
             .transpose()
             .map_err(read_failure)?
             .flatten();
-        // The refs up to their own boundary, a page per statement, so a large
-        // ref set never holds the read lock for long and refs inserted
-        // meanwhile cannot keep the scan going; the `data_version` check
-        // covers changes between pages. The projection sorts them before
-        // serializing.
+        // The refs (PI-27): first copied up to their own boundary into the
+        // connection's TEMP copy a page per short statement in `id` order, so
+        // a large ref set never holds the read lock for long and refs inserted
+        // meanwhile cannot keep the copy going; then streamed into the spool
+        // in upload order a page at a time through the copy's order index, so
+        // at most one page of refs is in memory and no page sorts the whole
+        // set. The `data_version` check covers changes during both steps, and
+        // a retry rewrites the file.
+        let refs_path = self.dir.join(REFS_FILE);
+        let refs_file = recreate_private_file(&refs_path)
+            .map_err(|error| spool_failure("create", &refs_path, error))?;
+        let mut refs_writer =
+            ReferenceProjectionWriter::new(DigestWriter::new(BufWriter::new(refs_file)))
+                .map_err(|error| spool_failure("write", &refs_path, error))?;
         let ref_boundary = conn
             .query_one_raw(sea_orm::Statement::from_string(
                 conn.get_database_backend(),
@@ -765,26 +944,96 @@ impl SnapshotSpool {
             .transpose()
             .map_err(read_failure)?
             .flatten();
-        let mut references = Vec::new();
-        let mut last_ref_id = i64::MIN;
-        while let Some(ref_boundary) = ref_boundary {
-            let page = reference::Entity::find()
-                .filter(reference::Column::Id.gt(last_ref_id))
-                .filter(reference::Column::Id.lte(ref_boundary))
-                .order_by_asc(reference::Column::Id)
-                .limit(page_size as u64)
-                .all(conn)
+        let prepared = prepare_reference_copy(conn).await;
+        #[cfg(test)]
+        let prepared = if tuning.simulate_reconnect_during_ref_setup && attempt == 1 {
+            // What a replacement between creating the TEMP table and its
+            // index looks like: the marker and the table are gone, and the
+            // index creation fails on the missing table.
+            for table in ["libra_cloud_sync_refs", "libra_cloud_sync_freeze"] {
+                conn.execute_unprepared(&format!("DROP TABLE temp.{table}"))
+                    .await
+                    .map_err(read_failure)?;
+            }
+            conn.execute_unprepared(
+                "CREATE INDEX temp.libra_cloud_sync_refs_order ON libra_cloud_sync_refs (id)",
+            )
+            .await
+            .map(|_| ())
+        } else {
+            prepared
+        };
+        if let Err(error) = prepared {
+            replaced_connection(conn, attempt, error)
                 .await
                 .map_err(read_failure)?;
-            let Some(last) = page.last() else {
+            return Ok(false);
+        }
+        if let Some(ref_boundary) = ref_boundary {
+            let mut last_id = i64::MIN;
+            loop {
+                let (copied, last) =
+                    match copy_reference_page(conn, last_id, ref_boundary, page_size).await {
+                        Ok(copied) => copied,
+                        Err(error) => {
+                            replaced_connection(conn, attempt, error)
+                                .await
+                                .map_err(read_failure)?;
+                            return Ok(false);
+                        }
+                    };
+                #[cfg(test)]
+                if let Some(between_ref_pages) = &tuning.between_ref_pages {
+                    between_ref_pages(attempt).await;
+                }
+                #[cfg(test)]
+                if tuning.simulate_reconnect_during_refs && attempt == 1 {
+                    // What a fresh connection looks like mid-scan: neither
+                    // the TEMP ref copy nor the marker.
+                    for table in ["libra_cloud_sync_refs", "libra_cloud_sync_freeze"] {
+                        conn.execute_unprepared(&format!("DROP TABLE temp.{table}"))
+                            .await
+                            .map_err(read_failure)?;
+                    }
+                }
+                match last {
+                    Some(last) if copied > 0 => last_id = last,
+                    _ => break,
+                }
+                if copied < page_size as u64 {
+                    break;
+                }
+            }
+        }
+        let mut after_ref: Option<ReferenceProjectionKey> = None;
+        loop {
+            let rows = match reference_projection_page(conn, after_ref.as_ref(), page_size).await {
+                Ok(rows) => rows,
+                Err(error) => {
+                    replaced_connection(conn, attempt, error)
+                        .await
+                        .map_err(read_failure)?;
+                    return Ok(false);
+                }
+            };
+            let page = FreezePage::new(rows, PageKind::Refs);
+            let Some(last) = page.rows.last() else {
                 break;
             };
-            last_ref_id = last.id;
-            let page_len = page.len();
-            references.extend(page);
+            after_ref = Some(ReferenceProjectionKey::of(last));
+            for model in &page.rows {
+                refs_writer
+                    .push(model)
+                    .map_err(|error| spool_failure("write", &refs_path, error))?;
+            }
+            refs_writer
+                .flush()
+                .map_err(|error| spool_failure("write", &refs_path, error))?;
+            let page_len = page.rows.len();
+            drop(page);
             #[cfg(test)]
-            if let Some(between_ref_pages) = &tuning.between_ref_pages {
-                between_ref_pages(attempt).await;
+            if let Some(between_projection_pages) = &tuning.between_projection_pages {
+                between_projection_pages(attempt).await;
             }
             if page_len < page_size {
                 break;
@@ -826,18 +1075,23 @@ impl SnapshotSpool {
                 if !force {
                     query = query.filter(object_index::Column::IsSynced.eq(0));
                 }
-                let page = query
-                    .order_by_asc(object_index::Column::Id)
-                    .limit(page_size as u64)
-                    .all(conn)
-                    .await
-                    .map_err(read_failure)?;
-                let Some(last) = page.last() else {
+                let mut page = FreezePage::new(
+                    query
+                        .order_by_asc(object_index::Column::Id)
+                        .limit(page_size as u64)
+                        .all(conn)
+                        .await
+                        .map_err(read_failure)?,
+                    PageKind::Objects,
+                );
+                let Some(last) = page.rows.last() else {
                     break;
                 };
                 last_id = last.id;
-                let page_len = page.len();
-                for model in page {
+                let page_len = page.rows.len();
+                // Each page is written out before the next is read: the spool
+                // grows a page at a time and only this page is in memory.
+                for model in std::mem::take(&mut page.rows) {
                     serde_json::to_writer(&mut writer, &FrozenObject::from(model))
                         .map_err(|error| spool_failure("write", &objects_path, error))?;
                     writer
@@ -845,6 +1099,10 @@ impl SnapshotSpool {
                         .map_err(|error| spool_failure("write", &objects_path, error))?;
                     objects += 1;
                 }
+                writer
+                    .flush()
+                    .map_err(|error| spool_failure("write", &objects_path, error))?;
+                drop(page);
                 #[cfg(test)]
                 if let Some(between_pages) = &tuning.between_pages {
                     between_pages(attempt).await;
@@ -877,14 +1135,21 @@ impl SnapshotSpool {
             .sync_all()
             .map_err(|error| spool_failure("write", &objects_path, error))?;
 
-        let (sorted_refs, json) = serialize_reference_projection(references)?;
-        let refs_path = self.dir.join(REFS_FILE);
-        let mut refs_file = recreate_private_file(&refs_path)
-            .map_err(|error| spool_failure("create", &refs_path, error))?;
-        refs_file
-            .write_all(&json)
-            .and_then(|()| refs_file.sync_all())
+        let (refs_out, references) = refs_writer
+            .finish()
             .map_err(|error| spool_failure("write", &refs_path, error))?;
+        let refs_digest = refs_out.digest();
+        let refs_file = refs_out
+            .into_inner()
+            .into_inner()
+            .map_err(|error| spool_failure("write", &refs_path, error.into_error()))?;
+        refs_file
+            .sync_all()
+            .map_err(|error| spool_failure("write", &refs_path, error))?;
+        let refs_bytes = refs_file
+            .metadata()
+            .map_err(|error| spool_failure("write", &refs_path, error))?
+            .len();
 
         let repository_path = self.dir.join(REPOSITORY_FILE);
         let repository_json = serde_json::to_vec(&repository)
@@ -897,7 +1162,9 @@ impl SnapshotSpool {
             .map_err(|error| spool_failure("write", &repository_path, error))?;
 
         self.objects = objects;
-        self.references = sorted_refs.len();
+        self.references = references;
+        self.refs_bytes = refs_bytes;
+        self.refs_digest = refs_digest;
         Ok(true)
     }
 
@@ -920,13 +1187,40 @@ impl SnapshotSpool {
         })
     }
 
-    /// The frozen refs projection.
-    pub(super) fn refs(&self) -> CloudResult<FrozenRefs> {
+    /// The frozen refs projection, hashed from the spool file
+    /// `chunk_size` bytes at a time; a file that is not byte for byte what
+    /// the freeze wrote (its length and digest) is a read failure.
+    pub(super) fn refs(&self, tuning: &SnapshotTuning) -> CloudResult<FrozenRefs> {
+        let chunk_size = tuning.metadata_chunk_size();
         let path = self.dir.join(REFS_FILE);
-        let json = fs::read(&path).map_err(|error| spool_read_failure(&path, error))?;
+        let (hash, digest, len) = metadata_hash_of_file(&path, chunk_size)
+            .map_err(|error| spool_read_failure(&path, error))?;
+        if len != self.refs_bytes {
+            return Err(spool_read_failure(
+                &path,
+                format!(
+                    "the frozen refs are {} bytes, the spool holds {len}",
+                    self.refs_bytes
+                ),
+            ));
+        }
+        if digest != self.refs_digest {
+            return Err(spool_read_failure(
+                &path,
+                "the spool no longer holds the refs the freeze wrote",
+            ));
+        }
         Ok(FrozenRefs {
             references: self.references,
-            json,
+            path,
+            len,
+            hash,
+            upload_chunk_size: chunk_size,
+            report: background_warning_report(self.warning_sink),
+            #[cfg(test)]
+            before_upload: tuning.before_metadata_upload.clone(),
+            #[cfg(test)]
+            fail_hash_record: tuning.fail_metadata_hash_record,
         })
     }
 
@@ -977,6 +1271,24 @@ fn write_drop_warning(line: &str) {
         return;
     }
     let _ = writeln!(std::io::stderr(), "{line}");
+}
+
+/// Report a warning from work that outlives its caller (a background abort
+/// of a cancelled metadata upload) through the run's warning sink: one
+/// `cloud_sync.metadata.warning` NDJSON line under `--progress=json`,
+/// otherwise a `warning:` line on stderr. Never panics.
+pub(super) fn background_warning_report(
+    sink: SpoolWarningSink,
+) -> crate::utils::storage::remote::AbandonedUploadReport {
+    std::sync::Arc::new(move |message: String| {
+        crate::utils::output::record_warning_message(message.clone());
+        match sink {
+            SpoolWarningSink::NdjsonProgress => {
+                super::JsonCloudSyncProgress::emit(super::metadata_warning_event(&message));
+            }
+            SpoolWarningSink::Stderr => write_drop_warning(&format!("warning: {message}")),
+        }
+    })
 }
 
 impl Drop for SnapshotSpool {

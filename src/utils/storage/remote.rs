@@ -18,6 +18,118 @@ use object_store::{ObjectStore, ObjectStoreExt, path::Path as ObjectPath};
 
 use super::Storage;
 
+/// Checks the bytes an upload sends before the upload takes effect.
+pub trait UploadCheck: Send {
+    /// See the next bytes about to be sent.
+    fn update(&mut self, bytes: &[u8]);
+    /// Whether everything sent is what the caller meant to send; an error
+    /// stops the upload before the PUT or the completion.
+    fn verify(&mut self) -> Result<(), String>;
+}
+
+/// Receives a cleanup failure from a background abort, which has no caller
+/// left to return it to.
+pub type AbandonedUploadReport = Arc<dyn Fn(String) + Send + Sync>;
+
+/// A multipart upload that is aborted in the background, best effort, if it
+/// is dropped before the owner completes or aborts it, e.g. when a sync is
+/// cancelled.
+struct PendingUpload {
+    upload: Option<Box<dyn object_store::MultipartUpload>>,
+    location: ObjectPath,
+    report: AbandonedUploadReport,
+}
+
+impl Drop for PendingUpload {
+    fn drop(&mut self) {
+        if let Some(mut upload) = self.upload.take()
+            && let Ok(runtime) = tokio::runtime::Handle::try_current()
+        {
+            let location = self.location.clone();
+            let report = Arc::clone(&self.report);
+            runtime.spawn(async move {
+                if let Err(error) = upload.abort().await {
+                    warn_abandoned_upload(&location, &error, &report);
+                }
+            });
+        }
+    }
+}
+
+/// Report a background abort that failed: no caller is left to return it
+/// to, so it goes to the caller's report (always shown) and the log.
+fn warn_abandoned_upload(
+    location: &ObjectPath,
+    error: &object_store::Error,
+    report: &AbandonedUploadReport,
+) {
+    let message = format!(
+        "aborting the multipart metadata upload of {location} for a cancelled cloud sync failed: {error}; its parts stay in the bucket until the bucket's lifecycle rule for incomplete multipart uploads removes them"
+    );
+    tracing::warn!("{message}");
+    report(message);
+}
+
+/// Send `first` and then the rest of `source` (starting with the byte
+/// `carry` already read) as `chunk_size` parts, one at a time, and complete
+/// the upload.
+async fn upload_remaining_parts(
+    upload: &mut dyn object_store::MultipartUpload,
+    first: Vec<u8>,
+    carry: u8,
+    source: &mut impl Read,
+    chunk_size: usize,
+    check: &mut dyn UploadCheck,
+) -> Result<(), GitError> {
+    let to_git = |e: object_store::Error| GitError::IOError(std::io::Error::other(e));
+    check.update(&first);
+    upload
+        .put_part(Bytes::from(first).into())
+        .await
+        .map_err(to_git)?;
+    let mut carry = Some(carry);
+    loop {
+        let mut part = vec![0u8; chunk_size];
+        let mut filled = 0;
+        if let Some(byte) = carry.take() {
+            part[0] = byte;
+            filled = 1;
+        }
+        filled += read_full(source, &mut part[filled..]).map_err(GitError::IOError)?;
+        if filled == 0 {
+            break;
+        }
+        part.truncate(filled);
+        check.update(&part);
+        upload
+            .put_part(Bytes::from(part).into())
+            .await
+            .map_err(to_git)?;
+        if filled < chunk_size {
+            break;
+        }
+    }
+    check
+        .verify()
+        .map_err(|message| GitError::IOError(std::io::Error::other(message)))?;
+    upload.complete().await.map(|_| ()).map_err(to_git)
+}
+
+/// Fill `buffer` from `source` until it is full or the source ends; returns
+/// how many bytes were read.
+fn read_full(source: &mut impl Read, buffer: &mut [u8]) -> std::io::Result<usize> {
+    let mut filled = 0;
+    while filled < buffer.len() {
+        match source.read(&mut buffer[filled..]) {
+            Ok(0) => break,
+            Ok(read) => filled += read,
+            Err(error) if error.kind() == std::io::ErrorKind::Interrupted => {}
+            Err(error) => return Err(error),
+        }
+    }
+    Ok(filled)
+}
+
 /// Remote object storage backend
 /// Adapts object_store crate to Libra's StorageTrait
 pub struct RemoteStorage {
@@ -59,11 +171,15 @@ impl RemoteStorage {
         }
     }
 
-    pub async fn put_metadata(&self, data: &[u8]) -> Result<(), GitError> {
-        let path = match &self.key_prefix {
+    fn metadata_path(&self) -> ObjectPath {
+        match &self.key_prefix {
             Some(prefix) => ObjectPath::from(format!("{}/metadata.json", prefix)),
             None => ObjectPath::from("metadata.json"),
-        };
+        }
+    }
+
+    pub async fn put_metadata(&self, data: &[u8]) -> Result<(), GitError> {
+        let path = self.metadata_path();
 
         self.inner
             .put(&path, Bytes::copy_from_slice(data).into())
@@ -73,11 +189,107 @@ impl RemoteStorage {
         Ok(())
     }
 
-    pub async fn get_metadata(&self) -> Result<Vec<u8>, GitError> {
-        let path = match &self.key_prefix {
-            Some(prefix) => ObjectPath::from(format!("{}/metadata.json", prefix)),
-            None => ObjectPath::from("metadata.json"),
+    /// Upload the metadata from a local file without reading it into memory
+    /// whole: one PUT when it is at most `chunk_size` bytes, otherwise a
+    /// multipart upload of `chunk_size` parts sent one at a time, so memory
+    /// stays one chunk whatever the file size. Any failure after the upload
+    /// starts — a part, the completion or reading the file — aborts it, and a
+    /// failed abort is reported with the original error. A cancelled upload,
+    /// including one cancelled while the multipart upload is being started,
+    /// is aborted in the background on a best-effort basis: a runtime that
+    /// shuts down first, a killed process or a lost start response can still
+    /// leave parts behind, which only the bucket's lifecycle rule for
+    /// incomplete multipart uploads removes. Multipart stores need
+    /// `chunk_size` of at least 5 MiB.
+    pub async fn put_metadata_from_file(
+        &self,
+        file: &std::path::Path,
+        chunk_size: usize,
+        check: &mut dyn UploadCheck,
+        report: AbandonedUploadReport,
+    ) -> Result<(), GitError> {
+        let path = self.metadata_path();
+        let chunk_size = chunk_size.max(1);
+        let mut source = std::fs::File::open(file).map_err(GitError::IOError)?;
+        let mut first = vec![0u8; chunk_size];
+        let filled = read_full(&mut source, &mut first).map_err(GitError::IOError)?;
+        let mut next = [0u8; 1];
+        let more = if filled == chunk_size {
+            read_full(&mut source, &mut next).map_err(GitError::IOError)?
+        } else {
+            0
         };
+        if more == 0 {
+            first.truncate(filled);
+            check.update(&first);
+            check
+                .verify()
+                .map_err(|message| GitError::IOError(std::io::Error::other(message)))?;
+            self.inner
+                .put(&path, Bytes::from(first).into())
+                .await
+                .map_err(|e| GitError::IOError(std::io::Error::other(e)))?;
+            return Ok(());
+        }
+
+        // Start the upload on its own task: if this future is cancelled while
+        // the start is in flight, the task still receives the handle and
+        // aborts it instead of handing it to a caller that is gone.
+        // The task arms the guard before handing it over, so the upload is
+        // aborted in the background whenever the guard is dropped unfinished:
+        // by a caller that is gone, by a handoff that is never received, or
+        // by a sync cancelled later.
+        let (started, start) = tokio::sync::oneshot::channel();
+        let store = Arc::clone(&self.inner);
+        let location = path.clone();
+        tokio::spawn(async move {
+            let started_upload = store
+                .put_multipart(&location)
+                .await
+                .map(|upload| PendingUpload {
+                    upload: Some(upload),
+                    location,
+                    report,
+                });
+            // An undelivered guard is dropped here and aborts the upload.
+            let _ = started.send(started_upload);
+        });
+        let mut pending = start
+            .await
+            .map_err(|_| {
+                GitError::IOError(std::io::Error::other(
+                    "the multipart metadata upload could not be started",
+                ))
+            })?
+            .map_err(|e| GitError::IOError(std::io::Error::other(e)))?;
+        let outcome = match pending.upload.as_deref_mut() {
+            Some(upload) => {
+                upload_remaining_parts(upload, first, next[0], &mut source, chunk_size, check).await
+            }
+            None => Ok(()),
+        };
+        let Err(error) = outcome else {
+            // Completed: nothing left to abort.
+            pending.upload = None;
+            return Ok(());
+        };
+        // The upload stays in the guard while it is aborted, so a sync
+        // cancelled during the abort still aborts it in the background.
+        let aborted = match pending.upload.as_deref_mut() {
+            Some(upload) => upload.abort().await,
+            None => Ok(()),
+        };
+        pending.upload = None;
+        match aborted {
+            Ok(()) => Err(error),
+            Err(abort_error) => Err(GitError::IOError(std::io::Error::other(format!(
+                "{error}; aborting the unfinished multipart upload of {path} also failed: {abort_error}. Its parts stay in the bucket until removed: give the bucket a lifecycle rule that aborts incomplete multipart uploads, or abort it in the storage provider's console"
+            )))),
+        }
+    }
+
+    pub async fn get_metadata(&self) -> Result<Vec<u8>, GitError> {
+        let path = self.metadata_path();
 
         let result = self.inner.get(&path).await.map_err(|e| match e {
             object_store::Error::NotFound { .. } => {
@@ -779,6 +991,515 @@ mod tests {
         {
             locations
         }
+    }
+
+    /// Counts how the metadata reaches the store and can fail one multipart
+    /// step; everything else goes to an in-memory store.
+    #[derive(Debug, Default)]
+    struct UploadCounts {
+        puts: std::sync::atomic::AtomicUsize,
+        multiparts: std::sync::atomic::AtomicUsize,
+        parts: std::sync::atomic::AtomicUsize,
+        aborts: std::sync::atomic::AtomicUsize,
+    }
+
+    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+    enum UploadFault {
+        None,
+        Part(usize),
+        Complete,
+        /// The first part fails and so does the abort.
+        PartAndAbort,
+        /// The second part never finishes.
+        HangPart(usize),
+        /// The first part fails and the first abort never finishes.
+        PartAndHangAbort,
+        /// Starting the multipart upload takes 200 ms.
+        SlowStart,
+        /// Starting takes 200 ms and the abort fails.
+        SlowStartAndAbort,
+        /// The second part never finishes and the abort fails.
+        HangPartAndAbort,
+    }
+
+    #[derive(Debug)]
+    struct CountingStore {
+        inner: Arc<InMemory>,
+        counts: Arc<UploadCounts>,
+        fault: UploadFault,
+    }
+
+    impl std::fmt::Display for CountingStore {
+        fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+            f.write_str("CountingStore")
+        }
+    }
+
+    #[derive(Debug)]
+    struct CountingUpload {
+        inner: Box<dyn object_store::MultipartUpload>,
+        counts: Arc<UploadCounts>,
+        fault: UploadFault,
+    }
+
+    fn injected(step: &str) -> object_store::Error {
+        object_store::Error::Generic {
+            store: "counting-store",
+            source: format!("injected {step} failure").into(),
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl object_store::MultipartUpload for CountingUpload {
+        fn put_part(&mut self, data: object_store::PutPayload) -> object_store::UploadPart {
+            use std::sync::atomic::Ordering;
+            let part = self.counts.parts.fetch_add(1, Ordering::SeqCst) + 1;
+            match self.fault {
+                UploadFault::Part(failing) if failing == part => {
+                    return Box::pin(async { Err(injected("part")) });
+                }
+                UploadFault::PartAndAbort | UploadFault::PartAndHangAbort if part == 1 => {
+                    return Box::pin(async { Err(injected("part")) });
+                }
+                UploadFault::HangPart(hanging) if hanging == part => {
+                    return Box::pin(futures::future::pending());
+                }
+                UploadFault::HangPartAndAbort if part == 2 => {
+                    return Box::pin(futures::future::pending());
+                }
+                _ => {}
+            }
+            self.inner.put_part(data)
+        }
+
+        async fn complete(&mut self) -> object_store::Result<object_store::PutResult> {
+            if self.fault == UploadFault::Complete {
+                return Err(injected("complete"));
+            }
+            self.inner.complete().await
+        }
+
+        async fn abort(&mut self) -> object_store::Result<()> {
+            let earlier = self
+                .counts
+                .aborts
+                .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            match self.fault {
+                UploadFault::PartAndAbort
+                | UploadFault::SlowStartAndAbort
+                | UploadFault::HangPartAndAbort => return Err(injected("abort")),
+                UploadFault::PartAndHangAbort if earlier == 0 => {
+                    futures::future::pending::<()>().await;
+                }
+                _ => {}
+            }
+            self.inner.abort().await
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl object_store::ObjectStore for CountingStore {
+        async fn put_opts(
+            &self,
+            location: &object_store::path::Path,
+            payload: object_store::PutPayload,
+            opts: object_store::PutOptions,
+        ) -> object_store::Result<object_store::PutResult> {
+            self.counts
+                .puts
+                .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            self.inner.put_opts(location, payload, opts).await
+        }
+
+        async fn put_multipart_opts(
+            &self,
+            location: &object_store::path::Path,
+            opts: object_store::PutMultipartOptions,
+        ) -> object_store::Result<Box<dyn object_store::MultipartUpload>> {
+            self.counts
+                .multiparts
+                .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            if matches!(
+                self.fault,
+                UploadFault::SlowStart | UploadFault::SlowStartAndAbort
+            ) {
+                tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+            }
+            let inner = self.inner.put_multipart_opts(location, opts).await?;
+            Ok(Box::new(CountingUpload {
+                inner,
+                counts: self.counts.clone(),
+                fault: self.fault,
+            }))
+        }
+
+        async fn get_opts(
+            &self,
+            location: &object_store::path::Path,
+            options: object_store::GetOptions,
+        ) -> object_store::Result<object_store::GetResult> {
+            self.inner.get_opts(location, options).await
+        }
+
+        fn list(
+            &self,
+            prefix: Option<&object_store::path::Path>,
+        ) -> futures::stream::BoxStream<'static, object_store::Result<object_store::ObjectMeta>>
+        {
+            self.inner.list(prefix)
+        }
+
+        async fn list_with_delimiter(
+            &self,
+            prefix: Option<&object_store::path::Path>,
+        ) -> object_store::Result<object_store::ListResult> {
+            self.inner.list_with_delimiter(prefix).await
+        }
+
+        async fn copy_opts(
+            &self,
+            from: &object_store::path::Path,
+            to: &object_store::path::Path,
+            options: object_store::CopyOptions,
+        ) -> object_store::Result<()> {
+            self.inner.copy_opts(from, to, options).await
+        }
+
+        fn delete_stream(
+            &self,
+            locations: futures::stream::BoxStream<
+                'static,
+                object_store::Result<object_store::path::Path>,
+            >,
+        ) -> futures::stream::BoxStream<'static, object_store::Result<object_store::path::Path>>
+        {
+            self.inner.delete_stream(locations)
+        }
+    }
+
+    /// Accepts whatever is sent.
+    struct AcceptAll;
+
+    impl super::UploadCheck for AcceptAll {
+        fn update(&mut self, _bytes: &[u8]) {}
+
+        fn verify(&mut self) -> Result<(), String> {
+            Ok(())
+        }
+    }
+
+    /// Accepts only exactly `expected`.
+    struct ExpectBytes {
+        expected: Vec<u8>,
+        sent: Vec<u8>,
+    }
+
+    impl super::UploadCheck for ExpectBytes {
+        fn update(&mut self, bytes: &[u8]) {
+            self.sent.extend_from_slice(bytes);
+        }
+
+        fn verify(&mut self) -> Result<(), String> {
+            if self.sent == self.expected {
+                Ok(())
+            } else {
+                Err("sent bytes mismatch the expected bytes".to_string())
+            }
+        }
+    }
+
+    fn no_report() -> super::AbandonedUploadReport {
+        Arc::new(|_message: String| {})
+    }
+
+    fn counting_storage(fault: UploadFault) -> (RemoteStorage, Arc<UploadCounts>) {
+        let counts = Arc::new(UploadCounts::default());
+        let store = CountingStore {
+            inner: Arc::new(InMemory::new()),
+            counts: counts.clone(),
+            fault,
+        };
+        (RemoteStorage::new(Arc::new(store)), counts)
+    }
+
+    fn metadata_file(len: usize) -> (tempfile::TempDir, std::path::PathBuf, Vec<u8>) {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("refs.json");
+        let bytes: Vec<u8> = (0..len).map(|n| b'a' + (n % 26) as u8).collect();
+        std::fs::write(&path, &bytes).expect("write metadata file");
+        (dir, path, bytes)
+    }
+
+    #[tokio::test]
+    async fn capture_snapshot_paging_metadata_upload_uses_one_put_up_to_one_chunk() {
+        use std::sync::atomic::Ordering;
+
+        // (file length, PUTs, multipart uploads, parts) with 8-byte chunks:
+        // up to and including one chunk is one PUT; beyond it, parts of one
+        // chunk each, the last one shorter.
+        for (len, puts, multiparts, parts) in [
+            (0, 1, 0, 0),
+            (7, 1, 0, 0),
+            (8, 1, 0, 0),
+            (9, 0, 1, 2),
+            (16, 0, 1, 2),
+            (26, 0, 1, 4),
+        ] {
+            let (_dir, path, bytes) = metadata_file(len);
+            let (storage, counts) = counting_storage(UploadFault::None);
+            storage
+                .put_metadata_from_file(&path, 8, &mut AcceptAll, no_report())
+                .await
+                .expect("upload metadata");
+            assert_eq!(
+                (
+                    counts.puts.load(Ordering::SeqCst),
+                    counts.multiparts.load(Ordering::SeqCst),
+                    counts.parts.load(Ordering::SeqCst),
+                    counts.aborts.load(Ordering::SeqCst),
+                ),
+                (puts, multiparts, parts, 0),
+                "{len} bytes"
+            );
+            assert_eq!(
+                storage.get_metadata().await.expect("read back"),
+                bytes,
+                "{len} bytes"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn capture_snapshot_paging_metadata_upload_aborts_a_failed_multipart() {
+        use std::sync::atomic::Ordering;
+
+        // A failure in the first part, the last part or the completion aborts
+        // the upload, returns the error, and leaves no metadata object.
+        for fault in [
+            UploadFault::Part(1),
+            UploadFault::Part(3),
+            UploadFault::Complete,
+        ] {
+            let (_dir, path, _) = metadata_file(20);
+            let (storage, counts) = counting_storage(fault);
+            let error = storage
+                .put_metadata_from_file(&path, 8, &mut AcceptAll, no_report())
+                .await
+                .expect_err("the injected failure is returned");
+            assert!(error.to_string().contains("injected"), "{fault:?}: {error}");
+            assert_eq!(counts.aborts.load(Ordering::SeqCst), 1, "{fault:?}");
+            assert!(storage.get_metadata().await.is_err(), "{fault:?}");
+        }
+    }
+
+    #[tokio::test]
+    async fn capture_snapshot_paging_metadata_upload_reports_a_failed_abort() {
+        use std::sync::atomic::Ordering;
+
+        let (_dir, path, _) = metadata_file(20);
+        let (storage, counts) = counting_storage(UploadFault::PartAndAbort);
+        let error = storage
+            .put_metadata_from_file(&path, 8, &mut AcceptAll, no_report())
+            .await
+            .expect_err("the part failure is returned");
+        let detail = error.to_string();
+        assert!(detail.contains("injected part failure"), "{detail}");
+        assert!(
+            detail.contains("aborting the unfinished multipart upload"),
+            "{detail}"
+        );
+        assert!(detail.contains("injected abort failure"), "{detail}");
+        assert!(detail.contains("lifecycle rule"), "{detail}");
+        assert_eq!(counts.aborts.load(Ordering::SeqCst), 1);
+    }
+
+    #[tokio::test]
+    async fn capture_snapshot_paging_metadata_upload_aborts_when_cancelled() {
+        use std::sync::atomic::Ordering;
+
+        // The second part never finishes; dropping the upload future (as a
+        // cancelled sync does) still aborts the multipart upload.
+        let (_dir, path, _) = metadata_file(20);
+        let (storage, counts) = counting_storage(UploadFault::HangPart(2));
+        let cancelled = tokio::time::timeout(
+            std::time::Duration::from_millis(100),
+            storage.put_metadata_from_file(&path, 8, &mut AcceptAll, no_report()),
+        )
+        .await;
+        assert!(cancelled.is_err(), "the upload was still running");
+        for _ in 0..100 {
+            if counts.aborts.load(Ordering::SeqCst) == 1 {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+        assert_eq!(counts.aborts.load(Ordering::SeqCst), 1);
+        assert!(storage.get_metadata().await.is_err());
+    }
+
+    #[tokio::test]
+    async fn capture_snapshot_paging_metadata_upload_aborts_when_cancelled_during_abort() {
+        use std::sync::atomic::Ordering;
+
+        // The first part fails and the abort that follows never finishes;
+        // cancelling the upload then still aborts it in the background.
+        let (_dir, path, _) = metadata_file(20);
+        let (storage, counts) = counting_storage(UploadFault::PartAndHangAbort);
+        let cancelled = tokio::time::timeout(
+            std::time::Duration::from_millis(100),
+            storage.put_metadata_from_file(&path, 8, &mut AcceptAll, no_report()),
+        )
+        .await;
+        assert!(cancelled.is_err(), "the abort was still running");
+        for _ in 0..100 {
+            if counts.aborts.load(Ordering::SeqCst) == 2 {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+        assert_eq!(
+            counts.aborts.load(Ordering::SeqCst),
+            2,
+            "the cancelled abort is retried in the background"
+        );
+        assert!(storage.get_metadata().await.is_err());
+    }
+
+    #[tokio::test]
+    async fn capture_snapshot_paging_metadata_upload_aborts_when_cancelled_while_starting() {
+        use std::sync::atomic::Ordering;
+
+        // The upload is cancelled while the multipart start is still in
+        // flight; the start task aborts the handle it then receives.
+        let (_dir, path, _) = metadata_file(20);
+        let (storage, counts) = counting_storage(UploadFault::SlowStart);
+        let cancelled = tokio::time::timeout(
+            std::time::Duration::from_millis(50),
+            storage.put_metadata_from_file(&path, 8, &mut AcceptAll, no_report()),
+        )
+        .await;
+        assert!(cancelled.is_err(), "the start was still running");
+        for _ in 0..100 {
+            if counts.aborts.load(Ordering::SeqCst) == 1 {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+        assert_eq!(counts.multiparts.load(Ordering::SeqCst), 1);
+        assert_eq!(counts.parts.load(Ordering::SeqCst), 0);
+        assert_eq!(counts.aborts.load(Ordering::SeqCst), 1);
+        assert!(storage.get_metadata().await.is_err());
+    }
+
+    #[tokio::test]
+    async fn capture_snapshot_paging_metadata_upload_reports_a_failed_background_abort() {
+        use std::sync::atomic::Ordering;
+
+        // A cancelled upload whose background abort fails — cancelled while
+        // starting, or while a part is in flight — hands the failure to the
+        // caller's report, with no tracing subscriber installed (the CLI's
+        // default), naming the object, the abort error and the lifecycle rule.
+        for fault in [
+            UploadFault::SlowStartAndAbort,
+            UploadFault::HangPartAndAbort,
+        ] {
+            let reported = Arc::new(std::sync::Mutex::new(Vec::<String>::new()));
+            let sink = reported.clone();
+            let report: super::AbandonedUploadReport = Arc::new(move |message: String| {
+                sink.lock().expect("report buffer").push(message);
+            });
+            let (_dir, path, _) = metadata_file(20);
+            let (storage, counts) = counting_storage(fault);
+            let cancelled = tokio::time::timeout(
+                std::time::Duration::from_millis(50),
+                storage.put_metadata_from_file(&path, 8, &mut AcceptAll, report),
+            )
+            .await;
+            assert!(
+                cancelled.is_err(),
+                "{fault:?}: the upload was still running"
+            );
+            for _ in 0..100 {
+                if !reported.lock().expect("report buffer").is_empty() {
+                    break;
+                }
+                tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+            }
+            assert_eq!(counts.aborts.load(Ordering::SeqCst), 1, "{fault:?}");
+            let reported = reported.lock().expect("report buffer").clone();
+            assert_eq!(reported.len(), 1, "{fault:?}: {reported:?}");
+            assert!(
+                reported[0].contains("metadata.json"),
+                "{fault:?}: {reported:?}"
+            );
+            assert!(
+                reported[0].contains("injected abort failure"),
+                "{fault:?}: {reported:?}"
+            );
+            assert!(
+                reported[0].contains("lifecycle rule"),
+                "{fault:?}: {reported:?}"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn capture_snapshot_paging_metadata_upload_refuses_unexpected_bytes() {
+        use std::sync::atomic::Ordering;
+
+        // When the bytes read for the upload are not what the caller expects,
+        // nothing takes effect: no single PUT, or an aborted multipart upload.
+        for (len, aborts) in [(5usize, 0usize), (20, 1)] {
+            let (_dir, path, bytes) = metadata_file(len);
+            let (storage, counts) = counting_storage(UploadFault::None);
+            let mut check = ExpectBytes {
+                expected: bytes.iter().rev().copied().collect(),
+                sent: Vec::new(),
+            };
+            let error = storage
+                .put_metadata_from_file(&path, 8, &mut check, no_report())
+                .await
+                .expect_err("unexpected bytes are refused");
+            assert!(error.to_string().contains("mismatch"), "{len}: {error}");
+            assert_eq!(counts.puts.load(Ordering::SeqCst), 0, "{len}");
+            assert_eq!(counts.aborts.load(Ordering::SeqCst), aborts, "{len}");
+            assert!(storage.get_metadata().await.is_err(), "{len}");
+        }
+    }
+
+    #[tokio::test]
+    async fn capture_snapshot_paging_metadata_upload_aborts_an_undelivered_handoff() {
+        use std::sync::atomic::Ordering;
+
+        // The start handoff delivered the armed guard, but the caller was
+        // cancelled before receiving it: dropping the undelivered value still
+        // aborts the upload.
+        let counts = Arc::new(UploadCounts::default());
+        let store = CountingStore {
+            inner: Arc::new(InMemory::new()),
+            counts: counts.clone(),
+            fault: UploadFault::None,
+        };
+        let location = object_store::path::Path::from("metadata.json");
+        let upload = store
+            .put_multipart(&location)
+            .await
+            .expect("start an upload");
+        let (started, start) = tokio::sync::oneshot::channel::<super::PendingUpload>();
+        let delivered = started.send(super::PendingUpload {
+            upload: Some(upload),
+            location,
+            report: no_report(),
+        });
+        assert!(delivered.is_ok(), "the receiver was still waiting");
+        drop(start);
+        for _ in 0..100 {
+            if counts.aborts.load(Ordering::SeqCst) == 1 {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+        assert_eq!(counts.aborts.load(Ordering::SeqCst), 1);
     }
 
     #[tokio::test]

@@ -397,6 +397,15 @@ fn spool_warning_event(note: &str) -> serde_json::Value {
     })
 }
 
+/// The `--progress=json` event for a warning from a background cleanup of
+/// the metadata upload (PI-27); one NDJSON line, like the spool warning.
+fn metadata_warning_event(message: &str) -> serde_json::Value {
+    serde_json::json!({
+        "event": "cloud_sync.metadata.warning",
+        "message": message,
+    })
+}
+
 /// Console implementation that reproduces the legacy `libra cloud
 /// sync` output verbatim.
 pub struct ConsoleCloudSyncProgress;
@@ -5074,6 +5083,691 @@ mod tests {
         assert_eq!(mock.request_bodies().await, probes);
         assert_eq!(r2_object_count(&r2).await, 0);
         assert!(spool_runs().is_empty());
+    }
+
+    async fn insert_ref_row(
+        name: Option<&str>,
+        kind: crate::internal::model::reference::ConfigKind,
+        remote: Option<&str>,
+        worktree_id: Option<&str>,
+    ) -> i64 {
+        use crate::internal::model::reference;
+
+        reference::ActiveModel {
+            name: Set(name.map(str::to_owned)),
+            kind: Set(kind),
+            commit: Set(Some("c".repeat(40))),
+            remote: Set(remote.map(str::to_owned)),
+            worktree_id: Set(worktree_id.map(str::to_owned)),
+            ..Default::default()
+        }
+        .insert(&db::get_db_conn_instance().await)
+        .await
+        .expect("insert ref row")
+        .id
+    }
+
+    /// The refs projection as the pre-PI-27 whole-collection path built it.
+    async fn whole_reference_projection() -> Vec<u8> {
+        use crate::internal::model::reference;
+
+        let references = reference::Entity::find()
+            .all(&db::get_db_conn_instance().await)
+            .await
+            .expect("read local refs");
+        super::metadata::serialize_reference_projection(references)
+            .expect("serialize the whole projection")
+            .1
+    }
+
+    async fn uploaded_metadata(r2: &Arc<InMemory>) -> Vec<u8> {
+        RemoteStorage::new(r2.clone())
+            .get_metadata()
+            .await
+            .expect("read metadata")
+    }
+
+    #[tokio::test]
+    #[serial(cwd, env)]
+    async fn capture_snapshot_paging_reads_objects_page_by_page() {
+        let _repo = enter_isolated_libra_repo().await;
+        let repo_id = ensure_repo_id().await;
+        for n in 0..10 {
+            index_local_object(format!("pi-27 page {n}\n").as_bytes()).await;
+        }
+        let storage = util::storage_path();
+        let raw_root = util::working_dir().join(util::ROOT_DIR);
+        // After every object page the spool file has grown by that page, and
+        // no more than one page of identities is alive at a time.
+        let sizes = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let recorded = sizes.clone();
+        let _ = super::snapshot::take_peak_pages(super::snapshot::PageKind::Objects);
+        let tuning = super::snapshot::SnapshotTuning {
+            page_size: Some(3),
+            between_pages: Some(Arc::new(move |_attempt| {
+                let recorded = recorded.clone();
+                Box::pin(async move {
+                    let runs = spool_runs();
+                    let len = fs::metadata(runs[0].join("objects.jsonl"))
+                        .expect("objects spool")
+                        .len();
+                    recorded.lock().unwrap().push(len);
+                })
+            })),
+            ..Default::default()
+        };
+        let mut spool = super::snapshot::SnapshotSpool::create(
+            &storage,
+            &raw_root,
+            &tuning,
+            super::snapshot::SpoolWarningSink::Stderr,
+        )
+        .expect("create the spool");
+        spool
+            .freeze(&storage.join(util::DATABASE), &repo_id, false, &tuning)
+            .await
+            .expect("freeze");
+        assert_eq!(
+            super::snapshot::take_peak_pages(super::snapshot::PageKind::Objects),
+            1,
+            "one page of identities in memory at a time"
+        );
+        let sizes = sizes.lock().unwrap().clone();
+        assert_eq!(sizes.len(), 4, "one hook call per object page: {sizes:?}");
+        assert!(
+            sizes.windows(2).all(|pair| pair[0] < pair[1]),
+            "the spool grows page by page: {sizes:?}"
+        );
+        // Ten identities written three per page come back three per page;
+        // nothing counts or caps the whole collection.
+        let mut pages = spool.object_pages(3).expect("open the object spool");
+        let mut sizes = Vec::new();
+        while let Some(page) = pages.next_page().expect("read a page") {
+            sizes.push(page.len());
+        }
+        assert_eq!(sizes, vec![3, 3, 3, 1]);
+        assert!(spool.finish().is_none());
+    }
+
+    #[tokio::test]
+    #[serial(cwd, env)]
+    async fn capture_snapshot_paging_syncs_far_beyond_one_page() {
+        use sea_orm::PaginatorTrait;
+
+        use crate::internal::model::object_index;
+
+        let _repo = enter_isolated_libra_repo().await;
+        let repo_id = ensure_repo_id().await;
+        for n in 0..40 {
+            index_local_object(format!("pi-27 large {n}\n").as_bytes()).await;
+        }
+        let tuning = super::snapshot::SnapshotTuning {
+            page_size: Some(3),
+            ..Default::default()
+        };
+        let mock = crate::utils::d1_client::test_support::MockD1::spawn().await;
+        let report = sync_with_tuning(&mock, &Arc::new(InMemory::new()), &tuning)
+            .await
+            .expect("sync");
+        assert_eq!(
+            (
+                report.total_unsynced,
+                report.synced_count,
+                report.failed_count
+            ),
+            (40, 40, 0)
+        );
+        let unsynced = object_index::Entity::find()
+            .filter(object_index::Column::RepoId.eq(repo_id.clone()))
+            .filter(object_index::Column::IsSynced.eq(0))
+            .count(&db::get_db_conn_instance().await)
+            .await
+            .expect("count unsynced");
+        assert_eq!(unsynced, 0, "every frozen identity is marked");
+        let rows = mock
+            .client()
+            .get_object_indexes(&repo_id)
+            .await
+            .expect("read D1 object index");
+        assert_eq!(rows.len(), 40);
+    }
+
+    #[tokio::test]
+    #[serial(cwd, env)]
+    async fn capture_snapshot_paging_streams_refs_one_page_at_a_time() {
+        use sea_orm::PaginatorTrait;
+
+        use crate::internal::model::reference;
+
+        let _repo = enter_isolated_libra_repo().await;
+        for n in 0..25 {
+            insert_branch_ref(&format!("refs/heads/pi-27-stream-{n:02}")).await;
+        }
+        let total = reference::Entity::find()
+            .count(&db::get_db_conn_instance().await)
+            .await
+            .expect("count refs") as usize;
+        let sizes = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let recorded = sizes.clone();
+        let frozen = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let captured = frozen.clone();
+        // After every projection page the spool file has grown by that page:
+        // refs are written as they are read, not collected and written at the
+        // end, and no more than one page of refs is alive at a time.
+        let _ = super::snapshot::take_peak_pages(super::snapshot::PageKind::Refs);
+        let tuning = super::snapshot::SnapshotTuning {
+            page_size: Some(4),
+            metadata_chunk_size: Some(256),
+            between_projection_pages: Some(Arc::new(move |_attempt| {
+                let recorded = recorded.clone();
+                Box::pin(async move {
+                    let runs = spool_runs();
+                    let len = fs::metadata(runs[0].join("refs.json"))
+                        .expect("refs spool")
+                        .len();
+                    recorded.lock().unwrap().push(len);
+                })
+            })),
+            after_freeze: Some(Arc::new(move |dir| {
+                let captured = captured.clone();
+                Box::pin(async move {
+                    *captured.lock().unwrap() =
+                        fs::read(dir.join("refs.json")).expect("read refs spool");
+                })
+            })),
+            ..Default::default()
+        };
+        let mock = crate::utils::d1_client::test_support::MockD1::spawn().await;
+        let r2 = Arc::new(InMemory::new());
+        sync_with_tuning(&mock, &r2, &tuning).await.expect("sync");
+        assert_eq!(
+            super::snapshot::take_peak_pages(super::snapshot::PageKind::Refs),
+            1,
+            "one page of refs in memory at a time"
+        );
+        let sizes = sizes.lock().unwrap().clone();
+        assert_eq!(sizes.len(), total.div_ceil(4), "one hook call per ref page");
+        assert!(
+            sizes.windows(2).all(|pair| pair[0] < pair[1]),
+            "the spool grows page by page: {sizes:?}"
+        );
+        let frozen = frozen.lock().unwrap().clone();
+        assert!(frozen.len() > 256, "the upload spans several chunks");
+        assert_eq!(
+            uploaded_metadata(&r2).await,
+            frozen,
+            "the chunked upload is the spool file"
+        );
+    }
+
+    #[tokio::test]
+    #[serial(cwd, env)]
+    async fn capture_snapshot_paging_metadata_matches_whole_serialization() {
+        use crate::internal::model::reference::ConfigKind;
+
+        let _repo = enter_isolated_libra_repo().await;
+        // Names that order differently by bytes than by case or locale,
+        // a remote/local split of one name, a tag, and two detached HEADs of
+        // linked worktrees that tie on the sort key (inserted out of
+        // worktree order, so only the id breaks the tie).
+        for name in [
+            "refs/heads/b",
+            "refs/heads/a",
+            "refs/heads/a/b",
+            "refs/heads/B",
+        ] {
+            insert_branch_ref(name).await;
+        }
+        insert_branch_ref("refs/heads/\u{e9}t\u{e9}").await;
+        insert_ref_row(Some("main"), ConfigKind::Branch, Some("upstream"), None).await;
+        insert_ref_row(Some("main"), ConfigKind::Branch, Some("origin"), None).await;
+        insert_ref_row(Some("v1.0"), ConfigKind::Tag, None, None).await;
+        insert_ref_row(None, ConfigKind::Head, None, Some("wt-b")).await;
+        insert_ref_row(None, ConfigKind::Head, None, Some("wt-a")).await;
+        let whole = whole_reference_projection().await;
+
+        let tuning = super::snapshot::SnapshotTuning {
+            page_size: Some(2),
+            metadata_chunk_size: Some(64),
+            ..Default::default()
+        };
+        let mock = crate::utils::d1_client::test_support::MockD1::spawn().await;
+        let r2 = Arc::new(InMemory::new());
+        let report = sync_with_tuning(&mock, &r2, &tuning).await.expect("sync");
+        assert!(matches!(
+            report.metadata,
+            MetadataSyncOutcome::Synced { .. }
+        ));
+        assert_eq!(
+            uploaded_metadata(&r2).await,
+            whole,
+            "the paged, streamed projection is byte-identical"
+        );
+        let stored = ConfigKv::get("cloud.metadata_hash")
+            .await
+            .expect("read the stored hash")
+            .expect("hash stored")
+            .value;
+        assert_eq!(
+            stored,
+            super::metadata::calculate_metadata_hash(&whole).to_string(),
+            "cloud.metadata_hash is the whole-buffer value"
+        );
+
+        // Unchanged refs hash the same through the streamed path: the next
+        // sync skips the upload.
+        let report = sync_with_tuning(&mock, &r2, &tuning)
+            .await
+            .expect("sync again");
+        assert!(matches!(report.metadata, MetadataSyncOutcome::Skipped));
+    }
+
+    #[tokio::test]
+    #[serial(cwd, env)]
+    async fn capture_snapshot_paging_rewrites_ref_pages_on_retry() {
+        use crate::internal::model::reference;
+
+        let _repo = enter_isolated_libra_repo().await;
+        let mut first = None;
+        for n in 0..6 {
+            let id = insert_ref_row(
+                Some(&format!("aaa-pi-27-retry-{n}")),
+                reference::ConfigKind::Branch,
+                None,
+                None,
+            )
+            .await;
+            first.get_or_insert(id);
+        }
+        let deleted = first.expect("a first ref");
+        let renamed = deleted + 3;
+        let changed = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let once = changed.clone();
+        // After the first projection page of the first attempt (already in
+        // the spool) one of its refs is deleted, a new one added, and a ref
+        // not yet written is renamed so it moves behind the page cursor; the
+        // retry rewrites the file, so the upload holds no stale, missing or
+        // duplicate ref.
+        let tuning = super::snapshot::SnapshotTuning {
+            page_size: Some(2),
+            between_projection_pages: Some(Arc::new(move |attempt| {
+                let once = once.clone();
+                Box::pin(async move {
+                    if attempt != 1 || once.swap(true, std::sync::atomic::Ordering::SeqCst) {
+                        return;
+                    }
+                    reference::Entity::delete_by_id(deleted)
+                        .exec(&db::get_db_conn_instance().await)
+                        .await
+                        .expect("delete a frozen ref");
+                    insert_branch_ref("aaa-pi-27-retry-added").await;
+                    let mut moved: reference::ActiveModel = reference::Entity::find_by_id(renamed)
+                        .one(&db::get_db_conn_instance().await)
+                        .await
+                        .expect("read a ref")
+                        .expect("the ref exists")
+                        .into();
+                    moved.name = Set(Some("aaa-pi-27-retry-0-renamed".to_string()));
+                    moved
+                        .update(&db::get_db_conn_instance().await)
+                        .await
+                        .expect("rename a ref");
+                })
+            })),
+            ..Default::default()
+        };
+        let mock = crate::utils::d1_client::test_support::MockD1::spawn().await;
+        let r2 = Arc::new(InMemory::new());
+        sync_with_tuning(&mock, &r2, &tuning).await.expect("sync");
+        assert!(changed.load(std::sync::atomic::Ordering::SeqCst));
+        let uploaded = uploaded_metadata(&r2).await;
+        assert_eq!(
+            uploaded,
+            whole_reference_projection().await,
+            "the retried projection is the current ref table, once"
+        );
+        let uploaded = String::from_utf8(uploaded).expect("utf-8 metadata");
+        assert!(
+            uploaded.contains("\"aaa-pi-27-retry-0-renamed\""),
+            "{uploaded}"
+        );
+        assert!(!uploaded.contains("\"aaa-pi-27-retry-3\""), "{uploaded}");
+
+        // Refs that change during every attempt stop the run before any
+        // remote write.
+        let churn = super::snapshot::SnapshotTuning {
+            page_size: Some(2),
+            between_ref_pages: Some(Arc::new(|_attempt| {
+                Box::pin(async {
+                    let n = std::time::SystemTime::now()
+                        .duration_since(std::time::UNIX_EPOCH)
+                        .map(|elapsed| elapsed.as_nanos())
+                        .unwrap_or_default();
+                    insert_branch_ref(&format!("refs/heads/pi-27-churn-{n}")).await;
+                })
+            })),
+            ..Default::default()
+        };
+        let mock = crate::utils::d1_client::test_support::MockD1::spawn().await;
+        let r2 = Arc::new(InMemory::new());
+        let error = sync_with_tuning(&mock, &r2, &churn)
+            .await
+            .expect_err("refs that keep changing stop the run");
+        assert!(error.to_string().contains("kept changing"), "{error}");
+        let probe = "SELECT sql FROM sqlite_master WHERE type = 'table' AND name = ?1";
+        let probes: Vec<serde_json::Value> = ["agent_session", "agent_capture_session_v2"]
+            .iter()
+            .map(|table| serde_json::json!({ "sql": probe, "params": [table] }))
+            .collect();
+        assert_eq!(mock.request_bodies().await, probes);
+        assert_eq!(r2_object_count(&r2).await, 0);
+        assert!(spool_runs().is_empty());
+    }
+
+    #[tokio::test]
+    #[serial(cwd, env)]
+    async fn capture_snapshot_paging_retries_when_the_connection_is_replaced_during_ref_setup() {
+        // The pool replaces the freeze connection while the attempt marks it
+        // or between creating the TEMP ref copy and its index: the statement
+        // on the missing TEMP table fails, and that is retried like any other
+        // change.
+        for window in ["mark", "copy setup"] {
+            let _repo = enter_isolated_libra_repo().await;
+            for n in 0..4 {
+                insert_branch_ref(&format!("refs/heads/pi-27-setup-{n}")).await;
+            }
+            let attempts = Arc::new(std::sync::Mutex::new(Vec::new()));
+            let recorded = attempts.clone();
+            let tuning = super::snapshot::SnapshotTuning {
+                page_size: Some(3),
+                simulate_reconnect_during_mark: window == "mark",
+                simulate_reconnect_during_ref_setup: window == "copy setup",
+                between_ref_pages: Some(Arc::new(move |attempt| {
+                    let recorded = recorded.clone();
+                    Box::pin(async move {
+                        recorded.lock().unwrap().push(attempt);
+                    })
+                })),
+                ..Default::default()
+            };
+            let mock = crate::utils::d1_client::test_support::MockD1::spawn().await;
+            let r2 = Arc::new(InMemory::new());
+            sync_with_tuning(&mock, &r2, &tuning)
+                .await
+                .unwrap_or_else(|error| {
+                    panic!("{window}: a replaced connection is retried: {error}")
+                });
+            let attempts = attempts.lock().unwrap().clone();
+            assert!(!attempts.is_empty(), "{window}: the refs were copied");
+            assert!(
+                attempts.iter().all(|attempt| *attempt == 2),
+                "{window}: the first attempt stopped and the second copied: {attempts:?}"
+            );
+            assert_eq!(
+                uploaded_metadata(&r2).await,
+                whole_reference_projection().await,
+                "{window}: the retried projection is complete"
+            );
+        }
+    }
+
+    #[tokio::test]
+    #[serial(cwd, env)]
+    async fn capture_snapshot_paging_retries_when_the_connection_is_replaced_during_refs() {
+        // The pool replaces the freeze connection in the middle of the ref
+        // copy: the TEMP copy and marker are gone, the next ref read fails on
+        // the missing table, and that is retried like any other change.
+        let _repo = enter_isolated_libra_repo().await;
+        for n in 0..10 {
+            insert_branch_ref(&format!("refs/heads/pi-27-replaced-{n}")).await;
+        }
+        let attempts = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let recorded = attempts.clone();
+        let tuning = super::snapshot::SnapshotTuning {
+            page_size: Some(3),
+            simulate_reconnect_during_refs: true,
+            between_ref_pages: Some(Arc::new(move |attempt| {
+                let recorded = recorded.clone();
+                Box::pin(async move {
+                    recorded.lock().unwrap().push(attempt);
+                })
+            })),
+            ..Default::default()
+        };
+        let mock = crate::utils::d1_client::test_support::MockD1::spawn().await;
+        let r2 = Arc::new(InMemory::new());
+        sync_with_tuning(&mock, &r2, &tuning)
+            .await
+            .expect("a replaced connection is retried");
+        let attempts = attempts.lock().unwrap().clone();
+        assert_eq!(attempts.first(), Some(&1), "{attempts:?}");
+        assert!(attempts.contains(&2), "the freeze retried: {attempts:?}");
+        assert_eq!(
+            uploaded_metadata(&r2).await,
+            whole_reference_projection().await,
+            "the retried projection is complete"
+        );
+    }
+
+    #[tokio::test]
+    #[serial(cwd, env)]
+    async fn capture_snapshot_paging_reports_a_marker_write_failure() {
+        // A TEMP marker that cannot be written (here an injected I/O error)
+        // is not a replaced connection: the run stops with that error at
+        // once, before any remote write, instead of retrying into "kept
+        // changing".
+        let _repo = enter_isolated_libra_repo().await;
+        index_local_object(b"pi-27 marker failure\n").await;
+        let tuning = super::snapshot::SnapshotTuning {
+            fail_mark_write: true,
+            ..Default::default()
+        };
+        let mock = crate::utils::d1_client::test_support::MockD1::spawn().await;
+        let r2 = Arc::new(InMemory::new());
+        let error = sync_with_tuning(&mock, &r2, &tuning)
+            .await
+            .expect_err("a marker write failure stops the run");
+        let detail = error.to_string();
+        assert!(
+            detail.contains("disk I/O error writing the TEMP marker (injected)"),
+            "{detail}"
+        );
+        assert!(
+            detail.contains("nothing was written to D1 or R2"),
+            "{detail}"
+        );
+        assert!(!detail.contains("kept changing"), "{detail}");
+        assert_eq!(r2_object_count(&r2).await, 0);
+        assert!(spool_runs().is_empty());
+    }
+
+    #[tokio::test]
+    #[serial(cwd, env)]
+    async fn capture_snapshot_paging_records_the_hash_only_after_upload() {
+        // The stored hash is cleared before the upload and recorded after it:
+        // when recording fails, the run says so and no hash is left behind,
+        // so the next sync uploads the metadata again instead of skipping on
+        // a stale hash.
+        let _repo = enter_isolated_libra_repo().await;
+        insert_branch_ref("refs/heads/pi-27-hash").await;
+        ConfigKv::set("cloud.metadata_hash", "1", false)
+            .await
+            .expect("store an old hash");
+        let tuning = super::snapshot::SnapshotTuning {
+            fail_metadata_hash_record: true,
+            ..Default::default()
+        };
+        let mock = crate::utils::d1_client::test_support::MockD1::spawn().await;
+        let r2 = Arc::new(InMemory::new());
+        let error = sync_with_tuning(&mock, &r2, &tuning)
+            .await
+            .expect_err("a failed hash record is reported");
+        let detail = error.to_string();
+        assert!(
+            detail.contains("recording cloud.metadata_hash failed"),
+            "{detail}"
+        );
+        assert!(detail.contains("uploads the metadata again"), "{detail}");
+        assert_eq!(
+            uploaded_metadata(&r2).await,
+            whole_reference_projection().await
+        );
+        assert!(
+            ConfigKv::get("cloud.metadata_hash")
+                .await
+                .expect("read the stored hash")
+                .is_none(),
+            "no stale hash is left"
+        );
+
+        let report = sync_with_tuning(&mock, &r2, &Default::default())
+            .await
+            .expect("the next sync");
+        assert!(matches!(
+            report.metadata,
+            MetadataSyncOutcome::Synced { .. }
+        ));
+        assert_eq!(
+            ConfigKv::get("cloud.metadata_hash")
+                .await
+                .expect("read the stored hash")
+                .expect("hash recorded")
+                .value,
+            super::metadata::calculate_metadata_hash(&whole_reference_projection().await)
+                .to_string()
+        );
+    }
+
+    #[tokio::test]
+    #[serial(cwd, env)]
+    async fn capture_snapshot_paging_rejects_a_changed_refs_spool() {
+        // A refs spool cut short, grown, or rewritten to the same length after
+        // the freeze is a read failure: the run fails and no metadata is
+        // uploaded from it.
+        for (case, change) in [("truncated", -1i64), ("extended", 1), ("rewritten", 0)] {
+            let _repo = enter_isolated_libra_repo().await;
+            for n in 0..3 {
+                insert_branch_ref(&format!("refs/heads/pi-27-length-{n}")).await;
+            }
+            let tuning = super::snapshot::SnapshotTuning {
+                after_freeze: Some(Arc::new(move |dir| {
+                    Box::pin(async move {
+                        let path = dir.join("refs.json");
+                        let mut bytes = fs::read(&path).expect("read refs spool");
+                        match change {
+                            -1 => {
+                                bytes.pop();
+                            }
+                            1 => bytes.push(b' '),
+                            _ => {
+                                let last = bytes.len() - 2;
+                                bytes[last] ^= 1;
+                            }
+                        }
+                        fs::write(&path, bytes).expect("change refs spool");
+                    })
+                })),
+                ..Default::default()
+            };
+            let mock = crate::utils::d1_client::test_support::MockD1::spawn().await;
+            let r2 = Arc::new(InMemory::new());
+            let error = sync_with_tuning(&mock, &r2, &tuning)
+                .await
+                .expect_err("a changed refs spool fails the run");
+            let detail = error.to_string();
+            assert!(
+                detail.contains("could not read its local snapshot spool"),
+                "{case}: {detail}"
+            );
+            assert!(detail.contains("refs.json"), "{case}: {detail}");
+            assert!(
+                RemoteStorage::new(r2.clone()).get_metadata().await.is_err(),
+                "{case}: no metadata is uploaded"
+            );
+        }
+    }
+
+    #[tokio::test]
+    #[serial(cwd, env)]
+    async fn capture_snapshot_paging_refuses_refs_changed_before_upload() {
+        // The refs spool changes after its hash decided the upload and before
+        // the upload reads it: whether sent in one PUT or in parts, the bytes
+        // are checked against the frozen length and hash first, so nothing is
+        // uploaded and cloud.metadata_hash is not recorded.
+        for chunk in [None, Some(16)] {
+            let _repo = enter_isolated_libra_repo().await;
+            for n in 0..3 {
+                insert_branch_ref(&format!("refs/heads/pi-27-late-{n}")).await;
+            }
+            let tuning = super::snapshot::SnapshotTuning {
+                metadata_chunk_size: chunk,
+                before_metadata_upload: Some(Arc::new(|path| {
+                    Box::pin(async move {
+                        let mut bytes = fs::read(&path).expect("read refs spool");
+                        let last = bytes.len() - 2;
+                        bytes[last] ^= 1;
+                        fs::write(&path, bytes).expect("change refs spool");
+                    })
+                })),
+                ..Default::default()
+            };
+            let mock = crate::utils::d1_client::test_support::MockD1::spawn().await;
+            let r2 = Arc::new(InMemory::new());
+            let error = sync_with_tuning(&mock, &r2, &tuning)
+                .await
+                .expect_err("changed refs are not uploaded");
+            let detail = error.to_string();
+            assert!(
+                detail.contains("changed after it was hashed"),
+                "{chunk:?}: {detail}"
+            );
+            assert!(
+                RemoteStorage::new(r2.clone()).get_metadata().await.is_err(),
+                "{chunk:?}: no metadata is uploaded"
+            );
+            assert!(
+                ConfigKv::get("cloud.metadata_hash")
+                    .await
+                    .expect("read the stored hash")
+                    .is_none(),
+                "{chunk:?}: no hash is recorded"
+            );
+        }
+    }
+
+    #[tokio::test]
+    #[serial(cwd, env)]
+    async fn capture_snapshot_paging_routes_a_background_upload_warning() {
+        // A background cleanup failure is shown in every output mode: a
+        // `cloud_sync.metadata.warning` NDJSON line under --progress=json,
+        // otherwise a warning line on stderr.
+        *JSON_PROGRESS_CAPTURE.lock().unwrap() = Some(Vec::new());
+        super::snapshot::background_warning_report(
+            super::snapshot::SpoolWarningSink::NdjsonProgress,
+        )("abort failed for metadata.json".to_string());
+        let lines = JSON_PROGRESS_CAPTURE
+            .lock()
+            .unwrap()
+            .take()
+            .expect("captured progress");
+        assert_eq!(lines.len(), 1, "{lines:?}");
+        let event: serde_json::Value = serde_json::from_str(&lines[0]).expect("one JSON line");
+        assert_eq!(event["event"], "cloud_sync.metadata.warning");
+        assert_eq!(event["message"], "abort failed for metadata.json");
+
+        *super::snapshot::DROP_WARNING_CAPTURE.lock().unwrap() = Some(Vec::new());
+        super::snapshot::background_warning_report(super::snapshot::SpoolWarningSink::Stderr)(
+            "abort failed for metadata.json".to_string(),
+        );
+        let printed = super::snapshot::DROP_WARNING_CAPTURE
+            .lock()
+            .unwrap()
+            .take()
+            .expect("captured stderr");
+        assert_eq!(
+            printed,
+            vec!["warning: abort failed for metadata.json".to_string()]
+        );
     }
 
     #[tokio::test]

@@ -693,7 +693,7 @@ Claude 审查实现 `VERDICT: PASS`。文档挂错常量之后的复核轮也是
 
 **Task type:** implementation
 
-**Lifecycle / Acceptance:** pending / 空
+**Lifecycle / Acceptance:** done / complete
 
 **Description:** 自HM-05拆出的纯平台/profile/cwd准入轴，生产者与receiver使用同一冻结策略，拒绝发生在正文序列化/读取前。本卡仅在providers/mod.rs声明pub mod hermes，提供可调用纯parser/scope API，不注册HookProvider；HM-05之后才接线注册。
 
@@ -703,16 +703,18 @@ Claude 审查实现 `VERDICT: PASS`。文档挂错常量之后的复核轮也是
 
 **Acceptance criteria:**
 
-- [ ] 仅HM-00已证的本地CLI platform可进入。
-- [ ] 缺cwd拒绝。
-- [ ] cwd必须等于现有CAP已验证的仓库/worktree事实。
-- [ ] profile 必须等于 HM-08 所选 source 已记录的当前 session/profile；不从全局默认或 event 猜根。
-- [ ] 拒绝路径不建立capture row。
-- [ ] producer与receiver的准入策略由同一fixture矩阵生成并一致。
+- [x] 仅HM-00已证的本地CLI platform可进入。
+- [x] 缺cwd拒绝。
+- [x] cwd必须等于现有CAP已验证的仓库/worktree事实。
+- [x] profile 必须等于 HM-08 所选 source 已记录的当前 session/profile；不从全局默认或 event 猜根。
+- [x] 拒绝路径不建立capture row。
+- [x] producer与receiver的准入策略由同一fixture矩阵生成并一致。
 
 **Verification:**
 
-- [ ] `source .env.test && cargo test --lib internal::ai::hooks::providers::hermes::scope::tests::hermes_scope_admission_ -- --test-threads=1`（拟新增过滤名；须列出实际匹配并确认非零）
+- [x] `source .env.test && cargo test --lib internal::ai::hooks::providers::hermes::scope::tests::hermes_scope_admission_ -- --test-threads=1`（拟新增过滤名；须列出实际匹配并确认非零）
+
+实现说明：`providers/mod.rs` 只声明 `pub mod hermes`，没有 `HookProvider`，也没有 `hermes_provider()`。`admit_producer` 与 `admit_receiver` 都调用 `admit_hermes_scope`。只接受 `source=cli`；`created_source` 出现时也必须是 `cli`。cwd 必须等于调用方已经验证的 worktree 根，子目录、相对路径和 `..` 都拒绝。`profile_name` 必须等于调用方给出的已记录 profile；缺记录时只匹配显式的 `default`。event 里的 `profile` 与 `event_cwd` 不参与。parser 在读取消息正文前返回。拒绝和放行都不写 `agent_session`。`supported`、`hook_installable`、`transcript_readable` 与 launch 仍是 false，`as_hooks()` 仍是 `None`。`hermes_scope_admission_` 匹配 4 条并全部通过。`libra_observer.py` 用同一矩阵得到相同结论，不打开 state.db。Claude `VERDICT: PASS`，正文 SHA-256 `be3a823314009bbaae4d3f18fb374598a14a7db33cd89137295e16545ab5741b`。无 P0/P1。发布窗口 `v0.30.100`。
 
 **Full-suite trigger:** T-1/T-4（共享采集、存储、CLI 或测试契约）；执行四 provider 契约的完整双环境 nextest 门
 

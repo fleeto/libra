@@ -12,7 +12,11 @@
 //! asserts the production file stays byte-identical with zero runtime
 //! key-override entry points.
 
-use std::process::Command;
+use std::{
+    ffi::{OsStr, OsString},
+    path::{Path, PathBuf},
+    process::Command,
+};
 
 fn tool_available(tool: &str, arg: &str) -> bool {
     Command::new(tool)
@@ -20,6 +24,54 @@ fn tool_available(tool: &str, arg: &str) -> bool {
         .output()
         .map(|out| out.status.success())
         .is_ok_and(|ok| ok)
+}
+
+/// True when `bin` can create an Ed25519 key. macOS `/usr/bin/openssl` is
+/// LibreSSL 3.3.6 and reports a version, but `genpkey -algorithm ed25519` fails.
+fn openssl_can_ed25519(bin: &OsStr) -> bool {
+    let dir = std::env::temp_dir().join(format!(
+        "libra-install-smoke-ed25519-{}",
+        std::process::id()
+    ));
+    if std::fs::create_dir_all(&dir).is_err() {
+        return false;
+    }
+    let pem = dir.join("t.pem");
+    let ok = Command::new(bin)
+        .args(["genpkey", "-algorithm", "ed25519", "-out"])
+        .arg(&pem)
+        .output()
+        .map(|out| out.status.success())
+        .unwrap_or(false);
+    let _ = std::fs::remove_file(&pem);
+    let _ = std::fs::remove_dir(&dir);
+    ok
+}
+
+/// Which `openssl` the smoke child should see.
+///
+/// `OnPath` keeps the caller's `PATH`. `Prefixed` prepends a Homebrew OpenSSL 3
+/// directory for the child only. The production `install.sh` is not modified.
+enum SmokeOpenssl {
+    OnPath,
+    Prefixed(PathBuf),
+    Unavailable,
+}
+
+fn smoke_openssl() -> SmokeOpenssl {
+    if openssl_can_ed25519(OsStr::new("openssl")) {
+        return SmokeOpenssl::OnPath;
+    }
+    for dir in [
+        "/opt/homebrew/opt/openssl@3/bin",
+        "/usr/local/opt/openssl@3/bin",
+    ] {
+        let bin = Path::new(dir).join("openssl");
+        if bin.is_file() && openssl_can_ed25519(bin.as_os_str()) {
+            return SmokeOpenssl::Prefixed(PathBuf::from(dir));
+        }
+    }
+    SmokeOpenssl::Unavailable
 }
 
 #[test]
@@ -34,14 +86,32 @@ fn install_sh_smoke_scenarios() {
             return;
         }
     }
+    let prefix = match smoke_openssl() {
+        SmokeOpenssl::OnPath => None,
+        SmokeOpenssl::Prefixed(dir) => Some(dir),
+        SmokeOpenssl::Unavailable => {
+            eprintln!(
+                "skipped (install-smoke needs an Ed25519 openssl; system openssl cannot genpkey ed25519 and no Homebrew OpenSSL 3 was found)"
+            );
+            return;
+        }
+    };
     let harness = concat!(
         env!("CARGO_MANIFEST_DIR"),
         "/tests/data/install-smoke/run.sh"
     );
-    let output = Command::new("bash")
-        .arg(harness)
-        .output()
-        .expect("install-smoke harness must spawn");
+    let mut command = Command::new("bash");
+    command.arg(harness);
+    if let Some(dir) = &prefix {
+        let mut path = OsString::from(dir);
+        path.push(":");
+        if let Some(current) = std::env::var_os("PATH") {
+            path.push(current);
+        }
+        command.env("PATH", path);
+        eprintln!("install-smoke using Ed25519 openssl from {}", dir.display());
+    }
+    let output = command.output().expect("install-smoke harness must spawn");
     let stdout = String::from_utf8_lossy(&output.stdout);
     let stderr = String::from_utf8_lossy(&output.stderr);
     assert!(

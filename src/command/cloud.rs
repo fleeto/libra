@@ -23,7 +23,6 @@ use sha2::{Digest, Sha256};
 use uuid::Uuid;
 
 use crate::{
-    cli_error,
     internal::{
         config::ConfigKv,
         db,
@@ -324,9 +323,14 @@ pub trait CloudSyncProgress: Send + Sync {
     fn on_local_status_warning(&self, oid: &str, err: &str) {
         let _ = (oid, err);
     }
+    /// The object phase ended (metadata and the agent-capture mirror still
+    /// follow); never a statement that the sync succeeded (PI-28).
     fn on_sync_complete(&self, synced: usize, failed: usize) {
         let _ = (synced, failed);
     }
+    /// The whole sync succeeded: every object, the metadata and the
+    /// agent-capture mirror. Called only after the result is known.
+    fn on_sync_succeeded(&self) {}
     fn on_metadata_starting(&self) {}
     fn on_metadata_skipped(&self) {}
     fn on_metadata_synced(&self, references: usize) {
@@ -406,43 +410,101 @@ fn metadata_warning_event(message: &str) -> serde_json::Value {
     })
 }
 
-/// Console implementation that reproduces the legacy `libra cloud
-/// sync` output verbatim.
+/// Test-only capture of human progress output (stdout and stderr lines), in
+/// place of the terminal (PI-28).
+#[cfg(test)]
+static CONSOLE_PROGRESS_CAPTURE: std::sync::Mutex<Option<Vec<String>>> =
+    std::sync::Mutex::new(None);
+
+#[cfg(test)]
+fn capture_console_progress(line: &str) -> bool {
+    if let Ok(mut capture) = CONSOLE_PROGRESS_CAPTURE.lock()
+        && let Some(lines) = capture.as_mut()
+    {
+        lines.push(line.to_string());
+        return true;
+    }
+    false
+}
+
+/// One human progress line on stdout.
+fn console_progress_line(line: &str) {
+    #[cfg(test)]
+    if capture_console_progress(line) {
+        return;
+    }
+    println!("{line}");
+}
+
+/// One human progress note on stderr that is shown but, as before, not
+/// counted for `--exit-code-on-warning` (the agent-capture mirror warning).
+fn console_progress_note(line: String) {
+    #[cfg(test)]
+    if capture_console_progress(&line) {
+        return;
+    }
+    eprintln!("{line}");
+}
+
+/// One human progress error or warning on stderr, through the legacy
+/// stderr renderer (a `warning: ` line is also counted for
+/// `--exit-code-on-warning`).
+fn console_progress_stderr(line: String) {
+    #[cfg(test)]
+    if capture_console_progress(&line) {
+        return;
+    }
+    crate::utils::error::emit_legacy_stderr(line);
+}
+
+/// Console implementation of the human `libra cloud sync` output: the
+/// legacy progress lines, except that the object phase ends with
+/// `Objects: N synced, M failed` and only a fully successful sync ends with
+/// `Sync complete.` (PI-28).
 pub struct ConsoleCloudSyncProgress;
 
 impl CloudSyncProgress for ConsoleCloudSyncProgress {
     fn on_starting(&self) {
-        println!("Starting cloud sync...");
+        console_progress_line("Starting cloud sync...");
     }
     fn on_no_objects(&self) {
-        println!("No objects to sync.");
+        console_progress_line("No objects to sync.");
     }
     fn on_object_total(&self, total: usize) {
-        println!("Found {total} objects to sync.");
+        console_progress_line(&format!("Found {total} objects to sync."));
     }
     fn on_batch_progress(&self, synced: usize, total: usize, failed: usize) {
-        println!("Progress: {synced}/{total} synced, {failed} failed");
+        console_progress_line(&format!(
+            "Progress: {synced}/{total} synced, {failed} failed"
+        ));
     }
     fn on_object_error(&self, oid: &str, err: &str) {
-        cli_error!(err => format!("error: failed to sync {oid}"));
+        console_progress_stderr(format!("error: failed to sync {oid}: {err}"));
     }
     fn on_local_status_warning(&self, oid: &str, err: &str) {
-        cli_error!(err => format!("warning: failed to update local sync status for {oid}"));
+        console_progress_stderr(format!(
+            "warning: failed to update local sync status for {oid}: {err}"
+        ));
     }
     fn on_sync_complete(&self, synced: usize, failed: usize) {
-        println!("Sync complete: {synced} synced, {failed} failed");
+        // The object phase only: metadata and the agent-capture mirror can
+        // still fail, so this never says the sync is complete (PI-28).
+        console_progress_line(&format!("Objects: {synced} synced, {failed} failed"));
+    }
+    fn on_sync_succeeded(&self) {
+        console_progress_line("Sync complete.");
     }
     fn on_metadata_starting(&self) {
-        println!("Syncing metadata...");
+        console_progress_line("Syncing metadata...");
     }
     fn on_metadata_skipped(&self) {
-        println!("Metadata unchanged, skipping upload.");
+        console_progress_line("Metadata unchanged, skipping upload.");
     }
     fn on_metadata_synced(&self, references: usize) {
-        println!("Metadata synced ({references} references).");
+        console_progress_line(&format!("Metadata synced ({references} references)."));
     }
     fn on_agent_capture_starting(&self) {
-        println!("Syncing agent capture catalog to D1...");
+        console_progress_line("Syncing agent capture catalog to D1...");
     }
     fn on_agent_capture_session_warning(&self, _session_id: &str, _err: &str) {
         self.on_agent_capture_warning(AGENT_CAPTURE_SYNC_FAILURE_MESSAGE);
@@ -459,14 +521,14 @@ impl CloudSyncProgress for ConsoleCloudSyncProgress {
         subagent_rows_synced: usize,
         subagent_rows_failed: usize,
     ) {
-        println!(
+        console_progress_line(&format!(
             "Agent capture sync: {sessions_synced} sessions ({sessions_failed} failed), \
              {checkpoints_synced} checkpoints ({checkpoints_failed} failed), \
              {subagent_rows_synced} subagent companion rows ({subagent_rows_failed} failed)."
-        );
+        ));
     }
     fn on_agent_capture_warning(&self, err: &str) {
-        eprintln!("warning: agent capture sync incomplete: {err}");
+        console_progress_note(format!("warning: agent capture sync incomplete: {err}"));
     }
 }
 
@@ -534,10 +596,17 @@ impl CloudSyncProgress for JsonCloudSyncProgress {
         }));
     }
     fn on_sync_complete(&self, synced: usize, failed: usize) {
+        // The object phase only; metadata and the agent-capture mirror can
+        // still fail, so it is "finished", never "complete" (PI-28).
         Self::emit(serde_json::json!({
-            "event": "cloud_sync.objects.complete",
+            "event": "cloud_sync.objects.finished",
             "synced": synced,
             "failed": failed,
+        }));
+    }
+    fn on_sync_succeeded(&self) {
+        Self::emit(serde_json::json!({
+            "event": "cloud_sync.complete",
         }));
     }
     fn on_metadata_starting(&self) {
@@ -583,7 +652,7 @@ impl CloudSyncProgress for JsonCloudSyncProgress {
         subagent_rows_failed: usize,
     ) {
         Self::emit(serde_json::json!({
-            "event": "cloud_sync.agent_capture.complete",
+            "event": "cloud_sync.agent_capture.finished",
             "sessions_synced": sessions_synced,
             "sessions_failed": sessions_failed,
             "checkpoints_synced": checkpoints_synced,
@@ -661,12 +730,9 @@ pub async fn execute_safe(args: CloudArgs, output: &OutputConfig) -> CliResult<(
                 batch_size: sync_args.batch_size,
                 force: sync_args.force,
             };
-            let report = run_cloud_sync(ctx, sync_progress_for(output))
-                .await
-                .map_err(|e| cloud_cli_error_typed("sync", e))?;
-            if let Some(structured) =
-                finish_sync(&report, output).map_err(|e| cloud_cli_error_typed("sync", e))?
-            {
+            let progress = sync_progress_for(output);
+            let outcome = run_cloud_sync(ctx, progress).await;
+            if let Some(structured) = conclude_sync(outcome, progress, output)? {
                 emit_json_data("cloud.sync", &structured, output)?;
             }
         }
@@ -1065,6 +1131,23 @@ fn finish_sync(
         .then(|| cloud_sync_output_from_report(report)))
 }
 
+/// Conclude a sync run for `output`: the CLI error it stands for (a hard
+/// error, failed objects or a failed agent-capture mirror), or — only then,
+/// once the whole run is known to have succeeded — the success announced
+/// through `progress` and the `--json` data to emit. Shared by
+/// `execute_safe` and the tests, so a failed sync never reports success
+/// (PI-28).
+fn conclude_sync(
+    outcome: CloudResult<CloudSyncReport>,
+    progress: &dyn CloudSyncProgress,
+    output: &OutputConfig,
+) -> CliResult<Option<CloudSyncOutput>> {
+    let report = outcome.map_err(|e| cloud_cli_error_typed("sync", e))?;
+    let structured = finish_sync(&report, output).map_err(|e| cloud_cli_error_typed("sync", e))?;
+    progress.on_sync_succeeded();
+    Ok(structured)
+}
+
 /// Execute sync command - uploads objects to R2, indexes to D1, and registers project name
 async fn execute_sync(args: SyncArgs) -> CloudResult<()> {
     let ctx = CloudSyncContext {
@@ -1078,7 +1161,10 @@ async fn execute_sync(args: SyncArgs) -> CloudResult<()> {
     // already been emitted by `ConsoleCloudSyncProgress`.
     match sync_report_failure(&report) {
         Some(error) => Err(error),
-        None => Ok(()),
+        None => {
+            ConsoleCloudSyncProgress.on_sync_succeeded();
+            Ok(())
+        }
     }
 }
 
@@ -5125,6 +5211,398 @@ mod tests {
             .get_metadata()
             .await
             .expect("read metadata")
+    }
+
+    /// An in-memory R2 that rejects uploads of objects or of `metadata.json`
+    /// and counts each rejection, so a test can see the fault fired (PI-28).
+    #[derive(Debug)]
+    struct FailingR2 {
+        inner: Arc<InMemory>,
+        fail_objects: bool,
+        fail_metadata: bool,
+        rejected: Arc<std::sync::atomic::AtomicUsize>,
+    }
+
+    impl FailingR2 {
+        fn rejects(&self, location: &object_store::path::Path) -> bool {
+            let metadata = location.as_ref().ends_with("metadata.json");
+            let rejected = if metadata {
+                self.fail_metadata
+            } else {
+                self.fail_objects
+            };
+            if rejected {
+                self.rejected
+                    .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            }
+            rejected
+        }
+    }
+
+    impl std::fmt::Display for FailingR2 {
+        fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+            f.write_str("FailingR2")
+        }
+    }
+
+    fn injected_r2_failure() -> object_store::Error {
+        object_store::Error::Generic {
+            store: "failing-r2",
+            source: "injected R2 upload failure".into(),
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl object_store::ObjectStore for FailingR2 {
+        async fn put_opts(
+            &self,
+            location: &object_store::path::Path,
+            payload: object_store::PutPayload,
+            opts: object_store::PutOptions,
+        ) -> object_store::Result<object_store::PutResult> {
+            if self.rejects(location) {
+                return Err(injected_r2_failure());
+            }
+            self.inner.put_opts(location, payload, opts).await
+        }
+
+        async fn put_multipart_opts(
+            &self,
+            location: &object_store::path::Path,
+            opts: object_store::PutMultipartOptions,
+        ) -> object_store::Result<Box<dyn object_store::MultipartUpload>> {
+            if self.rejects(location) {
+                return Err(injected_r2_failure());
+            }
+            self.inner.put_multipart_opts(location, opts).await
+        }
+
+        async fn get_opts(
+            &self,
+            location: &object_store::path::Path,
+            options: object_store::GetOptions,
+        ) -> object_store::Result<object_store::GetResult> {
+            self.inner.get_opts(location, options).await
+        }
+
+        fn list(
+            &self,
+            prefix: Option<&object_store::path::Path>,
+        ) -> futures::stream::BoxStream<'static, object_store::Result<object_store::ObjectMeta>>
+        {
+            self.inner.list(prefix)
+        }
+
+        async fn list_with_delimiter(
+            &self,
+            prefix: Option<&object_store::path::Path>,
+        ) -> object_store::Result<object_store::ListResult> {
+            self.inner.list_with_delimiter(prefix).await
+        }
+
+        async fn copy_opts(
+            &self,
+            from: &object_store::path::Path,
+            to: &object_store::path::Path,
+            options: object_store::CopyOptions,
+        ) -> object_store::Result<()> {
+            self.inner.copy_opts(from, to, options).await
+        }
+
+        fn delete_stream(
+            &self,
+            locations: futures::stream::BoxStream<
+                'static,
+                object_store::Result<object_store::path::Path>,
+            >,
+        ) -> futures::stream::BoxStream<'static, object_store::Result<object_store::path::Path>>
+        {
+            self.inner.delete_stream(locations)
+        }
+    }
+
+    /// The output configuration each mode resolves to from its command
+    /// line, as `main` resolves it (`--json` alone also turns on NDJSON
+    /// progress).
+    fn report_modes() -> [(&'static str, OutputConfig); 4] {
+        let resolve = |flags: &[&str]| {
+            let argv: Vec<String> = std::iter::once("libra")
+                .chain(flags.iter().copied())
+                .chain(["cloud", "sync"])
+                .map(str::to_string)
+                .collect();
+            OutputConfig::resolve_from_argv(&argv)
+        };
+        [
+            ("human", resolve(&[])),
+            ("quiet", resolve(&["--quiet"])),
+            ("json", resolve(&["--json"])),
+            ("progress-json", resolve(&["--progress=json"])),
+        ]
+    }
+
+    /// Run a sync from the snapshot as `execute_safe` does in `mode`
+    /// (renderer from `sync_progress_for`, decision from `conclude_sync`),
+    /// capturing human and NDJSON progress.
+    async fn drive_sync_in_mode(
+        mode: &OutputConfig,
+        mock: &crate::utils::d1_client::test_support::MockD1,
+        store: Arc<dyn object_store::ObjectStore>,
+        tuning: &super::snapshot::SnapshotTuning,
+    ) -> (CliResult<Option<CloudSyncOutput>>, Vec<String>, Vec<String>) {
+        *CONSOLE_PROGRESS_CAPTURE.lock().unwrap() = Some(Vec::new());
+        *JSON_PROGRESS_CAPTURE.lock().unwrap() = Some(Vec::new());
+        let progress = sync_progress_for(mode);
+        let outcome = super::sync::run_cloud_sync_from_snapshot(
+            CloudSyncContext {
+                batch_size: 2,
+                force: false,
+            },
+            progress,
+            mock.client(),
+            Some(RemoteStorage::new(store)),
+            tuning,
+        )
+        .await;
+        let concluded = conclude_sync(outcome, progress, mode);
+        let console = CONSOLE_PROGRESS_CAPTURE
+            .lock()
+            .unwrap()
+            .take()
+            .unwrap_or_default();
+        let ndjson = JSON_PROGRESS_CAPTURE
+            .lock()
+            .unwrap()
+            .take()
+            .unwrap_or_default();
+        (concluded, console, ndjson)
+    }
+
+    /// Whether `text` announces success: a whole word "complete",
+    /// "completed", "success", "succeeded" or "successful(ly)" ("incomplete"
+    /// is not one).
+    fn claims_success(text: &str) -> bool {
+        text.to_lowercase()
+            .split(|c: char| !c.is_ascii_alphanumeric())
+            .any(|word| {
+                matches!(
+                    word,
+                    "complete"
+                        | "completed"
+                        | "success"
+                        | "succeeded"
+                        | "successful"
+                        | "successfully"
+                )
+            })
+    }
+
+    #[tokio::test]
+    #[serial(cwd, env)]
+    async fn capture_snapshot_report_never_claims_success_on_failure() {
+        // Each failure — a failed object upload to R2 (and, separately, a
+        // failed object index write to D1), a failed local status update, a
+        // failed metadata upload and a failed agent-capture mirror — ends
+        // the run with its stable error code in every output mode, and
+        // nothing printed on the way announces success. The metadata and
+        // mirror failures also run with nothing to upload, through the
+        // sync's no-objects branch. Every case runs in a fresh repository.
+        let failures = [
+            (
+                "object upload",
+                StableErrorCode::ConflictOperationBlocked,
+                true,
+            ),
+            (
+                "object index write",
+                StableErrorCode::ConflictOperationBlocked,
+                true,
+            ),
+            (
+                "status update",
+                StableErrorCode::ConflictOperationBlocked,
+                true,
+            ),
+            ("metadata upload", StableErrorCode::NetworkUnavailable, true),
+            (
+                "agent capture mirror",
+                StableErrorCode::ConflictOperationBlocked,
+                true,
+            ),
+            (
+                "metadata upload",
+                StableErrorCode::NetworkUnavailable,
+                false,
+            ),
+            (
+                "agent capture mirror",
+                StableErrorCode::ConflictOperationBlocked,
+                false,
+            ),
+        ];
+        for (label, mode) in report_modes() {
+            for (failure, code, with_objects) in failures {
+                let _repo = enter_isolated_libra_repo().await;
+                let case = if with_objects {
+                    index_local_object(format!("pi-28 {label} {failure}\n").as_bytes()).await;
+                    failure.to_string()
+                } else {
+                    format!("{failure} (no objects)")
+                };
+                insert_branch_ref("refs/heads/pi-28").await;
+                let pending = {
+                    use sea_orm::PaginatorTrait;
+                    object_index::Entity::find()
+                        .filter(object_index::Column::IsSynced.eq(0))
+                        .count(&db::get_db_conn_instance().await)
+                        .await
+                        .expect("count pending objects")
+                };
+                assert_eq!(pending, u64::from(with_objects), "{label}/{case}");
+                let mock = crate::utils::d1_client::test_support::MockD1::spawn().await;
+                let mut tuning = super::snapshot::SnapshotTuning::default();
+                let rejected = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+                let r2 = |fail_objects: bool,
+                          fail_metadata: bool|
+                 -> Arc<dyn object_store::ObjectStore> {
+                    Arc::new(FailingR2 {
+                        inner: Arc::new(InMemory::new()),
+                        fail_objects,
+                        fail_metadata,
+                        rejected: rejected.clone(),
+                    })
+                };
+                let mut store = r2(false, false);
+                match failure {
+                    "object upload" => store = r2(true, false),
+                    "object index write" => mock.fail_once_when_sql_contains(
+                        "INSERT INTO object_index (o_id, o_type, o_size, repo_id, created_at, is_synced, object_format)",
+                        "injected upload failure",
+                    ),
+                    "status update" => tuning.fail_status_update = true,
+                    "metadata upload" => store = r2(false, true),
+                    _ => mock.fail_once_when_sql_contains(
+                        "CREATE TABLE IF NOT EXISTS agent_session (",
+                        "injected agent capture mirror failure",
+                    ),
+                }
+                let (concluded, console, ndjson) =
+                    drive_sync_in_mode(&mode, &mock, store, &tuning).await;
+                if matches!(failure, "object upload" | "metadata upload") {
+                    assert!(
+                        rejected.load(std::sync::atomic::Ordering::SeqCst) > 0,
+                        "{label}/{case}: the injected R2 failure fired"
+                    );
+                }
+                let error = match concluded {
+                    Ok(_) => panic!("{label}/{case}: a failed sync must not succeed"),
+                    Err(error) => error,
+                };
+                assert_eq!(error.stable_code(), code, "{label}/{case}: {error}");
+                // What --json prints instead of the cloud.sync data: the
+                // error envelope with that code.
+                let envelope: serde_json::Value =
+                    serde_json::from_str(&error.render_json()).expect("error envelope");
+                assert_eq!(envelope["ok"], false, "{label}/{case}: {envelope}");
+                assert_eq!(
+                    envelope["error_code"],
+                    code.as_str(),
+                    "{label}/{case}: {envelope}"
+                );
+                for line in &console {
+                    assert!(
+                        !claims_success(line),
+                        "{label}/{case}: success claimed: {line}\n{console:#?}"
+                    );
+                }
+                let mut events = Vec::new();
+                for line in &ndjson {
+                    let event: serde_json::Value = serde_json::from_str(line)
+                        .unwrap_or_else(|e| panic!("{label}/{case}: not NDJSON ({e}): {line}"));
+                    let name = event["event"].as_str().unwrap_or_default().to_string();
+                    assert!(
+                        !claims_success(&name),
+                        "{label}/{case}: success event {name}\n{ndjson:#?}"
+                    );
+                    events.push(name);
+                }
+                match label {
+                    "human" => {
+                        assert!(!console.is_empty(), "{case}: human progress");
+                        assert_eq!(
+                            console.iter().any(|line| line == "No objects to sync."),
+                            !with_objects,
+                            "{case}: {console:#?}"
+                        );
+                    }
+                    "quiet" => assert!(
+                        console.is_empty() && ndjson.is_empty(),
+                        "{case}: quiet prints no progress: {console:?} {ndjson:?}"
+                    ),
+                    // --json and --progress=json both stream NDJSON progress.
+                    _ => {
+                        assert!(console.is_empty(), "{label}/{case}: {console:?}");
+                        assert_eq!(
+                            events.iter().any(|name| name == "cloud_sync.objects.none"),
+                            !with_objects,
+                            "{label}/{case}: {events:?}"
+                        );
+                    }
+                }
+            }
+        }
+    }
+
+    #[tokio::test]
+    #[serial(cwd, env)]
+    async fn capture_snapshot_report_announces_success_only_at_the_end() {
+        // A successful sync says so once, after metadata and the
+        // agent-capture mirror: the last human line is "Sync complete." and
+        // the last NDJSON event is `cloud_sync.complete`; --json returns the
+        // structured result and --quiet prints nothing.
+        let _repo = enter_isolated_libra_repo().await;
+        let mut run = 0usize;
+        for (label, mode) in report_modes() {
+            run += 1;
+            index_local_object(format!("pi-28 success {run}\n").as_bytes()).await;
+            let mock = crate::utils::d1_client::test_support::MockD1::spawn().await;
+            let (concluded, console, ndjson) =
+                drive_sync_in_mode(&mode, &mock, Arc::new(InMemory::new()), &Default::default())
+                    .await;
+            let structured = concluded.unwrap_or_else(|e| panic!("{label}: {e}"));
+            match label {
+                "human" => {
+                    assert_eq!(console.last().map(String::as_str), Some("Sync complete."));
+                    let successes = console.iter().filter(|line| claims_success(line)).count();
+                    assert_eq!(successes, 1, "{console:#?}");
+                    assert!(
+                        console
+                            .iter()
+                            .any(|line| line.starts_with("Objects: 1 synced")),
+                        "{console:#?}"
+                    );
+                }
+                "quiet" => {
+                    assert!(console.is_empty() && ndjson.is_empty() && structured.is_none())
+                }
+                _ => {
+                    // --json and --progress=json: the last NDJSON event is
+                    // the only success event; --json also returns the data.
+                    let last: serde_json::Value =
+                        serde_json::from_str(ndjson.last().expect("events")).unwrap();
+                    assert_eq!(last["event"], "cloud_sync.complete", "{label}: {ndjson:#?}");
+                    let successes = ndjson
+                        .iter()
+                        .filter(|line| {
+                            let event: serde_json::Value = serde_json::from_str(line).unwrap();
+                            claims_success(event["event"].as_str().unwrap_or_default())
+                        })
+                        .count();
+                    assert_eq!(successes, 1, "{label}: {ndjson:#?}");
+                    assert_eq!(structured.is_some(), label == "json", "{label}");
+                }
+            }
+        }
     }
 
     #[tokio::test]

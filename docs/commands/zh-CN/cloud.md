@@ -137,9 +137,12 @@ libra cloud restore --name my-project --metadata-only
 Starting cloud sync...
 Found 42 objects to sync.
 Progress: 42/42 synced, 0 failed
-Sync complete: 42 synced, 0 failed
+Objects: 42 synced, 0 failed
 Syncing metadata...
 Metadata synced (3 references).
+Syncing agent capture catalog to D1...
+Agent capture sync: 2 sessions (0 failed), 6 checkpoints (0 failed), 3 subagent companion rows (0 failed).
+Sync complete.
 ```
 
 **`cloud sync`**（没有需要同步的对象）：
@@ -149,6 +152,9 @@ Starting cloud sync...
 No objects to sync.
 Syncing metadata...
 Metadata unchanged, skipping upload.
+Syncing agent capture catalog to D1...
+Agent capture sync: 0 sessions (0 failed), 0 checkpoints (0 failed), 0 subagent companion rows (0 failed).
+Sync complete.
 ```
 
 **`cloud restore`**：
@@ -299,9 +305,13 @@ Unsynced objects:
 {"event":"cloud_sync.start"}
 {"event":"cloud_sync.objects.total","total":42}
 {"event":"cloud_sync.objects.progress","synced":42,"total":42,"failed":0}
+{"event":"cloud_sync.objects.finished","synced":42,"failed":0}
 {"event":"cloud_sync.metadata.synced","references":3}
-{"event":"cloud_sync.agent_capture.complete","sessions_synced":2,"sessions_failed":0,"checkpoints_synced":6,"checkpoints_failed":0,"subagent_rows_synced":3,"subagent_rows_failed":0}
+{"event":"cloud_sync.agent_capture.finished","sessions_synced":2,"sessions_failed":0,"checkpoints_synced":6,"checkpoints_failed":0,"subagent_rows_synced":3,"subagent_rows_failed":0}
+{"event":"cloud_sync.complete"}
 ```
+
+只有 `cloud_sync.complete`（以及人类可读输出最后的 `Sync complete.` 一行）表示同步成功，且只在对象、metadata 与 agent capture 目录镜像全部成功之后出现；任何环节失败的同步都不会输出两者，各阶段事件以 `finished` 加计数表示阶段结束。早期版本发出 `cloud_sync.objects.complete` 与 `cloud_sync.agent_capture.complete`，并在对象阶段结束、metadata 与目录镜像运行之前打印 `Sync complete: N synced, M failed`。
 
 agent-capture 行失败时输出
 `{"event":"cloud_sync.agent_capture.warning","error":"agent-capture catalog sync failed; inspect the local capture catalog and retry `libra cloud sync`"}`：

@@ -157,9 +157,12 @@ libra cloud restore --name my-project --metadata-only
 Starting cloud sync...
 Found 42 objects to sync.
 Progress: 42/42 synced, 0 failed
-Sync complete: 42 synced, 0 failed
+Objects: 42 synced, 0 failed
 Syncing metadata...
 Metadata synced (3 references).
+Syncing agent capture catalog to D1...
+Agent capture sync: 2 sessions (0 failed), 6 checkpoints (0 failed), 3 subagent companion rows (0 failed).
+Sync complete.
 ```
 
 **`cloud sync`** (nothing to sync):
@@ -169,6 +172,9 @@ Starting cloud sync...
 No objects to sync.
 Syncing metadata...
 Metadata unchanged, skipping upload.
+Syncing agent capture catalog to D1...
+Agent capture sync: 0 sessions (0 failed), 0 checkpoints (0 failed), 0 subagent companion rows (0 failed).
+Sync complete.
 ```
 
 **`cloud restore`**:
@@ -324,9 +330,20 @@ agent-capture phases, for example:
 {"event":"cloud_sync.start"}
 {"event":"cloud_sync.objects.total","total":42}
 {"event":"cloud_sync.objects.progress","synced":42,"total":42,"failed":0}
+{"event":"cloud_sync.objects.finished","synced":42,"failed":0}
 {"event":"cloud_sync.metadata.synced","references":3}
-{"event":"cloud_sync.agent_capture.complete","sessions_synced":2,"sessions_failed":0,"checkpoints_synced":6,"checkpoints_failed":0,"subagent_rows_synced":3,"subagent_rows_failed":0}
+{"event":"cloud_sync.agent_capture.finished","sessions_synced":2,"sessions_failed":0,"checkpoints_synced":6,"checkpoints_failed":0,"subagent_rows_synced":3,"subagent_rows_failed":0}
+{"event":"cloud_sync.complete"}
 ```
+
+Only `cloud_sync.complete` — and, in human output, the final `Sync complete.`
+line — announces a successful sync, and only after the objects, the metadata
+and the agent-capture mirror have all succeeded; a sync that fails anywhere
+never prints either, and its phase events say `finished` with their counts.
+Earlier releases emitted `cloud_sync.objects.complete` and
+`cloud_sync.agent_capture.complete` and printed
+`Sync complete: N synced, M failed` at the end of the object phase, before the
+metadata and the mirror ran.
 
 An agent-capture row failure is reported as
 `{"event":"cloud_sync.agent_capture.warning","error":"agent-capture catalog sync failed; inspect the local capture catalog and retry `libra cloud sync`"}`:

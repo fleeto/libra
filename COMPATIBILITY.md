@@ -481,7 +481,9 @@ objects or refs written after the snapshot wait for the next one (a commit
 during the snapshot retakes it, up to three attempts, then stops before any
 remote write; refs are streamed into the spool page by page and the
 metadata JSON is uploaded from it in bounded chunks, byte-identical to the
-whole-collection form), and the spool
+whole-collection form; a sync that fails anywhere never prints `Sync complete.`
+or emits `cloud_sync.complete`, and its phase events are
+`cloud_sync.objects.finished` / `cloud_sync.agent_capture.finished`), and the spool
 is removed when the run ends (if removal fails, sync names the directory and
 how to delete it by hand).
 Repository migration `2026103001` accepts local `agent_kind=hermes` and keeps the previous kinds, including `grok` and `opencode`. `pi` stays rejected. The internal reader keeps official JSONL rows when `active` or `compacted` is true and can fall back to a read-only SQLite view. `libra agent import --path <session-id>.jsonl --agent hermes --yes` imports one such export locally, keeps thinking unproven, and does not scan a Hermes home. The bounded snapshot marks that thinking partial, refuses retained thinking text above 8 MiB, and does not treat it as the assistant answer. The live bridge runs `hermes sessions export --format jsonl --session-id <id> <output-file>` only under the export-job lease, with a 2 second deadline. `libra agent rpc trust hermes` pins that executable and does not accept OpenCode trust. `libra agent hooks hermes observe` accepts the proven observers. `on_session_end` records a turn and does not close the session. `on_session_finalize` is the teardown. Control hooks and subagent events are not registered. Hook install rewrites only a Libra-owned plugin whose bytes contain the `libra capture` marker and match the recorded sha256. Review and investigate launch stay disabled. `cloud sync` still refuses `hermes`.

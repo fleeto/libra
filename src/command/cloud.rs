@@ -6002,7 +6002,16 @@ mod tests {
         // The CLI error keeps its code and shows the note.
         let cli = cloud_cli_error_typed("sync", error);
         assert_eq!(cli.stable_code(), StableErrorCode::AuthMissingCredentials);
-        assert!(cli.render_json().contains(&path), "{}", cli.render_json());
+        // Parsed, since the envelope escapes a Windows path's backslashes.
+        let envelope: serde_json::Value =
+            serde_json::from_str(&cli.render_json()).expect("error envelope");
+        let hints = envelope["hints"].as_array().expect("hints");
+        assert!(
+            hints
+                .iter()
+                .any(|hint| hint.as_str().is_some_and(|hint| hint.contains(&path))),
+            "{envelope}"
+        );
         assert!(kept.exists());
 
         let mock = crate::utils::d1_client::test_support::MockD1::spawn().await;

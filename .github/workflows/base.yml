@@ -263,7 +263,7 @@ jobs:
         run: |
           $ErrorActionPreference = 'Stop'
           $PSNativeCommandUseErrorActionPreference = $false
-          foreach ($filter in @('utils::windows_fs::tests::', 'internal::ai::capture::key::windows::tests::', 'internal::ai::workspace_isolation::tests::', 'internal::operation::middleware::lease::windows_repository_lock_tests::', 'internal::db::windows_sqlite_paths_drop_verbatim_prefix_before_url_parsing', 'internal::db::tests::test_close_cached_db_conn_instance_for_path_matches_dotdot_alias', 'command::cloud::tests::capture_snapshot_spool_', 'command::cloud::tests::capture_spool_owner_')) {
+          foreach ($filter in @('utils::windows_fs::tests::', 'internal::ai::capture::key::windows::tests::', 'internal::ai::workspace_isolation::tests::', 'internal::operation::middleware::lease::windows_repository_lock_tests::', 'internal::db::windows_sqlite_paths_drop_verbatim_prefix_before_url_parsing', 'internal::db::tests::test_close_cached_db_conn_instance_for_path_matches_dotdot_alias', 'command::cloud::tests::capture_snapshot_spool_', 'command::cloud::tests::capture_spool_owner_', 'command::cloud::tests::capture_snapshot_catalog_')) {
             $executed = @(& cargo test --locked --lib $filter -- --nocapture --color never --test-threads=1)
             $testExit = $LASTEXITCODE
             $executed | Write-Output

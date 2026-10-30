@@ -935,7 +935,13 @@ generation fence and removes the erased session's mirrored catalog rows, and
 carrying a remote tombstone AND rows matching this repository's own
 `agent_import_tombstone`, inside the restore transaction. Erasing locally and
 then restoring from a mirror that has not yet seen the tombstone therefore
-does not bring the session back.
+does not bring the session back. `cloud sync` freezes the capture catalog with
+the rest of its snapshot before any remote write and publishes that frozen copy
+only if the current catalog still matches it after the object upload, so a
+session erased, a checkpoint pruned or any catalog row changed while a sync is
+running is never published from the older snapshot: the agent-capture phase is
+refused with a retry hint and writes no remote catalog rows (see
+[`cloud`](cloud.md)).
 
 What is still deferred is R2 physical payload deletion: the erased content's
 objects remain in R2, so another machine that has never seen the tombstone can

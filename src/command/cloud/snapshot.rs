@@ -43,8 +43,25 @@ pub(super) const SPOOL_SNAPSHOTS_DIR: &str = "snapshots";
 const OBJECTS_FILE: &str = "objects.jsonl";
 const REFS_FILE: &str = "refs.json";
 const REPOSITORY_FILE: &str = "repository.json";
+/// The agent-capture catalog frozen with the snapshot (PI-26).
+const CATALOG_FILE: &str = "catalog.json";
 /// Owner marker written into every run directory when it is created.
 pub(super) const OWNER_MARKER_FILE: &str = "owner.json";
+/// The files a run directory can hold, each with what it contains; notes
+/// about a kept run directory name the ones actually present (PI-26).
+const RUN_FILES: [(&str, &str); 5] = [
+    (OWNER_MARKER_FILE, "owner marker: pid, host, boot id"),
+    (
+        OBJECTS_FILE,
+        "object identities: id, type, size, repository id, timestamp",
+    ),
+    (REFS_FILE, "refs"),
+    (REPOSITORY_FILE, "project name"),
+    (
+        CATALOG_FILE,
+        "agent-capture catalog: sessions, checkpoints, prune and import tombstones, the traces head, subagent claims, revisions and links, legacy Claude mirror rows",
+    ),
+];
 /// `tool` value of [`OwnerMarker`].
 pub(super) const OWNER_MARKER_TOOL: &str = "libra-cloud-sync";
 /// Rows read from SQLite, and identities read back from the spool, per page.
@@ -107,6 +124,9 @@ pub(super) struct SnapshotTuning {
     /// the ref copy, as a replaced connection would.
     #[cfg(test)]
     pub(super) simulate_reconnect_during_ref_setup: bool,
+    /// Run after each agent-capture catalog page the freeze reads.
+    #[cfg(test)]
+    pub(super) between_catalog_pages: Option<BetweenPagesHook>,
     /// Make the first freeze attempt lose its TEMP marker while marking the
     /// connection, as a replaced connection would.
     #[cfg(test)]
@@ -162,6 +182,64 @@ async fn data_version(conn: &sea_orm::DatabaseConnection) -> Result<i64, sea_orm
         .await?
         .ok_or_else(|| sea_orm::DbErr::Custom("PRAGMA data_version returned no row".into()))?;
     row.try_get::<i64>("", "data_version")
+}
+
+/// `total_changes()`: rows changed through this connection itself since it
+/// opened, which `PRAGMA data_version` does not reflect.
+async fn total_changes(conn: &sea_orm::DatabaseConnection) -> Result<i64, sea_orm::DbErr> {
+    let row = conn
+        .query_one_raw(sea_orm::Statement::from_string(
+            conn.get_database_backend(),
+            "SELECT total_changes() AS n",
+        ))
+        .await?
+        .ok_or_else(|| sea_orm::DbErr::Custom("total_changes() returned no row".into()))?;
+    row.try_get::<i64>("", "n")
+}
+
+/// Run `read` on `conn` in one unchanged-database window (PI-26): the TEMP
+/// connection marker, `PRAGMA data_version` (commits through other
+/// connections) and `total_changes()` (writes through this shared connection,
+/// such as another task of this process) are checked around it, and the read
+/// is taken again, up to [`MAX_FREEZE_ATTEMPTS`] times, when anything changed
+/// meanwhile or the connection was replaced. `None` when every attempt saw a
+/// change. No lock is held between the statements `read` issues.
+pub(super) async fn read_in_one_window<T, F, Fut>(
+    conn: &sea_orm::DatabaseConnection,
+    mut read: F,
+) -> CloudResult<Option<T>>
+where
+    F: FnMut() -> Fut,
+    Fut: std::future::Future<Output = CloudResult<T>>,
+{
+    let window_failure = |error: sea_orm::DbErr| {
+        super::agent_capture::local_agent_capture_failure(
+            "check the local catalog read window",
+            error,
+        )
+    };
+    for attempt in 1..=MAX_FREEZE_ATTEMPTS {
+        mark_freeze_connection(conn, attempt)
+            .await
+            .map_err(window_failure)?;
+        let start = (
+            data_version(conn).await.map_err(window_failure)?,
+            total_changes(conn).await.map_err(window_failure)?,
+        );
+        let value = read().await?;
+        let end = (
+            data_version(conn).await.map_err(window_failure)?,
+            total_changes(conn).await.map_err(window_failure)?,
+        );
+        if end == start
+            && same_freeze_connection(conn, attempt)
+                .await
+                .map_err(window_failure)?
+        {
+            return Ok(Some(value));
+        }
+    }
+    Ok(None)
 }
 
 /// Record `attempt` in a TEMP table private to this physical connection.
@@ -491,6 +569,8 @@ pub(super) struct SnapshotSpool {
     references: usize,
     refs_bytes: u64,
     refs_digest: u64,
+    catalog_bytes: u64,
+    catalog_digest: u64,
     released: bool,
     #[cfg(test)]
     fail_release: bool,
@@ -774,6 +854,8 @@ impl SnapshotSpool {
             references: 0,
             refs_bytes: 0,
             refs_digest: 0,
+            catalog_bytes: 0,
+            catalog_digest: 0,
             released: false,
             #[cfg(test)]
             fail_release: tuning.fail_spool_release,
@@ -1164,6 +1246,42 @@ impl SnapshotSpool {
                 }
             }
         }
+        // The agent-capture catalog (PI-26), in the same window: each page
+        // its own short statement, the rows written private next to the rest
+        // of the spool. A read failure is kept for the mirror phase.
+        #[cfg(test)]
+        let catalog_hook: Option<super::agent_capture::CatalogPageHook> =
+            tuning.between_catalog_pages.clone().map(|hook| {
+                let hook: super::agent_capture::CatalogPageHook =
+                    std::sync::Arc::new(move || hook(attempt));
+                hook
+            });
+        #[cfg(not(test))]
+        let catalog_hook: Option<super::agent_capture::CatalogPageHook> = None;
+        let catalog = super::agent_capture::freeze_agent_capture(conn, catalog_hook.as_ref()).await;
+        let catalog_path = self.dir.join(CATALOG_FILE);
+        let catalog_file = recreate_private_file(&catalog_path)
+            .map_err(|error| spool_failure("create", &catalog_path, error))?;
+        let mut catalog_out = DigestWriter::new(BufWriter::new(catalog_file));
+        serde_json::to_writer(&mut catalog_out, &catalog)
+            .map_err(|error| spool_failure("write", &catalog_path, error))?;
+        catalog_out
+            .flush()
+            .map_err(|error| spool_failure("write", &catalog_path, error))?;
+        let catalog_digest = catalog_out.digest();
+        let catalog_file = catalog_out
+            .into_inner()
+            .into_inner()
+            .map_err(|error| spool_failure("write", &catalog_path, error.into_error()))?;
+        catalog_file
+            .sync_all()
+            .map_err(|error| spool_failure("write", &catalog_path, error))?;
+        let catalog_bytes = catalog_file
+            .metadata()
+            .map_err(|error| spool_failure("write", &catalog_path, error))?
+            .len();
+        drop(catalog);
+
         #[cfg(test)]
         if tuning.simulate_reconnect && attempt == 1 {
             // What a fresh connection looks like: no TEMP marker.
@@ -1217,6 +1335,8 @@ impl SnapshotSpool {
         self.references = references;
         self.refs_bytes = refs_bytes;
         self.refs_digest = refs_digest;
+        self.catalog_bytes = catalog_bytes;
+        self.catalog_digest = catalog_digest;
         Ok(true)
     }
 
@@ -1237,6 +1357,35 @@ impl SnapshotSpool {
             page_size: page_size.max(1),
             remaining: self.objects,
         })
+    }
+
+    /// The agent-capture catalog frozen with this snapshot (PI-26); a file
+    /// that is not byte for byte what the freeze wrote is a read failure.
+    pub(super) fn agent_capture(&self) -> CloudResult<super::agent_capture::FrozenAgentCapture> {
+        use std::{
+            hash::{DefaultHasher, Hasher},
+            io::Read,
+        };
+
+        // One read: the bytes checked against the freeze's length and
+        // digest are the bytes deserialized.
+        let path = self.dir.join(CATALOG_FILE);
+        let mut bytes = Vec::new();
+        File::open(&path)
+            .and_then(|file| {
+                file.take(self.catalog_bytes.saturating_add(1))
+                    .read_to_end(&mut bytes)
+            })
+            .map_err(|error| spool_read_failure(&path, error))?;
+        let mut digest = DefaultHasher::new();
+        digest.write(&bytes);
+        if bytes.len() as u64 != self.catalog_bytes || digest.finish() != self.catalog_digest {
+            return Err(spool_read_failure(
+                &path,
+                "the spool no longer holds the agent-capture catalog the freeze wrote",
+            ));
+        }
+        serde_json::from_slice(&bytes).map_err(|error| spool_read_failure(&path, error))
     }
 
     /// The frozen refs projection, hashed from the spool file
@@ -1302,8 +1451,9 @@ impl SnapshotSpool {
             "could not remove the cloud sync snapshot spool"
         );
         Some(format!(
-            "cloud sync could not remove its snapshot spool {}: {error}. It holds this run's object identities (id, type, size, repository id, timestamp), refs, project name and owner marker (pid, host, boot id); it is never reused, so delete that directory manually",
-            self.dir.display()
+            "cloud sync could not remove its snapshot spool {}: {error}. It holds {}; it is never reused, so delete that directory manually",
+            self.dir.display(),
+            describe_run_contents(&self.dir)
         ))
     }
 }
@@ -1481,8 +1631,9 @@ fn clean_residue(run: &Path, me: &ProcessIdentity, tuning: &SnapshotTuning) -> O
     };
     let kept = |reason: String| {
         Some(format!(
-            "cloud sync kept the leftover snapshot directory {} of an earlier run: {reason}. It holds that run's object identities, refs, project name and owner marker; delete it by hand once you have confirmed that run has stopped (no `libra cloud sync` for this repository is still running on that host)",
-            run.display()
+            "cloud sync kept the leftover snapshot directory {} of an earlier run: {reason}. It holds {}; delete it by hand once you have confirmed that run has stopped (no `libra cloud sync` for this repository is still running on that host)",
+            run.display(),
+            describe_run_contents(run)
         ))
     };
     let marker = match marker {
@@ -1509,10 +1660,27 @@ fn clean_residue(run: &Path, me: &ProcessIdentity, tuning: &SnapshotTuning) -> O
     let removed = fs::remove_dir_all(run);
     removed.err().map(|error| {
         format!(
-            "cloud sync could not remove the leftover snapshot directory {} of a run that has exited: {error}; delete that directory by hand",
-            run.display()
+            "cloud sync could not remove the leftover snapshot directory {} of a run that has exited: {error}. It holds {}; delete that directory by hand",
+            run.display(),
+            describe_run_contents(run)
         )
     })
+}
+
+/// The snapshot files present in the run directory `run` and what each
+/// holds, for a note about a run directory that stays on disk. Each file is
+/// only looked at, never followed through a link or read.
+pub(super) fn describe_run_contents(run: &Path) -> String {
+    let present: Vec<String> = RUN_FILES
+        .iter()
+        .filter(|(name, _)| fs::symlink_metadata(run.join(name)).is_ok_and(|meta| meta.is_file()))
+        .map(|(name, holds)| format!("{name} ({holds})"))
+        .collect();
+    if present.is_empty() {
+        "none of the snapshot files".to_string()
+    } else {
+        present.join(", ")
+    }
 }
 
 /// Whether `dir` is a real directory (never followed through a link) owned

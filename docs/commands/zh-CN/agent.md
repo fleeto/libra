@@ -683,7 +683,11 @@ tombstone 会传播。`libra cloud sync` 在 generation fence 下把它发布到
 并删除该 session 在远端 catalog 的镜像行；`libra cloud restore` 则是**双向
 tombstone 优先**——在 restore 事务内同时过滤带远端 tombstone 的行与匹配本仓库
 `agent_import_tombstone` 的行。因此本机 erase 之后、再从尚未见过该 tombstone
-的镜像 restore，也不会把 session 复活。
+的镜像 restore，也不会把 session 复活。`cloud sync` 在任何远端写入之前把
+capture catalog 与快照的其余部分一起冻结，只有对象上传之后当前 catalog 仍与冻结
+副本一致时才发布该副本；因此同步进行期间被擦除的 session、被 prune 的 checkpoint
+或任何改动过的 catalog 行，都不会从较早的快照发布出去：agent-capture 阶段被拒绝并
+提示重试，不写任何远端 catalog 行（见 [`cloud`](cloud.md)）。
 
 **仍 deferred 的只有 R2 物理删除**：已擦除内容的 payload 仍留在 R2，未见过该
 tombstone 的另一台机器仍可取回。所以 `agent erase` 应视为对**本仓库**不可逆，

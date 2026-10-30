@@ -5694,7 +5694,7 @@ mod tests {
     #[tokio::test]
     #[serial(cwd, env)]
     async fn capture_spool_owner_never_follows_foreign_paths_on_windows() {
-        let reset = |path: &Path| {
+        let reset = |path: &std::path::Path| {
             let status = std::process::Command::new("icacls")
                 .arg(path)
                 .arg("/reset")

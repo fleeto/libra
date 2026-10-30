@@ -20,7 +20,7 @@
 //! clean up.
 
 use std::{
-    fs::{self, File, OpenOptions},
+    fs::{self, File},
     io::{BufRead, BufReader, BufWriter, Write},
     path::{Path, PathBuf},
 };
@@ -731,7 +731,7 @@ pub(super) fn create_private_file(path: &Path) -> std::io::Result<File> {
     }
     #[cfg(not(windows))]
     {
-        let mut options = OpenOptions::new();
+        let mut options = std::fs::OpenOptions::new();
         options.write(true).create_new(true);
         #[cfg(unix)]
         {
@@ -1569,7 +1569,7 @@ fn read_private_marker(run: &Path) -> Result<Option<Vec<u8>>, String> {
         use std::os::unix::fs::{MetadataExt, OpenOptionsExt};
 
         let path = run.join(OWNER_MARKER_FILE);
-        let file = match OpenOptions::new()
+        let file = match std::fs::OpenOptions::new()
             .read(true)
             .custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK)
             .open(&path)

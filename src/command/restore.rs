@@ -725,32 +725,40 @@ fn restore_index_tracked(
     let mut file_paths = filter_paths(&index.tracked_files(), pathspecs);
     file_paths.extend(deleted_files_index);
 
-    // Batch-resolve the blob lengths needed to author NEW index entries.
+    // Batch-resolve the blob lengths needed to author new or updated index entries.
     //
     // The helper below otherwise loads an entire blob just to read `data.len()`. On a
-    // fresh worktree every path is new, so that is one full object load (and decompress)
-    // per entry — the dominant cost of `restore --staged` on a large tree. Sizes are
-    // the decoded length, so they cannot come from an on-disk byte count; `object_sizes`
-    // answers them without materializing any payload, in one storage-runtime round trip.
-    // Unique hashes are deduplicated because one blob is commonly referenced by several
-    // paths.
+    // fresh worktree every path is new, and switching `--source` across commits rewrites
+    // every changed entry, so a naive pass would do one full object load (and decompress)
+    // per touched entry. Index sizes are the decoded blob length, not an on-disk byte
+    // count or delta-chain memory budget; `decoded_object_sizes` answers them without
+    // materializing any payload, in one storage-runtime round trip. Unique hashes are
+    // deduplicated because one blob is commonly referenced by several paths.
     let mut size_cache: Option<HashMap<ObjectHash, u32>> = None;
     {
         let mut needed: Vec<ObjectHash> = Vec::new();
         let mut seen: HashSet<ObjectHash> = HashSet::new();
         for path in &file_paths {
-            if index.tracked(path_to_utf8_typed(path)?, 0) {
+            let path_str = path_to_utf8_typed(path)?;
+            let Some(target) = target_map.get(path) else {
+                continue;
+            };
+            if matches!(target.mode, Some(TreeItemMode::Commit)) {
                 continue;
             }
-            if let Some(target) = target_map.get(path)
-                && !matches!(target.mode, Some(TreeItemMode::Commit))
-                && seen.insert(target.hash)
-            {
+            let needs_size = match index.get(path_str, 0) {
+                None => true,
+                Some(entry) => {
+                    !index.verify_hash(path_str, 0, &target.hash)
+                        || entry.mode != target.index_mode()
+                }
+            };
+            if needs_size && seen.insert(target.hash) {
                 needed.push(target.hash);
             }
         }
         if !needed.is_empty() {
-            match util::objects_storage().object_sizes(&needed) {
+            match util::objects_storage().decoded_object_sizes(&needed) {
                 Ok(sizes) => {
                     let mut cache: HashMap<ObjectHash, u32> = HashMap::with_capacity(needed.len());
                     for (hash, size) in needed.into_iter().zip(sizes) {
@@ -764,7 +772,7 @@ fn restore_index_tracked(
                 Err(error) => tracing::warn!(
                     count = needed.len(),
                     %error,
-                    "batch object-size lookup failed; falling back to per-object loads"
+                    "batch decoded-object-size lookup failed; falling back to per-object loads"
                 ),
             }
         }
@@ -2476,5 +2484,47 @@ mod tests {
             build_conflict_markers(Some("A"), None, None, "\n"),
             "<<<<<<< ours\nA\n=======\n>>>>>>> theirs (deleted)\n",
         );
+    }
+
+    #[tokio::test]
+    #[serial(cwd, env)]
+    async fn restore_target_index_size_handles_cache_hit_miss_and_error() {
+        let tmp = tempdir().expect("tmp");
+        let _guard = ChangeDirGuard::new(tmp.path());
+        setup_with_new_libra_in(tmp.path()).await;
+
+        let blob = Blob::from_content("decoded fallback payload\n");
+        crate::command::save_object(&blob, &blob.id).expect("save fallback blob");
+
+        let commit_target = RestoreTarget {
+            hash: blob.id,
+            mode: Some(TreeItemMode::Commit),
+        };
+        assert_eq!(
+            restore_target_index_size(commit_target, None).expect("gitlink size"),
+            0
+        );
+
+        let mut cache = HashMap::new();
+        let blob_target = RestoreTarget {
+            hash: blob.id,
+            mode: Some(TreeItemMode::Blob),
+        };
+        let resolved = restore_target_index_size(blob_target, Some(&mut cache))
+            .expect("cache miss must fall back to loading the blob");
+        assert_eq!(resolved, blob.data.len() as u32);
+        assert_eq!(
+            cache.get(&blob.id).copied(),
+            Some(blob.data.len() as u32),
+            "fallback load must populate size_cache for subsequent paths"
+        );
+
+        let missing_target = RestoreTarget {
+            hash: ObjectHash::new_for_kind(git_internal::hash::get_hash_kind(), &[0xab; 20]),
+            mode: Some(TreeItemMode::Blob),
+        };
+        let error = restore_target_index_size(missing_target, Some(&mut cache))
+            .expect_err("missing blob on cache miss must return ReadObject");
+        assert!(matches!(error, RestoreError::ReadObject));
     }
 }

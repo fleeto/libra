@@ -21,6 +21,11 @@ libra restore --ignore-unmerged [--source <tree-ish>] <pathspec>...
 `--staged` 恢复会移除 intent-to-add 条目（`libra add -N`），而不是保留空 blob
 占位；工作树文件回到未跟踪状态，与 Git 一致。
 
+`--staged` 恢复写入的 index 条目以源 blob 解码后的长度作为 size，包括以 pack
+delta 形式存储的 blob（重建 delta 链所需的保守内存开销不会写入 index）。这些条目的
+stat 字段保持为零，而不是复制工作树文件的 stat，因此下一次 `libra status` 会重新检查
+工作树内容，而不会直接判定为干净。
+
 `<pathspec>` 参数是必需的，并接受一个或多个文件路径或目录路径。特殊路径 `.` 会恢复所有文件。Pathspec 使用 Libra 共享的 Git 风格匹配器：普通 pathspec 匹配文件或目录前缀，支持通配符，并支持高价值 magic 形式 `:(top)`、`:/`、`:(glob)`、`:(literal)`、`:(icase)`、`:(exclude)`、`:!`、`:^`。排除 pathspec 会从正向选择中扣除；启用 `core.ignorecase` 时，匹配会按忽略大小写处理；看起来像通配符的 pathspec 也会匹配同名的字面路径或目录前缀。
 
 当来源提交包含当前工作树中不存在的文件时，这些文件会被创建。在默认（`--no-overlay`）模式下，当当前工作树包含来源中不存在的已跟踪文件时，这些文件会被删除以使目标与来源完全一致；使用 `--overlay` 时则保留这些来源中缺失的已跟踪路径。输出会分别报告 `restored_files` 和 `deleted_files`。

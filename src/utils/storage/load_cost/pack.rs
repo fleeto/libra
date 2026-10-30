@@ -187,11 +187,43 @@ impl PackIndex {
     }
 }
 
+enum ProbeFailure {
+    Oversized(GitError),
+    Fatal(GitError),
+}
+
+impl ProbeFailure {
+    fn into_git_error(self) -> GitError {
+        match self {
+            Self::Oversized(error) | Self::Fatal(error) => error,
+        }
+    }
+}
+
+impl From<GitError> for ProbeFailure {
+    fn from(error: GitError) -> Self {
+        Self::Fatal(error)
+    }
+}
+
+impl From<io::Error> for ProbeFailure {
+    fn from(error: io::Error) -> Self {
+        Self::Fatal(GitError::from(error))
+    }
+}
+
+#[derive(Clone, Copy)]
+enum PackQuery {
+    LoadCost { aggregate_limit: Option<u64> },
+    DecodedSize,
+}
+
 struct PackProbe {
     pack: BufReader<fs::File>,
     pack_path: PathBuf,
     index: PackIndex,
     cache: HashMap<u64, LoadCost>,
+    oversized: HashMap<u64, String>,
     visiting: HashSet<u64>,
 }
 
@@ -203,39 +235,70 @@ impl PackProbe {
             pack_path,
             index,
             cache: HashMap::new(),
+            oversized: HashMap::new(),
             visiting: HashSet::new(),
         })
     }
 
     fn cost_at(&mut self, object_offset: u64, depth: usize) -> Result<LoadCost, GitError> {
+        self.probe_at(object_offset, depth)
+            .map_err(ProbeFailure::into_git_error)
+    }
+
+    fn decoded_size_at(
+        &mut self,
+        object_offset: u64,
+        depth: usize,
+    ) -> Result<Option<u64>, GitError> {
+        match self.probe_at(object_offset, depth) {
+            Ok(cost) => Ok(Some(cost.result_size)),
+            Err(ProbeFailure::Oversized(_)) => Ok(None),
+            Err(ProbeFailure::Fatal(error)) => Err(error),
+        }
+    }
+
+    fn probe_at(&mut self, object_offset: u64, depth: usize) -> Result<LoadCost, ProbeFailure> {
         if let Some(cost) = self.cache.get(&object_offset) {
             return Ok(*cost);
         }
+        if let Some(message) = self.oversized.get(&object_offset) {
+            return Err(ProbeFailure::Oversized(invalid(message.clone())));
+        }
         if depth >= MAX_DELTA_DEPTH {
-            return Err(invalid(format!(
+            return Err(ProbeFailure::Fatal(invalid(format!(
                 "delta chain at offset {object_offset} in {} exceeds depth {MAX_DELTA_DEPTH}",
                 self.pack_path.display()
-            )));
+            ))));
         }
         if !self.visiting.insert(object_offset) {
-            return Err(invalid(format!(
+            return Err(ProbeFailure::Fatal(invalid(format!(
                 "delta cycle at offset {object_offset} in {}",
                 self.pack_path.display()
-            )));
+            ))));
         }
         let result = self.read_cost(object_offset, depth);
         self.visiting.remove(&object_offset);
-        let cost = result?;
-        self.cache.insert(object_offset, cost);
-        Ok(cost)
+        match result {
+            Ok(cost) => {
+                self.cache.insert(object_offset, cost);
+                Ok(cost)
+            }
+            Err(ProbeFailure::Oversized(error)) => {
+                if let GitError::InvalidObjectInfo(ref message) = error {
+                    self.oversized.insert(object_offset, message.clone());
+                }
+                Err(ProbeFailure::Oversized(error))
+            }
+            Err(ProbeFailure::Fatal(error)) => Err(ProbeFailure::Fatal(error)),
+        }
     }
 
-    fn read_cost(&mut self, object_offset: u64, depth: usize) -> Result<LoadCost, GitError> {
+    fn read_cost(&mut self, object_offset: u64, depth: usize) -> Result<LoadCost, ProbeFailure> {
         self.pack.seek(SeekFrom::Start(object_offset))?;
         let (kind, encoded_size) = read_pack_header(&mut self.pack)?;
         match kind {
             1..=4 => {
-                validate_zlib_payload(
+                validate_zlib_payload_probe(
                     &mut self.pack,
                     encoded_size,
                     &self.pack_path,
@@ -249,12 +312,12 @@ impl PackProbe {
             6 => {
                 let distance = read_ofs_distance(&mut self.pack)?;
                 let base_offset = object_offset.checked_sub(distance).ok_or_else(|| {
-                    invalid(format!(
+                    ProbeFailure::Fatal(invalid(format!(
                         "OFS_DELTA at {object_offset} in {} points before the pack",
                         self.pack_path.display()
-                    ))
+                    )))
                 })?;
-                self.read_delta_cost(object_offset, encoded_size, base_offset, depth)
+                self.read_delta_probe(object_offset, encoded_size, base_offset, depth)
             }
             7 => {
                 let base_hash = read_hash(
@@ -262,20 +325,21 @@ impl PackProbe {
                     git_internal::hash::get_hash_kind().size() as u64,
                 )?;
                 let base_offset = self.index.lookup_one(base_hash)?.ok_or_else(|| {
-                    invalid(format!(
+                    ProbeFailure::Fatal(invalid(format!(
                         "REF_DELTA base {base_hash} is absent from {}",
                         self.index.path.display()
-                    ))
+                    )))
                 })?;
-                self.read_delta_cost(object_offset, encoded_size, base_offset, depth)
+                self.read_delta_probe(object_offset, encoded_size, base_offset, depth)
             }
-            other => Err(invalid(format!(
+            other => Err(ProbeFailure::Fatal(invalid(format!(
                 "unsupported pack object type {other} at offset {object_offset} in {}",
                 self.pack_path.display()
-            ))),
+            )))),
         }
     }
 
+    #[cfg(test)]
     fn read_delta_cost(
         &mut self,
         object_offset: u64,
@@ -283,25 +347,36 @@ impl PackProbe {
         base_offset: u64,
         depth: usize,
     ) -> Result<LoadCost, GitError> {
+        self.read_delta_probe(object_offset, encoded_size, base_offset, depth)
+            .map_err(ProbeFailure::into_git_error)
+    }
+
+    fn read_delta_probe(
+        &mut self,
+        object_offset: u64,
+        encoded_size: u64,
+        base_offset: u64,
+        depth: usize,
+    ) -> Result<LoadCost, ProbeFailure> {
         // The pack reader currently points at this delta's zlib stream. Validate
         // the bounded instruction stream before seeking recursively to its base.
         if encoded_size > MAX_VALIDATED_DELTA_BYTES {
-            return Err(invalid(format!(
+            return Err(ProbeFailure::Oversized(invalid(format!(
                 "packed delta at offset {object_offset} in {} declares {encoded_size} instruction bytes, which exceeds preview limit of {MAX_VALIDATED_DELTA_BYTES} bytes",
                 self.pack_path.display()
-            )));
+            ))));
         }
         let (declared_base, result_size) =
             validate_delta_stream(&mut self.pack, encoded_size, &self.pack_path, object_offset)?;
-        let base = self.cost_at(base_offset, depth + 1)?;
+        let base = self.probe_at(base_offset, depth + 1)?;
         if declared_base != base.result_size {
-            return Err(invalid(format!(
+            return Err(ProbeFailure::Fatal(invalid(format!(
                 "delta at offset {object_offset} in {} declares base size {declared_base}, but its base has size {}",
                 self.pack_path.display(),
                 base.result_size
-            )));
+            ))));
         }
-        combine_delta_cost(base, encoded_size, result_size)
+        combine_delta_cost(base, encoded_size, result_size).map_err(ProbeFailure::from)
     }
 }
 
@@ -342,10 +417,36 @@ pub(super) fn load_costs_with_limit(
     )
 }
 
+pub(super) fn decoded_sizes(
+    pack_dir: &Path,
+    hashes: &[ObjectHash],
+) -> Result<Vec<Option<u64>>, GitError> {
+    probe_packs_inner(
+        pack_dir,
+        hashes,
+        PackQuery::DecodedSize,
+        &mut Stats::default(),
+    )
+}
+
 fn load_costs_inner(
     pack_dir: &Path,
     hashes: &[ObjectHash],
     aggregate_limit: Option<u64>,
+    stats: &mut Stats,
+) -> Result<Vec<Option<u64>>, GitError> {
+    probe_packs_inner(
+        pack_dir,
+        hashes,
+        PackQuery::LoadCost { aggregate_limit },
+        stats,
+    )
+}
+
+fn probe_packs_inner(
+    pack_dir: &Path,
+    hashes: &[ObjectHash],
+    query: PackQuery,
     stats: &mut Stats,
 ) -> Result<Vec<Option<u64>>, GitError> {
     let mut results = vec![None; hashes.len()];
@@ -373,22 +474,30 @@ fn load_costs_inner(
         offsets.sort_by_key(|(_, offset)| *offset);
         for (hash, offset) in offsets {
             stats.object_probes += 1;
-            let cost = probe.cost_at(offset, 0)?.peak_bytes;
-            aggregate_cost = checked_add(
-                aggregate_cost,
-                crate::utils::preview_object::charged_bytes(cost),
-                "preview aggregate cache load cost",
-            )?;
-            if let Some(limit) = aggregate_limit
-                && aggregate_cost > limit
+            let measured = match query {
+                PackQuery::LoadCost { aggregate_limit } => {
+                    let cost = probe.cost_at(offset, 0)?.peak_bytes;
+                    aggregate_cost = checked_add(
+                        aggregate_cost,
+                        crate::utils::preview_object::charged_bytes(cost),
+                        "preview aggregate cache load cost",
+                    )?;
+                    if let Some(limit) = aggregate_limit
+                        && aggregate_cost > limit
+                    {
+                        return Err(invalid(format!(
+                            "preview aggregate cache load cost exceeds {limit} bytes"
+                        )));
+                    }
+                    Some(cost)
+                }
+                PackQuery::DecodedSize => probe.decoded_size_at(offset, 0)?,
+            };
+            if let Some(value) = measured
+                && let Some(requested_positions) = positions.get(&hash)
             {
-                return Err(invalid(format!(
-                    "preview aggregate cache load cost exceeds {limit} bytes"
-                )));
-            }
-            if let Some(requested_positions) = positions.get(&hash) {
                 for position in requested_positions {
-                    results[*position] = Some(cost);
+                    results[*position] = Some(value);
                 }
             }
             unresolved.remove(&hash);
@@ -467,27 +576,38 @@ fn read_ofs_distance(reader: &mut impl Read) -> Result<u64, GitError> {
     Ok(distance)
 }
 
+#[cfg(test)]
 fn validate_zlib_payload(
     reader: &mut impl Read,
     declared: u64,
     pack_path: &Path,
     object_offset: u64,
 ) -> Result<(), GitError> {
+    validate_zlib_payload_probe(reader, declared, pack_path, object_offset)
+        .map_err(ProbeFailure::into_git_error)
+}
+
+fn validate_zlib_payload_probe(
+    reader: &mut impl Read,
+    declared: u64,
+    pack_path: &Path,
+    object_offset: u64,
+) -> Result<(), ProbeFailure> {
     if declared > crate::utils::preview_object::MAX_OBJECT_BYTES {
-        return Err(invalid(format!(
+        return Err(ProbeFailure::Oversized(invalid(format!(
             "packed object at offset {object_offset} in {} declares {declared} bytes, which exceeds preview limit of {} bytes",
             pack_path.display(),
             crate::utils::preview_object::MAX_OBJECT_BYTES
-        )));
+        ))));
     }
     let mut decoder = flate2::read::ZlibDecoder::new(reader);
     consume_exact(&mut decoder, declared)?;
     let mut extra = [0u8; 1];
     if decoder.read(&mut extra)? != 0 {
-        return Err(invalid(format!(
+        return Err(ProbeFailure::Fatal(invalid(format!(
             "packed object at offset {object_offset} in {} exceeds its declared size {declared}",
             pack_path.display()
-        )));
+        ))));
     }
     Ok(())
 }
@@ -860,5 +980,126 @@ mod tests {
             error.to_string().contains("exceeds preview limit"),
             "the declaration must be rejected before the payload is decoded: {error}"
         );
+    }
+
+    #[test]
+    fn decoded_sizes_returns_result_size_for_plain_and_ofs_delta_objects() {
+        let _kind = git_internal::hash::set_hash_kind_for_test(HashKind::Sha1);
+        let temp = tempfile::tempdir().expect("create pack fixture");
+        let pack_dir = temp.path().join("pack");
+        std::fs::create_dir(&pack_dir).expect("create pack directory");
+        let pack = pack_dir.join("ofs-delta-sha1.pack");
+        let idx = pack.with_extension("idx");
+        let fixture =
+            Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/data/packs/ofs-delta-sha1.pack");
+        std::fs::copy(&fixture, &pack).expect("copy pack fixture");
+        crate::command::index_pack::build_index_v1(
+            pack.to_str().expect("UTF-8 pack path"),
+            idx.to_str().expect("UTF-8 idx path"),
+        )
+        .expect("build fixture index");
+
+        let base = crate::internal::object_format::parse_repo_oid(
+            "b1a36d7748643b07e2bd006211e9e6a492f6bb8b",
+        )
+        .expect("parse base OID");
+        let ofs_delta = crate::internal::object_format::parse_repo_oid(
+            "1b59abc09609574e73330d56815f04ebb4d9bd72",
+        )
+        .expect("parse OFS_DELTA OID");
+        let missing = crate::internal::object_format::parse_repo_oid(
+            "0000000000000000000000000000000000000001",
+        )
+        .expect("parse missing OID");
+
+        let decoded =
+            decoded_sizes(&pack_dir, &[base, ofs_delta, missing]).expect("probe decoded sizes");
+        assert_eq!(decoded, vec![Some(10_420), Some(10_400), None]);
+
+        let costs = load_costs(&pack_dir, &[base, ofs_delta]).expect("probe load costs");
+        assert_eq!(costs[0], Some(10_420));
+        assert!(
+            costs[1].is_some_and(|cost| cost > 10_400),
+            "load_costs must keep returning peak_bytes for OFS_DELTA: {costs:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn decoded_sizes_returns_result_size_for_multilayer_ref_delta_chain() {
+        use git_internal::internal::{object::blob::Blob, pack::entry::Entry};
+
+        let _kind = git_internal::hash::set_hash_kind_for_test(HashKind::Sha1);
+        let temp = tempfile::tempdir().expect("create pack fixture");
+        let pack_dir = temp.path().join("pack");
+        std::fs::create_dir(&pack_dir).expect("create pack directory");
+
+        let mut lines: Vec<String> = (0..500)
+            .map(|index| format!("chain-line-{index:04}-payload-0123456789abcdef"))
+            .collect();
+        let mut blobs = Vec::new();
+        for step in 0..4 {
+            if step > 0 {
+                lines.insert(step * 80, format!("step-{step}-addition"));
+            }
+            blobs.push(Blob::from_content(&format!("{}\n", lines.join("\n"))));
+        }
+        let entries: Vec<Entry> = blobs.iter().cloned().map(Entry::from).collect();
+        let pack_bytes = crate::internal::pack_writer::encode_pack_bytes_with_window(
+            entries,
+            HashKind::Sha1,
+            10,
+        )
+        .await
+        .expect("encode delta-compressed pack");
+        let pack = pack_dir.join("ref-chain.pack");
+        let idx = pack.with_extension("idx");
+        std::fs::write(&pack, &pack_bytes).expect("write pack");
+        crate::command::index_pack::build_index_v1(
+            pack.to_str().expect("UTF-8 pack path"),
+            idx.to_str().expect("UTF-8 idx path"),
+        )
+        .expect("build pack index");
+
+        let hashes: Vec<ObjectHash> = blobs.iter().map(|blob| blob.id).collect();
+        let expected_decoded: Vec<Option<u64>> = blobs
+            .iter()
+            .map(|blob| Some(blob.data.len() as u64))
+            .collect();
+        let decoded = decoded_sizes(&pack_dir, &hashes).expect("probe decoded sizes");
+        assert_eq!(decoded, expected_decoded);
+
+        let costs = load_costs(&pack_dir, &hashes).expect("probe load costs");
+        let delta_entries = costs
+            .iter()
+            .zip(&blobs)
+            .filter(|(cost, blob)| cost.is_some_and(|peak| peak > blob.data.len() as u64))
+            .count();
+        assert!(
+            delta_entries >= 3,
+            "at least three versions must be REF_DELTA chains with peak_bytes > decoded size: {costs:?}"
+        );
+    }
+
+    #[test]
+    fn decoded_size_probe_treats_oversized_delta_as_miss_without_decoding_base() {
+        let _kind = git_internal::hash::set_hash_kind_for_test(HashKind::Sha1);
+        let temp = tempfile::tempdir().expect("create pack fixture");
+        let pack_dir = temp.path().join("pack");
+        std::fs::create_dir(&pack_dir).expect("create pack directory");
+        let pack = pack_dir.join("ofs-delta-sha1.pack");
+        let idx = pack.with_extension("idx");
+        let fixture =
+            Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/data/packs/ofs-delta-sha1.pack");
+        std::fs::copy(&fixture, &pack).expect("copy pack fixture");
+        crate::command::index_pack::build_index_v1(
+            pack.to_str().expect("UTF-8 pack path"),
+            idx.to_str().expect("UTF-8 idx path"),
+        )
+        .expect("build fixture index");
+        let index = PackIndex::open(idx, &mut Stats::default()).expect("open fixture index");
+        let mut probe = PackProbe::new(pack, index).expect("open fixture probe");
+
+        let outcome = probe.read_delta_probe(12, MAX_VALIDATED_DELTA_BYTES + 1, u64::MAX / 2, 0);
+        assert!(matches!(outcome, Err(ProbeFailure::Oversized(_))));
     }
 }

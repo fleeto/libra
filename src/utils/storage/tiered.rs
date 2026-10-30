@@ -308,6 +308,12 @@ impl Storage for TieredStorage {
         self.local.object_size(hash).await
     }
 
+    async fn decoded_object_size(&self, hash: &ObjectHash) -> Result<Option<u64>, GitError> {
+        // Remote-only objects report `None` so callers fall back per entry
+        // rather than downloading unbounded payloads during a size probe.
+        self.local.decoded_object_size(hash).await
+    }
+
     async fn get_with_limit(
         &self,
         hash: &ObjectHash,
@@ -513,6 +519,13 @@ impl Storage for TieredStorage {
         self.local
             .object_sizes_with_total_limit(hashes, aggregate_limit)
             .await
+    }
+
+    async fn decoded_object_sizes(
+        &self,
+        hashes: &[ObjectHash],
+    ) -> Result<Vec<Option<u64>>, GitError> {
+        self.local.decoded_object_sizes(hashes).await
     }
 
     /// Answer local hits without any round trip, then batch-probe the remote
@@ -1992,5 +2005,55 @@ mod tests {
             min_age_secs: 0,
             dry_run: false,
         };
+    }
+
+    #[tokio::test]
+    async fn tiered_decoded_object_sizes_uses_local_tier_without_remote_downloads() {
+        use git_internal::hash::set_hash_kind_for_test;
+
+        let _kind = set_hash_kind_for_test(HashKind::Sha1);
+        let local_dir = tempdir().expect("tempdir");
+        let pack_dir = local_dir.path().join("pack");
+        std::fs::create_dir(&pack_dir).expect("create pack directory");
+        let pack = pack_dir.join("ofs-delta-sha1.pack");
+        let idx = pack.with_extension("idx");
+        let fixture = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("tests/data/packs/ofs-delta-sha1.pack");
+        std::fs::copy(&fixture, &pack).expect("copy fixture pack");
+        crate::command::index_pack::build_index_v1(
+            pack.to_str().expect("UTF-8 pack path"),
+            idx.to_str().expect("UTF-8 idx path"),
+        )
+        .expect("build v1 index");
+
+        let local = LocalStorage::new(local_dir.path().to_path_buf());
+        let remote = RemoteStorage::new(Arc::new(object_store::memory::InMemory::new()));
+        let remote_only_payload = b"stored only in remote tier";
+        let remote_only = ObjectHash::from_type_and_data(ObjectType::Blob, remote_only_payload);
+        remote
+            .put(&remote_only, remote_only_payload, ObjectType::Blob)
+            .await
+            .expect("put remote-only blob");
+
+        let tiered = TieredStorage::new(local, remote, 8, 1 << 20);
+        let ofs_delta = crate::internal::object_format::parse_repo_oid(
+            "1b59abc09609574e73330d56815f04ebb4d9bd72",
+        )
+        .expect("parse OFS_DELTA OID");
+
+        assert_eq!(
+            tiered
+                .decoded_object_sizes(&[ofs_delta, remote_only])
+                .await
+                .expect("tiered decoded sizes"),
+            vec![Some(10_400), None]
+        );
+        assert_eq!(
+            tiered
+                .decoded_object_size(&ofs_delta)
+                .await
+                .expect("tiered single decoded size"),
+            Some(10_400)
+        );
     }
 }

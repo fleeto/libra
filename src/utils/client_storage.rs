@@ -2430,6 +2430,27 @@ impl ClientStorage {
         })
     }
 
+    /// Query the exact decoded payload length without materializing the object.
+    ///
+    /// Unlike [`Self::object_size`], packed deltas report their reconstructed
+    /// payload length (`result_size`) rather than their conservative memory
+    /// reconstruction budget (`peak_bytes`).
+    pub fn decoded_object_size(&self, object_id: &ObjectHash) -> Result<Option<u64>, GitError> {
+        let storage = self.ready_storage()?;
+        let hash = *object_id;
+        self.block_on_storage(async move { storage.decoded_object_size(&hash).await })
+    }
+
+    /// Batch decoded payload-length lookup in one storage-runtime round trip.
+    pub fn decoded_object_sizes(
+        &self,
+        object_ids: &[ObjectHash],
+    ) -> Result<Vec<Option<u64>>, GitError> {
+        let storage = self.ready_storage()?;
+        let hashes = object_ids.to_vec();
+        self.block_on_storage(async move { storage.decoded_object_sizes(&hashes).await })
+    }
+
     /// Attempt to repair a missing or corrupted object from the durable tier
     /// (`libra fsck --heal`, lore.md §0.4).
     ///
@@ -3317,6 +3338,17 @@ impl Storage for ClientStorage {
         aggregate_limit: u64,
     ) -> Result<Vec<Option<u64>>, GitError> {
         ClientStorage::object_sizes_with_total_limit(self, hashes, aggregate_limit)
+    }
+
+    async fn decoded_object_size(&self, hash: &ObjectHash) -> Result<Option<u64>, GitError> {
+        ClientStorage::decoded_object_size(self, hash)
+    }
+
+    async fn decoded_object_sizes(
+        &self,
+        hashes: &[ObjectHash],
+    ) -> Result<Vec<Option<u64>>, GitError> {
+        ClientStorage::decoded_object_sizes(self, hashes)
     }
 
     async fn search(&self, prefix: &str) -> Vec<ObjectHash> {
@@ -7646,6 +7678,18 @@ mod tests {
         );
         assert_config_display(
             &storage
+                .decoded_object_size(&hash)
+                .expect_err("decoded size")
+                .to_string(),
+        );
+        assert_config_display(
+            &storage
+                .decoded_object_sizes(&[])
+                .expect_err("decoded sizes")
+                .to_string(),
+        );
+        assert_config_display(
+            &storage
                 .commit_parents_many(&[])
                 .expect_err("parents")
                 .to_string(),
@@ -7822,6 +7866,20 @@ mod tests {
                 .object_sizes_with_total_limit(&[], 1)
                 .await
                 .expect_err("trait size limit")
+                .to_string(),
+        );
+        assert_config_display(
+            &as_storage
+                .decoded_object_size(&hash)
+                .await
+                .expect_err("trait decoded size")
+                .to_string(),
+        );
+        assert_config_display(
+            &as_storage
+                .decoded_object_sizes(&[])
+                .await
+                .expect_err("trait decoded sizes")
                 .to_string(),
         );
         assert_config_display(

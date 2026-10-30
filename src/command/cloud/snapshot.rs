@@ -1409,7 +1409,10 @@ pub(super) fn clean_residues(
 pub(super) struct ProcessIdentity {
     pub(super) host: String,
     pub(super) boot_id: Option<String>,
+    // Read only where an exited owner can be proven (Linux and macOS).
+    #[cfg_attr(not(any(target_os = "linux", target_os = "macos")), allow(dead_code))]
     pub(super) pid_namespace: Option<String>,
+    #[cfg_attr(not(any(target_os = "linux", target_os = "macos")), allow(dead_code))]
     pub(super) pid: u32,
 }
 

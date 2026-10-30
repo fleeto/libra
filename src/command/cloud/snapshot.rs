@@ -392,8 +392,8 @@ fn ensure_trusted_root(storage: &Path) -> CloudResult<()> {
                 "use",
                 storage,
                 format!(
-                    "{error}; cloud sync on Windows needs a private .libra: run `{}`, then retry",
-                    icacls_private_command(storage)
+                    "{error}; cloud sync on Windows needs a private .libra: run {}, then retry",
+                    icacls_private_commands(storage)
                 ),
             )
         })?;
@@ -424,15 +424,17 @@ fn ensure_raw_root_not_linked(raw_root: &Path) -> CloudResult<()> {
     }
 }
 
-/// The `icacls` command that makes `dir` private: inheritance removed, full
-/// control for the current user (resolved now, so it runs in any shell) and
-/// SYSTEM only.
+/// The `icacls` commands, each in backticks, that make `dir` private:
+/// inheritance removed with full control for the current user (resolved now,
+/// so it runs in any shell) and SYSTEM only, then the current user as owner.
+/// The check also requires that owner, and an elevated administrator's new
+/// files are owned by the Administrators group instead.
 #[cfg(windows)]
-fn icacls_private_command(dir: &Path) -> String {
+fn icacls_private_commands(dir: &Path) -> String {
     let user = std::env::var("USERNAME").unwrap_or_else(|_| "<your user name>".to_string());
     format!(
-        "icacls \"{}\" /inheritance:r /grant:r \"{user}:(OI)(CI)F\" \"SYSTEM:(OI)(CI)F\"",
-        dir.display()
+        "`icacls \"{path}\" /inheritance:r /grant:r \"{user}:(OI)(CI)F\" \"SYSTEM:(OI)(CI)F\"` and then `icacls \"{path}\" /setowner \"{user}\"` (if `icacls \"{path}\"` still lists another account, remove it with `icacls \"{path}\" /remove \"<account>\"`)",
+        path = dir.display()
     )
 }
 
@@ -490,8 +492,8 @@ fn ensure_spool_parent(storage: &Path, dir: &Path) -> CloudResult<()> {
                 "use",
                 dir,
                 format!(
-                    "{error}; make it private with `{}`, then retry",
-                    icacls_private_command(dir)
+                    "{error}; make it private with {}, then retry",
+                    icacls_private_commands(dir)
                 ),
             )
         })?;

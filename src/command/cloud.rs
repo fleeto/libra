@@ -3739,11 +3739,13 @@ mod tests {
         }
     }
 
-    /// Give `dir` a protected DACL granting only the current user and SYSTEM.
+    /// Give `dir` a protected DACL granting only the current user and SYSTEM,
+    /// and make the current user its owner, as the refusal's remedy says (an
+    /// elevated runner's new files are owned by the Administrators group).
     #[cfg(windows)]
     fn make_private_with_icacls(dir: &std::path::Path) {
         let user = env::var("USERNAME").expect("USERNAME");
-        let status = std::process::Command::new("icacls")
+        let grant = std::process::Command::new("icacls")
             .arg(dir)
             .args([
                 "/inheritance:r",
@@ -3753,7 +3755,21 @@ mod tests {
             ])
             .status()
             .expect("run icacls");
-        assert!(status.success(), "icacls failed for {}", dir.display());
+        assert!(
+            grant.success(),
+            "icacls /grant failed for {}",
+            dir.display()
+        );
+        let owner = std::process::Command::new("icacls")
+            .arg(dir)
+            .args(["/setowner", &user])
+            .status()
+            .expect("run icacls");
+        assert!(
+            owner.success(),
+            "icacls /setowner failed for {}",
+            dir.display()
+        );
     }
 
     #[cfg(windows)]
@@ -3774,6 +3790,10 @@ mod tests {
             .expect_err("a .libra with inherited permissions must be refused");
         let detail = error.to_string();
         assert!(detail.contains("icacls"), "{detail}");
+        assert!(
+            detail.contains("/setowner"),
+            "the remedy also makes the current user the owner: {detail}"
+        );
         assert!(
             detail.contains(&util::storage_path().display().to_string()),
             "{detail}"

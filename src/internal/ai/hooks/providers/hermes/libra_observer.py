@@ -11,6 +11,7 @@ from __future__ import annotations
 import json
 import sys
 from pathlib import Path
+from typing import Optional
 
 
 def admit(payload: dict) -> str:
@@ -49,14 +50,107 @@ def _has_dot(path: Path) -> bool:
     return any(part in {".", ".."} for part in path.parts)
 
 
+ALLOWLIST = (
+    "source",
+    "created_source",
+    "user_id",
+    "profile_name",
+    "turn_id",
+    "message_id",
+    "phase",
+    "outcome",
+    "event_id",
+)
+
+OBSERVERS = {
+    "post_llm_call",
+    "on_session_end",
+    "on_session_finalize",
+    "on_session_reset",
+    "agent_loop_stopped",
+}
+
+
+def find_worktree_root(start: str) -> Optional[Path]:
+    path = Path(start).resolve()
+    for candidate in [path, *path.parents]:
+        if (candidate / ".libra").is_dir():
+            return candidate
+    return None
+
+
+def hook_stdin(payload: dict) -> Optional[dict]:
+    event = payload.get("event")
+    if event not in OBSERVERS:
+        return None
+    cwd = payload.get("cwd")
+    root = find_worktree_root(cwd) if isinstance(cwd, str) else None
+    if root is None or Path(cwd).resolve() != root:
+        return None
+    decision = admit(
+        {
+            "platform": payload.get("source"),
+            "created_source": payload.get("created_source"),
+            "user_id": payload.get("user_id"),
+            "cwd": str(root),
+            "profile_name": payload.get("profile_name"),
+            "verified_root": str(root),
+            "caller_profile": payload.get("profile_name") or "default",
+        }
+    )
+    if decision != "admit":
+        return None
+    if event == "on_session_reset":
+        return None
+    frame = {
+        "hook_event_name": event,
+        "session_id": payload.get("session_id"),
+        "cwd": str(root),
+    }
+    for key in ALLOWLIST:
+        if key in payload and payload[key] is not None:
+            frame[key] = payload[key]
+    frame["event_id"] = "|".join(
+        str(payload.get(key) or "")
+        for key in ("session_id", "turn_id", "message_id", "phase", "event")
+    )
+    return frame
+
+
 def main() -> None:
-    if "--admit" not in sys.argv:
+    if "--admit" in sys.argv:
+        payload = json.load(sys.stdin)
+        if not isinstance(payload, dict):
+            sys.stdout.write("refuse")
+            return
+        sys.stdout.write(admit(payload))
+        return
+    if "--hook" not in sys.argv:
         return
     payload = json.load(sys.stdin)
     if not isinstance(payload, dict):
-        sys.stdout.write("refuse")
         return
-    sys.stdout.write(admit(payload))
+    frame = hook_stdin(payload)
+    if frame is None:
+        return
+    if "--print-frame" in sys.argv:
+        sys.stdout.write(json.dumps(frame, sort_keys=True))
+        return
+    import os
+    import subprocess
+
+    binary = os.environ.get("LIBRA_BIN", "libra")
+    try:
+        subprocess.run(
+            [binary, "agent", "hooks", "hermes", "observe"],
+            input=json.dumps(frame).encode(),
+            cwd=payload.get("cwd") if isinstance(payload.get("cwd"), str) else None,
+            env={"PATH": os.environ.get("PATH", ""), "HOME": os.environ.get("HOME", "")},
+            timeout=2,
+            check=False,
+        )
+    except subprocess.TimeoutExpired:
+        return
 
 
 if __name__ == "__main__":

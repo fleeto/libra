@@ -17,9 +17,14 @@ use crate::{
     internal::ai::{
         capture::ingress::CaptureDeadline,
         hooks::{
-            HookTarget, process_hook_event_with_target,
+            HookTarget,
+            lifecycle::LifecycleEventKind,
+            process_hook_event_with_target,
             provider::ProviderHookCommand,
-            providers::{claude_provider, codex, codex_provider, grok_provider, opencode_provider},
+            providers::{
+                claude_provider, codex, codex_provider, grok_provider, hermes_provider,
+                opencode_provider,
+            },
         },
     },
     utils::{
@@ -57,6 +62,12 @@ pub enum AgentHooksSubcommand {
     /// `libra agent hooks grok <subcommand>` family (GK-05).
     #[command(about = "Grok observe-only hook entry points")]
     Grok {
+        #[command(subcommand)]
+        command: HookCommandKind,
+    },
+    /// `libra agent hooks hermes observe` (HM-05). Installation stays disabled.
+    #[command(about = "Hermes observe-only hook entry")]
+    Hermes {
         #[command(subcommand)]
         command: HookCommandKind,
     },
@@ -155,6 +166,31 @@ pub async fn execute_safe(
             run(opencode_provider(), command, deadline).await
         }
         AgentHooksSubcommand::Grok { command } => run(grok_provider(), command, deadline).await,
+        AgentHooksSubcommand::Hermes { command } => {
+            if !matches!(command, HookCommandKind::Observe) {
+                return Err(CliError::fatal(
+                    "hermes registers only the proven observer entry",
+                ));
+            }
+            // The parsed event selects TurnEnd, TurnInterrupted, or SessionEnd.
+            // Passing SessionEnd here would treat a turn callback as terminal
+            // before the frame is read.
+            process_hook_event_with_target(
+                ProviderHookCommand::Observe,
+                LifecycleEventKind::TurnEnd,
+                hermes_provider(),
+                HookTarget::AgentTraces,
+                deadline,
+            )
+            .await
+            .map_err(|error| {
+                map_capture_ingest_error(
+                    error,
+                    "agent hook ingestion failed",
+                    CaptureErrorSurface::FailClosed,
+                )
+            })
+        }
     }
 }
 

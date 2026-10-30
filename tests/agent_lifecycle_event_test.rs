@@ -5800,3 +5800,225 @@ async fn claude_observe_message_display_limit_holds_across_processes() {
         "erase must remove the display-batch counts"
     );
 }
+
+fn hermes_observe_frame(repo: &HookRepo, event: &str, outcome: Option<&str>) -> String {
+    let mut payload = json!({
+        "hook_event_name": event,
+        "session_id": "hermes-observe-1",
+        "cwd": repo.repo.display().to_string(),
+        "source": "cli",
+        "profile_name": "default",
+        "turn_id": "turn-1",
+        "message_id": "msg-1",
+        "phase": "turn",
+        "event_id": "hermes-observe-1|turn-1|msg-1|turn",
+    });
+    if let Some(outcome) = outcome {
+        payload["outcome"] = json!(outcome);
+    }
+    serde_json::to_string(&payload).expect("hermes frame")
+}
+
+#[test]
+fn hermes_observe_turn_end_stays_active_and_replays_once() {
+    let repo = HookRepo::init();
+    let frame = hermes_observe_frame(&repo, "on_session_end", Some("completed"));
+    let first = repo.hook("hermes", "observe", &frame);
+    assert!(
+        first.status.success(),
+        "turn observer failed: {}",
+        describe(&first)
+    );
+    let sessions = repo.sessions();
+    assert_eq!(sessions.len(), 1, "{sessions:?}");
+    assert_ne!(sessions[0]["state"], json!("stopped"), "{sessions:?}");
+    let checkpoints = repo.checkpoints().len();
+    assert!(checkpoints >= 1, "turn observer wrote no checkpoint");
+    let second = repo.hook("hermes", "observe", &frame);
+    assert!(
+        second.status.success(),
+        "replay failed: {}",
+        describe(&second)
+    );
+    assert_eq!(
+        repo.checkpoints().len(),
+        checkpoints,
+        "replay wrote another checkpoint"
+    );
+    assert_eq!(repo.sessions().len(), 1);
+}
+
+#[test]
+fn hermes_observe_subdirectory_cwd_does_not_capture() {
+    let repo = HookRepo::init();
+    let nested = repo.repo.join("nested");
+    std::fs::create_dir_all(&nested).expect("nested workdir");
+    let mut frame: Value = serde_json::from_str(&hermes_observe_frame(
+        &repo,
+        "on_session_end",
+        Some("completed"),
+    ))
+    .expect("frame");
+    frame["cwd"] = json!(nested.display().to_string());
+    let out = repo.run_in(
+        &nested,
+        &["agent", "hooks", "hermes", "observe"],
+        Some(&serde_json::to_string(&frame).unwrap()),
+    );
+    assert!(
+        repo.sessions().is_empty(),
+        "subdirectory cwd created a session: {}",
+        describe(&out)
+    );
+    assert!(repo.checkpoints().is_empty());
+}
+
+#[test]
+fn hermes_observe_finalize_stops_the_session() {
+    let repo = HookRepo::init();
+    let turn = hermes_observe_frame(&repo, "on_session_end", Some("completed"));
+    assert!(repo.hook("hermes", "observe", &turn).status.success());
+    let end = hermes_observe_frame(&repo, "on_session_finalize", None);
+    let stopped = repo.hook("hermes", "observe", &end);
+    assert!(
+        stopped.status.success(),
+        "finalize failed: {}",
+        describe(&stopped)
+    );
+    let sessions = repo.sessions();
+    assert_eq!(sessions.len(), 1, "{sessions:?}");
+    assert_eq!(sessions[0]["state"], json!("stopped"), "{sessions:?}");
+}
+
+#[test]
+fn hermes_observe_gateway_control_and_body_do_not_capture() {
+    let repo = HookRepo::init();
+    let mut gateway = serde_json::from_str::<Value>(&hermes_observe_frame(
+        &repo,
+        "on_session_end",
+        Some("completed"),
+    ))
+    .unwrap();
+    gateway["source"] = json!("gateway");
+    let refused = repo.hook(
+        "hermes",
+        "observe",
+        &serde_json::to_string(&gateway).unwrap(),
+    );
+    assert!(
+        repo.sessions().is_empty(),
+        "gateway created a session: {}",
+        describe(&refused)
+    );
+    assert!(repo.checkpoints().is_empty());
+
+    let control = repo.hook(
+        "hermes",
+        "observe",
+        &json!({
+            "hook_event_name": "pre_tool_call",
+            "session_id": "hermes-observe-1",
+            "cwd": repo.repo.display().to_string(),
+            "tool_input": "secret-tool-args",
+        })
+        .to_string(),
+    );
+    assert!(control.status.success(), "{}", describe(&control));
+    assert!(repo.sessions().is_empty());
+    let combined = format!(
+        "{}{}",
+        String::from_utf8_lossy(&control.stdout),
+        String::from_utf8_lossy(&control.stderr)
+    );
+    assert!(!combined.contains("secret-tool-args"));
+
+    let mut body =
+        serde_json::from_str::<Value>(&hermes_observe_frame(&repo, "post_llm_call", None)).unwrap();
+    body["history"] = json!("secret-thinking-body");
+    let echoed = repo.hook("hermes", "observe", &serde_json::to_string(&body).unwrap());
+    assert!(repo.sessions().is_empty(), "{}", describe(&echoed));
+    let combined = format!(
+        "{}{}",
+        String::from_utf8_lossy(&echoed.stdout),
+        String::from_utf8_lossy(&echoed.stderr)
+    );
+    assert!(!combined.contains("secret-thinking-body"));
+
+    let other_verb = repo.hook(
+        "hermes",
+        "stop",
+        &hermes_observe_frame(&repo, "on_session_end", Some("completed")),
+    );
+    assert!(!other_verb.status.success(), "stop must stay unregistered");
+    assert!(repo.sessions().is_empty());
+}
+
+#[test]
+fn hermes_observe_plugin_forwards_only_the_allowlist() {
+    use std::os::unix::fs::PermissionsExt;
+    let root = std::env::temp_dir().join("libra-hermes-observer-root");
+    std::fs::create_dir_all(root.join(".libra")).expect("plugin worktree marker");
+    let script = root.join("libra-stub");
+    let captured = root.join("stdin.json");
+    std::fs::write(
+        &script,
+        format!("#!/bin/sh\ncat > '{}'\nexit 0\n", captured.display()),
+    )
+    .unwrap();
+    std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
+    let payload = json!({
+        "event": "on_session_end",
+        "session_id": "hermes-observe-1",
+        "cwd": root.display().to_string(),
+        "source": "cli",
+        "profile_name": "default",
+        "turn_id": "turn-1",
+        "message_id": "msg-1",
+        "phase": "turn",
+        "outcome": "completed",
+        "history": "secret-thinking-body",
+        "child_goal": "secret-child",
+    });
+    let output = Command::new("python3")
+        .arg(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/src/internal/ai/hooks/providers/hermes/libra_observer.py"
+        ))
+        .arg("--hook")
+        .env("LIBRA_BIN", &script)
+        .env("PATH", "/usr/bin:/bin")
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("plugin");
+    let mut child = output;
+    child
+        .stdin
+        .take()
+        .unwrap()
+        .write_all(payload.to_string().as_bytes())
+        .unwrap();
+    let finished = child.wait_with_output().expect("plugin wait");
+    assert!(
+        finished.status.success(),
+        "{}",
+        String::from_utf8_lossy(&finished.stderr)
+    );
+    assert!(
+        finished.stdout.is_empty(),
+        "observer stdout must stay empty"
+    );
+    let frame: Value =
+        serde_json::from_str(&std::fs::read_to_string(&captured).expect("frame")).unwrap();
+    for key in [
+        "history",
+        "child_goal",
+        "secret-thinking-body",
+        "secret-child",
+    ] {
+        assert!(!frame.to_string().contains(key), "{frame}");
+    }
+    assert_eq!(frame["hook_event_name"], json!("on_session_end"));
+    assert_eq!(frame["source"], json!("cli"));
+}

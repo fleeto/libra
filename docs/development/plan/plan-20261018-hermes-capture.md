@@ -752,7 +752,7 @@ Claude 审查实现 `VERDICT: PASS`。文档挂错常量之后的复核轮也是
 
 **Task type:** implementation
 
-**Lifecycle / Acceptance:** pending / 空
+**Lifecycle / Acceptance:** done / complete
 
 **Description:** 用已证明observer注册fixed-argv/stdin协议，接现有ACF；安装曝光留HM-06。
 
@@ -762,18 +762,20 @@ Claude 审查实现 `VERDICT: PASS`。文档挂错常量之后的复核轮也是
 
 **Acceptance criteria:**
 
-- [ ] 只注册HM-00已证observer，返回值无控制含义。
-- [ ] turn outcome不伪造成SessionEnd。
-- [ ] 稳定session/turn/message/phase键重放幂等。
-- [ ] stdin只含冻结的allowlist字段。
-- [ ] child生命周期满足共享契约第5条资源合同。
-- [ ] source只经HM-08桥交给snapshot，plugin不读热DB。
-- [ ] terminal只注入既有CaptureFinalizePolicy。
-- [ ] 只有HM-09已准入的context才能摄取。
+- [x] 只注册HM-00已证observer，返回值无控制含义。
+- [x] turn outcome不伪造成SessionEnd。
+- [x] 稳定session/turn/message/phase键重放幂等。
+- [x] stdin只含冻结的allowlist字段。
+- [x] child生命周期满足共享契约第5条资源合同。
+- [x] source只经HM-08桥交给snapshot，plugin不读热DB。
+- [x] terminal只注入既有CaptureFinalizePolicy。
+- [x] 只有HM-09已准入的context才能摄取。
 
 **Verification:**
 
-- [ ] `source .env.test && cargo test --test agent_lifecycle_event_test hermes_observe_ -- --test-threads=1`（拟新增过滤名；须列出实际匹配并确认非零）
+- [x] `source .env.test && cargo test --test agent_lifecycle_event_test hermes_observe_ -- --test-threads=1`（拟新增过滤名；须列出实际匹配并确认非零）
+
+实现说明：`libra agent hooks hermes observe` 只接受 `post_llm_call`、`on_session_end`、`on_session_finalize`、`on_session_reset` 和 `agent_loop_stopped`。control hook 与 subagent 事件不注册，返回值没有控制内容。`on_session_end` 的 completed 是 TurnEnd，会话保持 active；failed、interrupted 和 `agent_loop_stopped` 是 TurnInterrupted。只有 `on_session_finalize` 是 SessionEnd，并走现有 agent-traces ingest 的 `CaptureFinalizePolicy`。plugin 用固定 argv、无 shell、2 秒超时，只转发身份字段，不读 state.db，也不接受 `transcript_path`。cwd 必须等于 `RequestScope` 解析出的 worktree 根，子目录不写入。gateway 不建立 capture row。相同 event/turn/message/phase 重放不新增 checkpoint。安装、`as_hooks()`、supported 与 launch 仍关闭。`hermes_observe_` 匹配 5 条并全部通过。Claude R1 `VERDICT: FAIL`（子目录 cwd 被当成已验证根）。R2 `VERDICT: PASS`，正文 SHA-256 `c150149ff2daa5e2bdd647d2e89895b03a933663aa7c55dc82353e6ae3766a2c`。无 P0/P1。发布窗口 `v0.30.101`。
 
 **Full-suite trigger:** T-1/T-4（共享采集、存储、CLI 或测试契约）；执行四 provider 契约的完整双环境 nextest 门
 

@@ -20,6 +20,8 @@ pub mod grok;
 pub mod hermes;
 pub mod opencode;
 
+pub use hermes::hermes_provider;
+
 use super::provider::{HookProvider, HookProviderIdentity};
 use crate::internal::ai::observed_agents::AgentKind;
 

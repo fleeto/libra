@@ -12944,7 +12944,10 @@ mod tests {
                 deadline,
             };
             let manager = HistoryManager::new_with_ref(
-                Arc::new(ClientStorage::try_init(storage.join("objects"))?),
+                Arc::new(
+                    ClientStorage::try_init(storage.join("objects"))
+                        .expect("open the test object store"),
+                ),
                 storage.to_path_buf(),
                 Arc::new(conn.clone()),
                 crate::internal::branch::TRACES_BRANCH,

@@ -331,8 +331,13 @@ async fn concurrent_config_branch_upgraders_claim_the_copy_and_barrier_once() {
     );
 
     // Then one barrier owner performs the catch-up; the loser does no copy DDL.
+    // Each later version is claimed in its own transaction, so once the
+    // barrier is past the two runners may split them (which one wins a claim
+    // depends on scheduling): every version is applied exactly once, in some
+    // partition between the two.
     let mut applied = a.unwrap();
     applied.extend(b.unwrap());
+    applied.sort_unstable();
     assert_eq!(
         applied,
         vec![

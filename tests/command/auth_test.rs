@@ -191,7 +191,10 @@ fn auth_output_redacts_embedded_credentials() {
         text.starts_with("git.example.com:"),
         "host without userinfo stays byte-identical: {text}"
     );
-    let json = run_libra_command(&["--json", "auth", "status", "--host", "git.example.com"], p);
+    let json = run_libra_command(
+        &["--json", "auth", "status", "--host", "git.example.com"],
+        p,
+    );
     assert_cli_success(&json, "status json");
     let body = String::from_utf8_lossy(&json.stdout);
     assert!(

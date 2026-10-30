@@ -2030,7 +2030,8 @@ async fn ensure_agent_capture_objects_remote(
         let local_storage =
             LocalStorage::try_new(path::try_objects().map_err(|error| {
                 local_agent_capture_failure("resolve local object store", error)
-            })?)?;
+            })?)
+            .map_err(|error| local_agent_capture_failure("open local object store", error))?;
         let verification_rows = required.iter().zip(&hashes).collect::<Vec<_>>();
         for page in agent_capture_object_verification_batches(&verification_rows) {
             // Full content verification remains mandatory, but a fixed-size page

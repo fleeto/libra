@@ -49,6 +49,24 @@ config_bare_read_protected_key_interactive_pty	lane:cwd+env+hash_kind	fail-close
 config_cascade_uses_explicit_role	lane:cwd+env	uses isolated global/system configuration paths and cwd to prove read-only role routing
 config_db_fixture_creates_sqlite_only_beneath_its_root	lane:env	mutates config-path environment through the shared scoped fixture
 config_db_fixture_restores_caller_values_after_drop_and_early_return	lane:env	mutates config-path environment through the shared scoped fixture
+agent_kind_check_rebuild_finishes_an_in_memory_run_its_caller_abandoned	lane:env	PI-07: sets LIBRA_TEST and the agent_kind CHECK failpoint variables in-process (ScopedEnvVar)
+agent_kind_check_rebuild_discards_a_cancelled_connection	lane:env	PI-07: sets LIBRA_TEST and the agent_kind CHECK failpoint variables in-process (ScopedEnvVar)
+agent_kind_check_rebuild_holds_the_in_memory_connection_until_restored	lane:env	PI-07: sets LIBRA_TEST and the agent_kind CHECK failpoint variables in-process (ScopedEnvVar)
+agent_kind_check_rebuild_discards_a_failed_in_memory_connection	lane:env	PI-07: sets LIBRA_TEST and the agent_kind CHECK failpoint variables in-process (ScopedEnvVar)
+agent_kind_check_rebuild_keeps_every_row_and_dependent	lane:env	PI-07: spawns libra children whose environment derives from the process environment, which env-lane tests of this binary change
+agent_kind_check_rebuild_rolls_back_every_failed_step	lane:env	PI-07: spawns libra children whose environment derives from the process environment, which env-lane tests of this binary change
+agent_kind_check_rebuild_survives_a_crash_at_every_step	lane:env	PI-07: spawns libra children whose environment derives from the process environment, which env-lane tests of this binary change
+agent_kind_check_rebuild_runs_once_under_concurrent_upgrades	lane:env	PI-07: spawns libra children whose environment derives from the process environment, which env-lane tests of this binary change
+agent_kind_check_rebuild_refuses_an_unreviewed_check	lane:env	PI-07: spawns libra children whose environment derives from the process environment, which env-lane tests of this binary change
+agent_kind_check_rebuild_records_an_expanded_check_only_when_clean	lane:env	PI-07: spawns libra children whose environment derives from the process environment, which env-lane tests of this binary change
+agent_kind_check_rebuild_reports_a_failed_check_after_the_commit	lane:env	PI-07: spawns libra children whose environment derives from the process environment, which env-lane tests of this binary change
+agent_kind_check_rebuild_rechecks_with_foreign_keys_on_after_the_commit	lane:env	PI-07: spawns libra children whose environment derives from the process environment, which env-lane tests of this binary change
+agent_kind_check_rebuild_never_falls_back_when_the_file_lookup_fails	lane:env	PI-07: spawns libra children whose environment derives from the process environment, which env-lane tests of this binary change
+agent_kind_check_rebuild_reports_an_unknown_outcome_when_commit_or_rollback_fails	lane:env	PI-07: spawns libra children whose environment derives from the process environment, which env-lane tests of this binary change
+agent_kind_check_rebuild_reports_a_foreign_keys_setup_failure	lane:env	PI-07: spawns libra children whose environment derives from the process environment, which env-lane tests of this binary change
+agent_kind_check_rebuild_reports_a_foreign_keys_restore_failure	lane:env	PI-07: spawns libra children whose environment derives from the process environment, which env-lane tests of this binary change
+agent_kind_check_rebuild_ignores_failpoints_outside_tests	lane:env	PI-07: spawns libra children whose environment derives from the process environment, which env-lane tests of this binary change
+agent_kind_check_rebuild_rechecks_a_lost_claim_with_foreign_keys_on	lane:env	PI-07: spawns libra children whose environment derives from the process environment, which env-lane tests of this binary change
 config_db_fixture_restores_caller_values_after_panic	lane:env	mutates config-path environment through the shared scoped fixture
 config_generate_gpg_key_after_import_resumes_idempotently	lane:cwd	runs in an isolated temp repository via ChangeDirGuard and per-command cwd (plan-20260921 VG-14 resume)
 config_generate_gpg_key_migrates_imported_key_into_history	lane:cwd	runs in an isolated temp repository via ChangeDirGuard and per-command cwd (plan-20260921 VG-14)

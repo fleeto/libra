@@ -7730,8 +7730,9 @@ mod tests {
         let journal = commit_journal::journal_path(&repo);
         fs::set_permissions(&journal, fs::Permissions::from_mode(0o644))
             .expect("inject unsafe journal permissions");
-        let storage: Arc<dyn Storage + Send + Sync> =
-            Arc::new(LocalStorage::try_new(repo.join("objects"))?);
+        let storage: Arc<dyn Storage + Send + Sync> = Arc::new(
+            LocalStorage::try_new(repo.join("objects")).expect("open the test object store"),
+        );
         let history = HistoryManager::for_traces(storage, repo.clone(), Arc::new(conn.clone()));
         let partial = history
             .erase_session_local("codex_erased")
@@ -7846,8 +7847,9 @@ mod tests {
             &CommitJournalRecord::prepared(scope, "sha1", &"b".repeat(40), &["codex_race".into()]),
         )
         .expect("append under commit lock");
-        let storage: Arc<dyn Storage + Send + Sync> =
-            Arc::new(LocalStorage::try_new(repo.join("objects"))?);
+        let storage: Arc<dyn Storage + Send + Sync> = Arc::new(
+            LocalStorage::try_new(repo.join("objects")).expect("open the test object store"),
+        );
         let history = HistoryManager::for_traces(storage, repo.clone(), Arc::new(conn.clone()));
         let erase = tokio::spawn(async move { history.erase_session_local("codex_race").await });
         tokio::time::sleep(std::time::Duration::from_millis(50)).await;

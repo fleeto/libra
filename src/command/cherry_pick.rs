@@ -2652,10 +2652,10 @@ async fn create_cherry_pick_commit(
 /// (ADR-MG-01), and a diverged one is already refused by
 /// [`merge::ensure_gitlinks_not_arbitrated`] before this runs, so anything left
 /// here is a pointer all three sides agree on and needs no index change.
-fn diff_trees(
-    theirs: &Tree,
-    base: &Tree,
-) -> Result<Vec<(PathBuf, Option<ObjectHash>, Option<ObjectHash>)>, CherryPickSingleError> {
+/// Each path that differs between two trees, with its object on each side.
+type TreeDiffs = Vec<(PathBuf, Option<ObjectHash>, Option<ObjectHash>)>;
+
+fn diff_trees(theirs: &Tree, base: &Tree) -> Result<TreeDiffs, CherryPickSingleError> {
     let mut diffs = Vec::new();
     let their_items = mergeable_tree_items(theirs)?;
     let base_items = mergeable_tree_items(base)?;

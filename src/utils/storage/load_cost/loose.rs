@@ -17,6 +17,20 @@ pub(super) fn load_cost(path: &Path) -> Result<u64, GitError> {
     Ok(declared)
 }
 
+/// Validate a loose object in constant memory and return its decoded payload
+/// length. Objects whose declared length exceeds [`MAX_OBJECT_BYTES`] return
+/// `Ok(None)` before decoding so bounded batch probes neither spin on oversized
+/// streams nor discard valid sizes in the rest of the batch.
+pub(super) fn decoded_size(path: &Path) -> Result<Option<u64>, GitError> {
+    let (mut decoder, _, declared, storage_len) = open_and_read_header(path)?;
+    if declared > crate::utils::preview_object::MAX_OBJECT_BYTES {
+        return Ok(None);
+    }
+    consume_exact_payload(&mut decoder, declared)?;
+    validate_stream_end(&mut decoder, storage_len, path)?;
+    Ok(Some(declared))
+}
+
 /// Read one loose object without first buffering its compressed representation.
 /// When `max_payload` is present, reject the declared size before allocating.
 pub(super) fn read(
@@ -264,5 +278,28 @@ mod tests {
             error.to_string().contains("exceeds preview limit"),
             "the declaration must be rejected before the missing payload is decoded: {error}"
         );
+    }
+
+    #[test]
+    fn loose_decoded_size_returns_payload_length_and_skips_oversized_declarations() {
+        let temp = tempfile::tempdir().expect("create loose fixture");
+        let valid_path = temp.path().join("valid");
+        write_loose(&valid_path, b"blob 11\0hello world");
+        assert_eq!(
+            decoded_size(&valid_path).expect("decoded size of valid loose blob"),
+            Some(11)
+        );
+
+        let oversized_path = temp.path().join("oversized");
+        let declared = crate::utils::preview_object::MAX_OBJECT_BYTES + 1;
+        write_loose(&oversized_path, format!("blob {declared}\0").as_bytes());
+        assert_eq!(
+            decoded_size(&oversized_path).expect("oversized loose blob should report None"),
+            None
+        );
+
+        let corrupt_path = temp.path().join("corrupt");
+        write_loose(&corrupt_path, b"blob 1\0payload-that-is-longer");
+        assert!(decoded_size(&corrupt_path).is_err());
     }
 }

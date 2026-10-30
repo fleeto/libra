@@ -286,6 +286,27 @@ pub trait Storage: Send + Sync {
         Ok(sizes)
     }
 
+    /// Return the exact decoded byte length of the object's payload without
+    /// materializing it in memory. Unlike [`Self::object_size`], packed deltas
+    /// report their reconstructed payload length (`result_size`) rather than
+    /// their conservative delta-chain memory budget (`peak_bytes`). `None` means
+    /// this backend cannot provide a bounded local answer.
+    async fn decoded_object_size(&self, _hash: &ObjectHash) -> Result<Option<u64>, GitError> {
+        Ok(None)
+    }
+
+    /// Batch form of [`Self::decoded_object_size`], preserving input order.
+    async fn decoded_object_sizes(
+        &self,
+        hashes: &[ObjectHash],
+    ) -> Result<Vec<Option<u64>>, GitError> {
+        let mut sizes = Vec::with_capacity(hashes.len());
+        for hash in hashes {
+            sizes.push(self.decoded_object_size(hash).await?);
+        }
+        Ok(sizes)
+    }
+
     /// Search for objects by hash prefix
     /// Returns a list of object hashes that match the given prefix.
     /// Note: Performance may vary significantly between backends (fast locally, potentially slow remotely).

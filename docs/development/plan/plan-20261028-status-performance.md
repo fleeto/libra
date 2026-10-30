@@ -56,6 +56,13 @@ Nowledge 定向检索已尝试，服务连接被环境阻止；本计划依据�
 - 默认 Docs and compatibility impact=N/A 仅适用于输出与错误完全不变的内部优化；公开行为变化卡须同卡双语与网站文档。网站路径为候选，DEP-SP-DOCS 核验后才允许开工；遵循用户 standing instruction 直接 cf，通过 Libra 提交推送，不能另建网站分支/PR/worktree。
 - 无家族合并发布；C/D coverage=self（实现卡），SP-09 继承下列具体实现卡。SP-00 按用户批准的 EX-SP-00-AUDIT-01 独立文档验收（见下）；该例外不免除评审、fmt、Clippy 或本卡 PR CI，也不授权其它卡开工。
 
+### SP-02 修复卡收口决策（EX-SP-02-CLOSE-01）
+
+2026-10-30 03:06:14 UTC，在本仓库实现、单元/集成/兼容守卫、EN/zh-CN 命令文档及 `fmt`/严格 `Clippy` 通过后，用户明确要求“首先设置任务完成，然后再提交、推送、创建 PR，版本不变”。本次按用户指令登记 `SP-02` 为 `done / complete`，保持 `Cargo.toml` 版本 `0.30.101` 不变；这是对模板 ER-04/ER-08 完整发布切片及推送后远端门顺序的本卡具名例外，不扩展至其它任务卡。
+
+- 网站 `restore` 文档交付继续由 `DEFER-SP-DOCS-02` 跟踪（仍未执行），独立 `patch` 版本递增、构建安装、tag/Release 与发布后置门转入 `DEFER-SP-REL-02`（仍未执行），均不伪称已完成。
+- 本机 16 GiB 内存硬门槛下的 `nextest` 保持 `not-run`；PR CI（`.github/workflows/base.yml` 与 `.github/workflows/codeql.yml`）在本次提交推送并创建 PR 后触发，不在提交前预先宣称远端检查或合并通过（后续远端回执按模板 v2.14 在例行同步补记）。
+
 ### SP-01 已知上游 CI 失败合并决策（EX-SP-01-UPSTREAM-CI-01）
 
 2026-10-30，用户在核实失败来源后明确要求“这个问题提出一个 Issue，然后合并 PR 并完成本卡片”。上游问题已登记 [#656](https://github.com/libra-tools/libra/issues/656)，本次授权仅允许 PR #655 在披露该已知上游失败的前提下合并，不修改守卫、不提高基线、不修复 Hermes，也不把该次运行记为全绿。SP-01 保持 done/complete（修复卡口径），网站及发布延期项保持原状。
@@ -95,7 +102,7 @@ Phase 0 基线：SP-00；Phase 1 正确性与 stat：SP-01..03；Phase 2 核心�
 |---|---|---|---|---|
 | SP-00 冻结 status 性能基线与修正审计口径 | P1 | 必选验收前置 | [#639](https://github.com/libra-tools/libra/issues/639) | done / complete |
 | SP-01 status 递归子树加载返回错误而非 panic | P1 | 必选正确性 | [#640](https://github.com/libra-tools/libra/issues/640) | done / complete |
-| SP-02 restore 区分 decoded size 与对象加载内存成本 | P1 | 必选正确性 | [#641](https://github.com/libra-tools/libra/issues/641) | pending / 空 |
+| SP-02 restore 区分 decoded size 与对象加载内存成本 | P1 | 必选正确性 | [#641](https://github.com/libra-tools/libra/issues/641) | done / complete |
 | SP-03 materialization 后安全写入真实 index stat | P1 | 本轮核心提速 | [#642](https://github.com/libra-tools/libra/issues/642) | pending / 空 |
 | SP-04 单次 status 复用同一 index 快照 | P2 | 可选建议项，默认未启用 | [#643](https://github.com/libra-tools/libra/issues/643) | pending / 空 |
 | SP-05 status 共享一次 HEAD tree 展开结果 | P2 | 本轮核心提速：第一梯队 | [#644](https://github.com/libra-tools/libra/issues/644) | pending / 空 |
@@ -232,7 +239,7 @@ Phase 0 基线：SP-00；Phase 1 正确性与 stat：SP-01..03；Phase 2 核心�
 
 **Release boundary:** independent（发布交付在 DEFER-SP-REL-01 单独跟踪；本次修复卡按 EX-SP-01-CLOSE-01 收口）
 
-**C/D coverage from:** self（EX-SP-01-CLOSE-01 的修复/PR CI 完成口径）；本地 18 个不同用例、fmt/严格 Clippy 与本仓库文档检查通过；bb88db3 的 PR base/CodeQL 全绿，全量 nextest 10841 passed、23 skipped。后续 d9b5eee 的合并基线全量因已知上游架构守卫失败，按 EX-SP-01-UPSTREAM-CI-01 / #656 单独披露并获用户合并授权；不记作全绿。发布构建/安装/tag/Release/CDN 等仍未执行，登记 DEFER-SP-REL-01，不称完整发布 C/D 通过。
+**C/D coverage from:** self（EX-SP-01-CLOSE-01 的修复/PR CI 完成口径）；本地 18 个不同用例、fmt/严格 Clippy 与本仓库文档检查通过；bb88db3 的 PR base/CodeQL 全绿，全量 nextest 10841 passed、23 skipped。后续 d9b5eee 的合并基线全量因已知上游架构守卫失败，按 EX-SP-01-UPSTREAM-CI-01 / #656 单独披露并获用户合并授权；不记作全绿。PR #655 已于 2026-10-30T01:23:41Z 合并为 `e4eb85061af79b4deff37e569265f1c6b82787d4`，Issue #640 已于 2026-10-30T01:23:43Z 关闭。发布构建/安装/tag/Release/CDN 等仍未执行，登记 DEFER-SP-REL-01，不称完整发布 C/D 通过。
 
 **Granularity:** type=implementation; axis=status 递归子树加载返回错误而非 panic; recovery=前滚修复版; complete=yes; self-contained=yes; AC=4/8; VER=2/8; landing=3; prod-files=4; scope=M; deps=SP-00,DEP-SP-DOCS; writeset=按实施顺序串行; release=independent; split-from=N/A; exception=EX-SP-01-CLOSE-01
 
@@ -240,7 +247,7 @@ Phase 0 基线：SP-00；Phase 1 正确性与 stat：SP-01..03；Phase 2 核心�
 
 **Task type:** implementation
 
-**Lifecycle / Acceptance:** pending / 空
+**Lifecycle / Acceptance:** done / complete
 
 **Priority / Selection:** P1；必选正确性
 
@@ -250,43 +257,43 @@ Phase 0 基线：SP-00；Phase 1 正确性与 stat：SP-01..03；Phase 2 核心�
 
 **Out of scope:** CE_VALID 永久不在本计划范围；其它行为轴按任务总览分别承接；pack 会话缓存/marker 合并/IPC 批处理登记为 DEFER-SP-01..03，未启用。
 
-**Current evidence:** src/command/restore.rs:730-759,1831；src/utils/storage/mod.rs:241；src/utils/storage/load_cost/pack.rs:376（基线 380c262，开工刷新锚点）。
+**Current evidence:** src/command/restore.rs:737-770,1839；src/utils/storage/mod.rs:241,254；src/utils/storage/local.rs:640,1277；src/utils/storage/tiered.rs:202；src/utils/client_storage.rs:647；src/utils/storage/load_cost/loose.rs:109；src/utils/storage/load_cost/pack.rs:297,388（原始基线 380c262；2026-10-30 刷新至 main `e4eb85061af79b4deff37e569265f1c6b82787d4`）。
 
 **Acceptance criteria:**
 
-- [ ] 普通与 OFS/REF delta 对象产生真实 decoded size。
+- [x] 普通与 OFS/REF delta 对象产生真实 decoded size。
 
-- [ ] 多层 delta 查询不把 peak_bytes 写入 index size。
+- [x] 多层 delta 查询不把 peak_bytes 写入 index size。
 
-- [ ] 查询失败或缓存未命中的 fallback 保留原错误语义。
+- [x] 查询失败或缓存未命中的 fallback 保留原错误语义。
 
-- [ ] 原有 preview load-cost 限额仍能拒绝超预算重建。
+- [x] 原有 preview load-cost 限额仍能拒绝超预算重建。
 
-- [ ] staged-only 不读取工作区 stat 来伪造 clean。
+- [x] staged-only 不读取工作区 stat 来伪造 clean。
 
-- [ ] ER-06a：文档清单逐文件同步并验收（全局必需门，不计入特有 AC）。
+- [x] ER-06a：本仓库 `docs/commands/restore.md` 与 `docs/commands/zh-CN/restore.md` 已同步并验收；网站 `/Volumes/Sea/libra-backend` 未挂载，登记 DEFER-SP-DOCS-02，仍未执行，依 EX-SP-02-CLOSE-01 不计本次修复卡收口门。
 
 
 **Verification:**
 
-- [ ] `cargo test --lib utils::storage::`
+- [x] `cargo test --lib utils::storage::`
 
-- [ ] `cargo test --test command_test restore_test::`
+- [x] `cargo test --test command_test restore_test::`
 
-- [ ] `cargo test --test command_test restore_test::restore_delta_index_size_ -- --nocapture` — `(new)` 测试前缀；须非零命中。
+- [x] `cargo test --test command_test restore_test::restore_delta_index_size_ -- --nocapture` — `(new)` 测试前缀；须非零命中。
 
 
 **Full-suite trigger:** T-1：共享存储接口及预算逻辑
 
-**Dependencies:** SP-01, DEP-SP-DOCS
+**Dependencies:** SP-01（已验收合并 `e4eb850`）；DEP-SP-DOCS 的网站交付按 EX-SP-02-CLOSE-01 转 DEFER-SP-DOCS-02，仍未执行、不阻塞本次修复卡收口
 
 **Deliverables:** 实现、同卡回归及列明文档
 
-**Implementation write set:** `src/command/restore.rs`, `src/utils/client_storage.rs`, `src/utils/storage/mod.rs`, `src/utils/storage/local.rs`, `src/utils/storage/load_cost/pack.rs`, `tests/command/restore_test.rs`, `docs/commands/restore.md`, `docs/commands/zh-CN/restore.md`, `/Volumes/Sea/libra-backend/apps/tanstack-app/content/docs/commands/restore.en.md`
+**Implementation write set:** `src/command/restore.rs`, `src/utils/client_storage.rs`, `src/utils/storage/mod.rs`, `src/utils/storage/local.rs`, `src/utils/storage/tiered.rs`, `src/utils/storage/load_cost/mod.rs`, `src/utils/storage/load_cost/loose.rs`, `src/utils/storage/load_cost/pack.rs`, `tests/command/restore_test.rs`, `docs/commands/restore.md`, `docs/commands/zh-CN/restore.md`, `/Volumes/Sea/libra-backend/apps/tanstack-app/content/docs/commands/restore.en.md`
 
 **Release write set:** Inherited
 
-**Docs and compatibility impact:** `docs/commands/restore.md`；`docs/commands/zh-CN/restore.md`；`/Volumes/Sea/libra-backend/apps/tanstack-app/content/docs/commands/restore.en.md`。网站候选路径待 DEP-SP-DOCS 核实。
+**Docs and compatibility impact:** `docs/commands/restore.md`；`docs/commands/zh-CN/restore.md`；`/Volumes/Sea/libra-backend/apps/tanstack-app/content/docs/commands/restore.en.md`。本仓库 EN/zh-CN 两份文档已同步并验收；网站路径待核实，后续交付由 DEFER-SP-DOCS-02 跟踪。
 
 **Rollback mode:** immutable-release
 
@@ -298,13 +305,13 @@ Phase 0 基线：SP-00；Phase 1 正确性与 stat：SP-01..03；Phase 2 核心�
 
 **Estimated scope:** M
 
-**Version increment:** patch
+**Version increment:** patch（DEFER-SP-REL-02：后续独立发布时执行；本次按用户“版本不变”指令保持 `0.30.101` 不 bump）
 
-**Release boundary:** independent
+**Release boundary:** independent（发布交付在 DEFER-SP-REL-02 单独跟踪；本次修复卡按 EX-SP-02-CLOSE-01 收口）
 
-**C/D coverage from:** self；尚未运行。
+**C/D coverage from:** self（EX-SP-02-CLOSE-01 本仓修复收口口径）；本仓库单元/集成/守卫（`utils::storage::` 84/84、`storage_config_hold` 11/11、`command::restore::tests::` 9/9、`restore_test::` 50/50、新增 `restore_delta_index_size_` 4/4、`compat_serial_registry` 26/26、两项生产 unwrap 守卫各 1/1）与 `cargo +nightly fmt --all --check`、`cargo clippy --all-targets --all-features -- -D warnings` 均通过（上游依赖 `block v0.1.6` future-incompat 提示保留）；本机 16 GiB 内存硬门槛下 T-1 全量 nextest 为 not-run。PR CI（base.yml/CodeQL）随本次推送建 PR 触发，不在提交前预称远端全绿；网站与独立版本发布分别登记 DEFER-SP-DOCS-02 / DEFER-SP-REL-02，均未执行，不称完整发布 C/D 通过。
 
-**Granularity:** type=implementation; axis=restore 区分 decoded size 与对象加载内存成本; recovery=前滚修复版; complete=yes; self-contained=yes; AC=5/8; VER=3/8; landing=4; prod-files=5; scope=M; deps=SP-01,DEP-SP-DOCS; writeset=按实施顺序串行; release=independent; split-from=N/A; exception=N/A
+**Granularity:** type=implementation; axis=restore 区分 decoded size 与对象加载内存成本; recovery=前滚修复版; complete=yes; self-contained=yes; AC=5/8; VER=3/8; landing=4; prod-files=8; scope=M; deps=SP-01,DEP-SP-DOCS; writeset=按实施顺序串行; release=independent; split-from=N/A; exception=EX-SP-02-CLOSE-01
 
 ### Task SP-03: materialization 后安全写入真实 index stat
 
@@ -788,6 +795,8 @@ Phase 0 基线：SP-00；Phase 1 正确性与 stat：SP-01..03；Phase 2 核心�
 |---|---|---|---|
 | DEFER-SP-DOCS-01 | SP-01 网站 status 文档同步、验证和部署；未执行 | 网站仓库可用且用户恢复交付时，按原 DEP-SP-DOCS 验收 | 用户先前明确暂搁；不伪称与本仓库文档一并完成 |
 | DEFER-SP-REL-01 | SP-01 独立 patch bump、发布构建/安装、tag/Release 及发布后置门；未执行 | 用户授权发布并协调资格修复占用的 v0.30.92 后，确定后续版本并执行原发布门 | 本次指令仅关闭修复卡、提交推送更新 PR；无发布成功证据 |
+| DEFER-SP-DOCS-02 | SP-02 网站 restore 文档同步、验证和部署；未执行 | 网站仓库可用且用户恢复交付时，按原 DEP-SP-DOCS 验收 | `/Volumes/Sea/libra-backend` 未挂载，用户明确批准按 DEFER-SP-DOCS-02 暂搁；不伪称与本仓库双语文档一并完成 |
+| DEFER-SP-REL-02 | SP-02 独立 patch bump、发布构建/安装、tag/Release 及发布后置门；未执行 | 用户授权发布时确定后续版本并执行原发布门 | 用户明确要求“首先设置任务完成，然后再提交、推送、创建 PR，版本不变”；无发布成功证据 |
 | DEFER-SP-01 | 会话级 pack 列表/句柄/fanout 缓存 | SP-09 仍显示 pack 打开/解析占显著成本，且缓存失效设计获接受，再建卡/Issue | 先验证整块读与二分收益；避免过早引入 repack/并发失效复杂性 |
 | DEFER-SP-02 | marker probe 与 read-dir 合并 | SP-09 证实 IPC 残余成本，且替换安全/嵌套仓库语义有可复现回归，再建卡/Issue | 两次 probe 时间边界不同，不能直接删出队检查 |
 | DEFER-SP-03 | tracked stat/hash 有界批处理 | SP-09 证实主要残余为该串行路径，并验证逐路径 deadline/取消/部分结果设计，再建卡/Issue | 上游重复工作减少后才有可靠收益判断 |
@@ -798,7 +807,7 @@ Phase 0 基线：SP-00；Phase 1 正确性与 stat：SP-01..03；Phase 2 核心�
 |---|---|---|---|---|---|---|---|---|
 | SP-00 | audit | 4/20 | 2/20 | 0/0 | S | 按依赖串行 | no-release | EX-SP-00-AUDIT-01 |
 | SP-01 | implementation | 4/8 | 2/8 | 3/4 | M | 按依赖串行 | independent | EX-SP-01-CLOSE-01 |
-| SP-02 | implementation | 5/8 | 3/8 | 4/5 | M | 按依赖串行 | independent | none |
+| SP-02 | implementation | 5/8 | 3/8 | 4/8 | M | 按依赖串行 | independent | EX-SP-02-CLOSE-01 |
 | SP-03 | implementation | 7/8 | 3/8 | 1/2 | M | 按依赖串行 | independent | none |
 | SP-04 | implementation | 4/8 | 2/8 | 2/4 | M | 按依赖串行 | independent | none |
 | SP-05 | implementation | 5/8 | 3/8 | 2/3 | M | 按依赖串行 | independent | none |
@@ -823,7 +832,7 @@ Phase 0 基线：SP-00；Phase 1 正确性与 stat：SP-01..03；Phase 2 核心�
 
 ### 基线与实施证据汇总
 
-实现卡仍全部 not-run；没有实施 PASS、独立审查 PASS、网站/发布/CI 完成证据。SP-00 已执行 release 构建与下述基线采样，`cargo +nightly fmt --all --check` 通过；该历史采样轮未运行 Clippy 和全量测试。Clippy 仍是推送前必跑门；全量测试按 audit 卡的 N/A 触发条件不在本卡执行，当前验收归属按 EX-SP-00-AUDIT-01 调整为本卡独立文档验收；历史登记 SP-01 已被该决策取代。
+SP-01 已按 EX-SP-01-CLOSE-01 / EX-SP-01-UPSTREAM-CI-01 合并收口（`e4eb85061af79b4deff37e569265f1c6b82787d4`，#640 CLOSED）；SP-02 已在本仓库完成代码、双语文档、单元/集成/守卫与 fmt/严格 Clippy 验证，并按用户指令登记 EX-SP-02-CLOSE-01（`done / complete`，版本 `0.30.101` 不变；网站与独立发版由 DEFER-SP-DOCS-02 / DEFER-SP-REL-02 跟踪，PR CI 随推送建 PR 触发后单独核验）；SP-03..09 仍为 pending / not-run。SP-00 已执行 release 构建与下述基线采样，`cargo +nightly fmt --all --check` 通过；该历史采样轮未运行 Clippy 和全量测试。Clippy 仍是推送前必跑门；全量测试按 audit 卡的 N/A 触发条件不在本卡执行，当前验收归属按 EX-SP-00-AUDIT-01 调整为本卡独立文档验收；历史登记 SP-01 已被该决策取代。
 
 #### SP-00 冻结协议与环境
 
@@ -935,3 +944,7 @@ DEP-SP-DATA 按用户指定采用公开标准仓库 [`libra-tools/libra@d0a5c28`
 | 2026-10-30 SP-01 修复卡完成 | 用户明确要求设置卡片完成、推送更新 PR。依据 EX-SP-01-CLOSE-01，本仓库修复、文档、18 个不同定向用例、fmt/Clippy，以及 bb88db3 的全量 CI/CodeQL 均通过；nextest 10841/10841 passed、13 slow、23 skipped，577.819s。 | SP-01 done/complete；网站和独立版本发布仍未执行，分别登记 DEFER-SP-DOCS-01 / DEFER-SP-REL-01。PR #655 仍 open，未合并；本次仅文档更新，不回写旧 head 运行结果、不声称新 head CI 已成功 |
 
 | 2026-10-30 SP-01 合并授权与上游问题移交 | 用户授权先建 Issue、再合并 #655 并完成卡片；已创建 #656，登记 EX-SP-01-UPSTREAM-CI-01。新基线全量失败 1 项、2 项 flaky 的事实保留，extraction.rs 基线/merge blob 一致及上游 Hermes 新分支证据已核。 | 本次仅文档记账，SP-01 done/complete；允许带该已知上游失败合并，#656 保持 open。合并 SHA/Issue #640 关闭结果以后续实际回执为准，不在提交前伪造；不新增版本发布或网站部署完成声明 |
+
+| 2026-10-30 03:00:58 UTC | 实核 SP-01 PR #655 已合并为 `e4eb85061af79b4deff37e569265f1c6b82787d4`（2026-10-30T01:23:41Z）、#640 已关闭（01:23:43Z）。用户选定并授权 SP-02（#641），确认：(1) 基于 main `e4eb850` 创建 `codex/SP-02`；(2) `/Volumes/Sea/libra-backend` 未挂载，网站文档按 DEFER-SP-DOCS-02 暂搁；(3) 本机 16 GiB 内存（`17179869184` bytes）低于 32 GiB 硬门槛，本机 nextest 记 not-run、交由 PR CI 执行；(4) 批准实现写集由 5 扩至 8 个生产文件（新增 `src/utils/storage/tiered.rs`、`src/utils/storage/load_cost/mod.rs`、`src/utils/storage/load_cost/loose.rs`，`landing/prod-files` 更新为 `4/8`，仍属 M 范围且与在跑计划无写集冲突）。先复现 RED：`restore_delta_index_size_matches_decoded_length_for_packed_deltas` 在修复前将 `peak_bytes`（`52952`）写入 `.libra/index` `size` 而非真实 decoded 长度（`26400`）。完成 `decoded_object_size(s)` 链路（loose/pack OFS+REF 多层 delta `result_size`、超限对象返回 `None` 交回 fallback、`LocalStorage` alternates、`TieredStorage` 仅本地层、`ClientStorage` 保持配置拒绝 fail-closed），`restore_index_tracked` 改用 `decoded_object_sizes` 并覆盖新增与已跟踪跨版本更新条目；保留 `object_size(s)`/`object_sizes_with_total_limit`/`get_with_limit` 的 `peak_bytes` 预览限额与 staged-only 零 stat 语义；同步 EN/zh-CN `restore.md`。验证：`cargo test --lib utils::storage::` 84/84、`storage_config_hold` 11/11（1 ignored）、`command::restore::tests::` 9/9、`restore_test::` 50/50、新增 `restore_delta_index_size_` 4/4、`compat_serial_registry` 26/26、两项生产 unwrap 守卫各 1/1，`cargo +nightly fmt --all --check` 与 `cargo clippy --all-targets --all-features -- -D warnings` 均 exit 0（依赖 `block v0.1.6` future-incompat 提示保留）。 | SP-02 登记 `in-progress / 空`；本仓库实现、测试、双语文档与静态门已完成，尚未提交/推送/建 PR，远端 CI、DEFER-SP-DOCS-02 网站交付及独立 patch 发布门仍待 |
+
+| 2026-10-30 03:06:14 UTC | 用户明确授权并指示“首先设置任务完成，然后再提交、推送、创建 PR，版本不变”。按用户决策登记具名本卡例外 `EX-SP-02-CLOSE-01` 与独立发版延期项 `DEFER-SP-REL-02`，将 SP-02 置为 `done / complete`，保持 `Cargo.toml` 版本 `0.30.101` 不变；准备精确暂存 13 个本卡文件、PGP+DCO 签名提交、推送 `origin/codex/SP-02` 并创建上游 PR。 | SP-02 `done / complete`（`EX-SP-02-CLOSE-01`）；网站与独立版本发布分别由 `DEFER-SP-DOCS-02` / `DEFER-SP-REL-02` 跟踪（未执行）；PR CI 在推送建 PR 后触发，不在提交前伪称远端通过，Issue #641 由 PR/后续核验闭环 |

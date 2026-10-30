@@ -1824,6 +1824,33 @@ impl LocalStorage {
         Ok(sizes)
     }
 
+    fn decoded_object_sizes_here(
+        &self,
+        hashes: &[ObjectHash],
+    ) -> Result<Vec<Option<u64>>, GitError> {
+        let mut sizes = vec![None; hashes.len()];
+        let mut packed_hashes = Vec::new();
+        let mut packed_positions = Vec::new();
+        for (position, hash) in hashes.iter().enumerate() {
+            let loose = self.get_obj_path(hash);
+            if loose.exists() {
+                sizes[position] = super::load_cost::loose_decoded_size(&loose)?;
+            } else {
+                packed_hashes.push(*hash);
+                packed_positions.push(position);
+            }
+        }
+        if !packed_hashes.is_empty() {
+            // Read-only sizing must not rebuild a missing/incompatible index.
+            let pack_dir = self.base_path.join("pack");
+            let packed = super::load_cost::pack_decoded_sizes(&pack_dir, &packed_hashes)?;
+            for (position, size) in packed_positions.into_iter().zip(packed) {
+                sizes[position] = size;
+            }
+        }
+        Ok(sizes)
+    }
+
     fn read_pack_by_idx(
         idx_file: &Path,
         obj_id: &ObjectHash,
@@ -2226,6 +2253,62 @@ impl Storage for LocalStorage {
                                 )
                             })?;
                         sizes[position] = Some(found);
+                    }
+                }
+            }
+            Ok(sizes)
+        })
+        .await
+        .map_err(|error| GitError::IOError(io::Error::other(error)))?
+    }
+
+    async fn decoded_object_size(&self, hash: &ObjectHash) -> Result<Option<u64>, GitError> {
+        let self_clone = self.clone();
+        let hash = *hash;
+        tokio::task::spawn_blocking(move || {
+            if let Some(kind) = self_clone.hash_kind {
+                set_hash_kind(kind);
+            }
+            let mut size = self_clone.decoded_object_sizes_here(&[hash])?[0];
+            for alternate in &self_clone.alternates {
+                if size.is_none() {
+                    size = alternate.decoded_object_sizes_here(&[hash])?[0];
+                }
+            }
+            Ok(size)
+        })
+        .await
+        .map_err(|error| GitError::IOError(io::Error::other(error)))?
+    }
+
+    async fn decoded_object_sizes(
+        &self,
+        hashes: &[ObjectHash],
+    ) -> Result<Vec<Option<u64>>, GitError> {
+        let self_clone = self.clone();
+        let hashes = hashes.to_vec();
+        tokio::task::spawn_blocking(move || {
+            if let Some(kind) = self_clone.hash_kind {
+                set_hash_kind(kind);
+            }
+            let mut sizes = self_clone.decoded_object_sizes_here(&hashes)?;
+            for alternate in &self_clone.alternates {
+                let missing_positions: Vec<_> = sizes
+                    .iter()
+                    .enumerate()
+                    .filter_map(|(position, size)| size.is_none().then_some(position))
+                    .collect();
+                if missing_positions.is_empty() {
+                    break;
+                }
+                let missing_hashes: Vec<_> = missing_positions
+                    .iter()
+                    .map(|position| hashes[*position])
+                    .collect();
+                let alternate_sizes = alternate.decoded_object_sizes_here(&missing_hashes)?;
+                for (position, found) in missing_positions.into_iter().zip(alternate_sizes) {
+                    if found.is_some() {
+                        sizes[position] = found;
                     }
                 }
             }
@@ -3473,5 +3556,89 @@ mod tests {
             .await
             .expect_err("borrowed object contents must match requested OID");
         assert!(error.to_string().contains(&object.to_string()), "{error}");
+    }
+
+    #[tokio::test]
+    async fn decoded_object_sizes_separates_decoded_length_from_delta_load_cost() {
+        let _kind = git_internal::hash::set_hash_kind_for_test(HashKind::Sha1);
+        let primary_dir = tempfile::tempdir().expect("create primary object directory");
+        let alternate_dir = tempfile::tempdir().expect("create alternate object directory");
+
+        let pack_dir = primary_dir.path().join("pack");
+        fs::create_dir(&pack_dir).expect("create pack directory");
+        let pack = pack_dir.join("ofs-delta-sha1.pack");
+        let idx = pack.with_extension("idx");
+        let fixture =
+            Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/data/packs/ofs-delta-sha1.pack");
+        fs::copy(&fixture, &pack).expect("copy fixture pack");
+        command::index_pack::build_index_v1(
+            pack.to_str().expect("UTF-8 pack path"),
+            idx.to_str().expect("UTF-8 idx path"),
+        )
+        .expect("build v1 index");
+
+        let alternate = LocalStorage::new(alternate_dir.path().to_path_buf());
+        let borrowed_payload = b"borrowed from alternate store";
+        let borrowed = ObjectHash::from_type_and_data(ObjectType::Blob, borrowed_payload);
+        alternate
+            .put(&borrowed, borrowed_payload, ObjectType::Blob)
+            .await
+            .expect("store alternate blob");
+
+        let mut primary = LocalStorage::new(primary_dir.path().to_path_buf());
+        primary.hash_kind = Some(HashKind::Sha1);
+        primary.alternates.push(Arc::new(alternate));
+
+        let loose_payload = b"primary loose payload";
+        let loose = ObjectHash::from_type_and_data(ObjectType::Blob, loose_payload);
+        primary
+            .put(&loose, loose_payload, ObjectType::Blob)
+            .await
+            .expect("store loose blob");
+
+        let ofs_delta = crate::internal::object_format::parse_repo_oid(
+            "1b59abc09609574e73330d56815f04ebb4d9bd72",
+        )
+        .expect("parse OFS_DELTA OID");
+        let missing = ObjectHash::Sha1([0xee; 20]);
+
+        let decoded = primary
+            .decoded_object_sizes(&[loose, ofs_delta, borrowed, missing])
+            .await
+            .expect("query decoded object sizes");
+        assert_eq!(
+            decoded,
+            vec![
+                Some(loose_payload.len() as u64),
+                Some(10_400),
+                Some(borrowed_payload.len() as u64),
+                None,
+            ]
+        );
+        assert_eq!(
+            primary
+                .decoded_object_size(&ofs_delta)
+                .await
+                .expect("single decoded size"),
+            Some(10_400)
+        );
+
+        let load_cost = primary
+            .object_size(&ofs_delta)
+            .await
+            .expect("query conservative load cost")
+            .expect("OFS_DELTA load cost");
+        assert!(
+            load_cost > 10_400,
+            "object_size must remain the conservative delta reconstruction budget: {load_cost}"
+        );
+        let over_budget = primary
+            .get_with_limit(&ofs_delta, 10_400)
+            .await
+            .expect_err("preview limit equal to decoded size must still reject delta peak_bytes");
+        assert!(
+            over_budget.to_string().contains("exceeds preview limit"),
+            "{over_budget}"
+        );
     }
 }

@@ -1574,3 +1574,261 @@ fn test_restore_staged_removes_intent_to_add_entry() {
         "file is untracked again: {status}"
     );
 }
+
+// ── SP-02 / issue #641: restore index size is the decoded blob length ──
+
+/// Deterministic, poorly compressible text so a full (non-delta) pack entry is
+/// far larger than a delta against a neighbouring version.
+fn restore_delta_fixture_lines() -> Vec<String> {
+    let mut state: u64 = 0x5eed_0641;
+    (0..600)
+        .map(|index| {
+            state = state
+                .wrapping_mul(6_364_136_223_846_793_005)
+                .wrapping_add(1_442_695_040_888_963_407);
+            format!(
+                "line {index:04} {state:016x} {:016x}",
+                state.rotate_left(17)
+            )
+        })
+        .collect()
+}
+
+struct RestoreDeltaFixture {
+    repo: tempfile::TempDir,
+    /// `(commit id, blob id, blob bytes)` for every committed version of `big.txt`.
+    versions: Vec<(String, String, Vec<u8>)>,
+}
+
+/// Commit four versions of `big.txt`, each one line away from the previous,
+/// then repack everything so the older versions are stored as packed deltas.
+fn create_restore_delta_fixture() -> RestoreDeltaFixture {
+    let repo = create_committed_repo_via_cli();
+    let root = repo.path();
+    let mut lines = restore_delta_fixture_lines();
+    let mut versions = Vec::new();
+    for version in 0..4 {
+        if version > 0 {
+            lines.insert(version * 120, format!("inserted in version {version}"));
+        }
+        let content = format!("{}\n", lines.join("\n")).into_bytes();
+        fs::write(root.join("big.txt"), &content).expect("write big.txt version");
+        assert_cli_success(
+            &run_libra_command(&["add", "big.txt"], root),
+            "add big.txt version",
+        );
+        assert_cli_success(
+            &run_libra_command(
+                &["commit", "-m", &format!("big v{version}"), "--no-verify"],
+                root,
+            ),
+            "commit big.txt version",
+        );
+        let commit = libra_stdout(&["rev-parse", "HEAD"], root)
+            .trim()
+            .to_string();
+        let blob = libra_stdout(&["hash-object", "big.txt"], root)
+            .trim()
+            .to_string();
+        versions.push((commit, blob, content));
+    }
+    assert_cli_success(
+        &run_libra_command(&["repack", "-a", "-d"], root),
+        "repack -a -d",
+    );
+    RestoreDeltaFixture { repo, versions }
+}
+
+/// Blob ids that `verify-pack -v` reports with an in-pack size far below their
+/// decoded size, i.e. objects that can only be stored as deltas.
+fn delta_stored_blobs(repo: &Path) -> Vec<String> {
+    let pack_dir = repo.join(".libra/objects/pack");
+    let mut delta_blobs = Vec::new();
+    for entry in fs::read_dir(&pack_dir).expect("read pack directory") {
+        let path = entry.expect("read pack entry").path();
+        if path.extension().is_none_or(|extension| extension != "idx") {
+            continue;
+        }
+        let listing = libra_stdout(
+            &["verify-pack", "-v", path.to_str().expect("UTF-8 idx path")],
+            repo,
+        );
+        for line in listing.lines() {
+            let fields: Vec<&str> = line.split_whitespace().collect();
+            if let [oid, "blob", size, in_pack, ..] = fields.as_slice()
+                && let (Ok(size), Ok(in_pack)) = (size.parse::<u64>(), in_pack.parse::<u64>())
+                && size >= 4_096
+                && in_pack * 8 < size
+            {
+                delta_blobs.push((*oid).to_string());
+            }
+        }
+    }
+    delta_blobs
+}
+
+#[test]
+fn restore_delta_index_size_matches_decoded_length_for_packed_deltas() {
+    let fixture = create_restore_delta_fixture();
+    let root = fixture.repo.path();
+    let delta_blobs = delta_stored_blobs(root);
+    let delta_versions = fixture
+        .versions
+        .iter()
+        .filter(|(_, blob, _)| delta_blobs.contains(blob))
+        .count();
+    assert!(
+        delta_versions >= 2,
+        "fixture must store at least two big.txt versions as packed deltas: {delta_blobs:?}"
+    );
+
+    for (commit, blob, content) in &fixture.versions {
+        assert_cli_success(
+            &run_libra_command(&["rm", "-f", "--cached", "big.txt"], root),
+            "unstage big.txt",
+        );
+        assert!(index_entry_snapshot(root, "big.txt").is_none());
+        assert_cli_success(
+            &run_libra_command(
+                &["restore", "--staged", "--source", commit, "big.txt"],
+                root,
+            ),
+            "restore --staged --source <version> from unstaged",
+        );
+        let (_, hash, size, _, _) =
+            index_entry_snapshot(root, "big.txt").expect("restored index entry");
+        assert_eq!(&hash, blob, "restored entry must point at the source blob");
+        assert_eq!(
+            u64::from(size),
+            content.len() as u64,
+            "index size for {blob} must be the decoded blob length, not its load cost"
+        );
+    }
+
+    // Also verify overwriting an already-tracked index entry across versions.
+    for (commit, blob, content) in &fixture.versions {
+        assert_cli_success(
+            &run_libra_command(
+                &["restore", "--staged", "--source", commit, "big.txt"],
+                root,
+            ),
+            "restore --staged --source <version> overwriting tracked entry",
+        );
+        let (_, hash, size, _, _) =
+            index_entry_snapshot(root, "big.txt").expect("updated index entry");
+        assert_eq!(&hash, blob, "updated entry must point at the source blob");
+        assert_eq!(
+            u64::from(size),
+            content.len() as u64,
+            "updated index size for {blob} must be the decoded blob length"
+        );
+    }
+}
+
+#[test]
+fn restore_delta_index_size_staged_only_does_not_copy_worktree_stat() {
+    let fixture = create_restore_delta_fixture();
+    let root = fixture.repo.path();
+    let (_, head_blob, head_content) = fixture.versions.last().expect("HEAD version");
+
+    fs::write(root.join("big.txt"), "worktree edit\n").expect("edit worktree copy");
+    assert_cli_success(
+        &run_libra_command(&["rm", "--cached", "big.txt"], root),
+        "unstage big.txt",
+    );
+    assert_cli_success(
+        &run_libra_command(&["restore", "--staged", "big.txt"], root),
+        "restore --staged",
+    );
+
+    use git_internal::{hash::HashKind, internal::index::Index};
+    let index =
+        Index::load_with_hash_kind(HashKind::Sha1, root.join(".libra/index")).expect("load index");
+    let entry = index.get("big.txt", 0).expect("restored index entry");
+    assert_eq!(&entry.hash.to_string(), head_blob);
+    assert_eq!(u64::from(entry.size), head_content.len() as u64);
+    assert_eq!(
+        (entry.ctime.to_string(), entry.mtime.to_string(), entry.ino),
+        ("0:0".to_string(), "0:0".to_string(), 0),
+        "a staged-only restore must not borrow worktree stat data"
+    );
+    assert_eq!(
+        fs::read(root.join("big.txt")).expect("read worktree"),
+        b"worktree edit\n",
+        "restore --staged must not touch the worktree copy"
+    );
+
+    let status = libra_stdout(&["status", "--porcelain"], root);
+    assert!(
+        status.lines().any(|line| line == " M big.txt"),
+        "the worktree edit must stay visible as unstaged, not clean: {status:?}"
+    );
+}
+
+#[test]
+fn restore_delta_index_size_unreadable_object_keeps_read_error() {
+    let repo = create_committed_repo_via_cli();
+    let root = repo.path();
+    fs::write(root.join("fresh.txt"), "fresh content\n").expect("write fresh file");
+    assert_cli_success(&run_libra_command(&["add", "fresh.txt"], root), "add fresh");
+    assert_cli_success(
+        &run_libra_command(&["commit", "-m", "fresh", "--no-verify"], root),
+        "commit fresh",
+    );
+    let blob = libra_stdout(&["hash-object", "fresh.txt"], root)
+        .trim()
+        .to_string();
+    assert_cli_success(
+        &run_libra_command(&["rm", "--cached", "fresh.txt"], root),
+        "unstage fresh.txt",
+    );
+    let loose = loose_object_path(root, &blob);
+    let bytes = fs::read(&loose).expect("read loose blob");
+    fs::write(&loose, &bytes[..bytes.len() / 2]).expect("truncate loose blob");
+    let output = run_libra_command(&["restore", "--staged", "fresh.txt"], root);
+    assert_eq!(output.status.code(), Some(128), "{output:?}");
+    let (_, report) = parse_cli_error_stderr(&output.stderr);
+    assert_eq!(report.error_code, "LBR-IO-001");
+    assert!(
+        index_entry_snapshot(root, "fresh.txt").is_none(),
+        "a failed size lookup must not author a partial index entry"
+    );
+}
+
+#[test]
+fn restore_delta_index_size_matches_decoded_length_for_ofs_delta_pack() {
+    let repo = create_committed_repo_via_cli();
+    let root = repo.path();
+    let pack_dir = root.join(".libra/objects/pack");
+    fs::create_dir_all(&pack_dir).expect("create pack directory");
+    let pack = pack_dir.join("ofs-delta-sha1.pack");
+    let fixture =
+        Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/data/packs/ofs-delta-sha1.pack");
+    fs::copy(&fixture, &pack).expect("copy OFS_DELTA pack fixture");
+    assert_cli_success(
+        &run_libra_command(
+            &["index-pack", pack.to_str().expect("UTF-8 pack path")],
+            root,
+        ),
+        "index OFS_DELTA pack fixture",
+    );
+
+    // Commit bc41b62e… in `ofs-delta-sha1.pack` stores `f.txt` as OFS_DELTA
+    // blob `1b59abc0…` (decoded length 10_400; reconstruction load cost > 20_800).
+    let ofs_commit = "bc41b62edad92301f84fe19ec18a3ccc5f1eb147";
+    let ofs_blob = "1b59abc09609574e73330d56815f04ebb4d9bd72";
+    assert_cli_success(
+        &run_libra_command(
+            &["restore", "--staged", "--source", ofs_commit, "f.txt"],
+            root,
+        ),
+        "restore --staged from OFS_DELTA commit",
+    );
+    let (_, hash, size, _, _) =
+        index_entry_snapshot(root, "f.txt").expect("restored OFS_DELTA index entry");
+    assert_eq!(hash, ofs_blob);
+    assert_eq!(
+        size, 10_400,
+        "OFS_DELTA index size must be the decoded blob length, not peak_bytes"
+    );
+}

@@ -1,7 +1,7 @@
 //! plan-20260713 M4 historical transcript import contract.
 
 use std::{
-    collections::BTreeMap,
+    collections::{BTreeMap, BTreeSet},
     io::{Read, Write},
     path::{Path, PathBuf},
     process::{Command, Output, Stdio},
@@ -6389,4 +6389,738 @@ fn pi_attribution_reports_what_it_cannot_place() {
             "{error:#}"
         );
     }
+}
+
+// ---- PI-03: Pi v3 tree, disk leaf, and active-branch turns ----
+
+/// A synthetic Pi v3 session file. Entry shapes follow the pinned source
+/// (`session-manager.ts:43-194`, Pi `v1.4.0` `4a08025`); no real session
+/// is read.
+struct PiV3File {
+    lines: Vec<String>,
+}
+
+impl PiV3File {
+    fn new() -> Self {
+        Self::with_header(json!({
+            "type": "session",
+            "version": 3,
+            "id": "019a3c2e-7b10-7000-8000-0000000000aa",
+            "timestamp": "2026-10-31T00:00:00.000Z",
+            "cwd": "/work",
+        }))
+    }
+
+    fn with_header(header: Value) -> Self {
+        Self {
+            lines: vec![header.to_string()],
+        }
+    }
+
+    fn raw(mut self, line: &str) -> Self {
+        self.lines.push(line.to_string());
+        self
+    }
+
+    /// Append an entry of `kind` with `id` and `parent`, plus `extra` fields.
+    fn entry(mut self, kind: &str, id: &str, parent: Option<&str>, extra: Value) -> Self {
+        let mut entry = json!({
+            "type": kind,
+            "id": id,
+            "parentId": parent,
+            "timestamp": "2026-10-31T00:00:01.000Z",
+        });
+        if let (Some(entry), Value::Object(extra)) = (entry.as_object_mut(), extra) {
+            entry.extend(extra);
+        }
+        self.lines.push(entry.to_string());
+        self
+    }
+
+    fn message(self, id: &str, parent: Option<&str>, role: &str) -> Self {
+        self.entry(
+            "message",
+            id,
+            parent,
+            json!({"message": {"role": role, "content": [{"type": "text", "text": "hidden"}]}}),
+        )
+    }
+
+    fn bytes(&self) -> Vec<u8> {
+        format!("{}\n", self.lines.join("\n")).into_bytes()
+    }
+}
+
+fn pi_normalize(
+    file: &PiV3File,
+) -> Result<
+    libra::internal::ai::observed_agents::builtin::pi::PiActiveBranch,
+    libra::internal::ai::observed_agents::builtin::pi::PiNormalizeRefusal,
+> {
+    libra::internal::ai::observed_agents::builtin::pi::normalize_pi_session(
+        &file.bytes(),
+        Default::default(),
+    )
+}
+
+fn pi_branch_ids(
+    branch: &libra::internal::ai::observed_agents::builtin::pi::PiActiveBranch,
+) -> Vec<&str> {
+    branch
+        .entries
+        .iter()
+        .map(|entry| entry.id.as_str())
+        .collect()
+}
+
+/// PI-03 AC1: only a header with `version` 3 is read; v1 (no version), v2,
+/// a non-integer, and a newer version are refused, as is a file whose
+/// first parsed line is not a session header.
+#[test]
+fn pi_v3_reads_only_version_3() {
+    use libra::internal::ai::observed_agents::builtin::pi::PiNormalizeRefusal;
+
+    let header = |version: Option<Value>| {
+        let mut header = json!({"type": "session", "id": "s1", "cwd": "/work"});
+        if let Some(version) = version {
+            header["version"] = version;
+        }
+        PiV3File::with_header(header).message("u1", None, "user")
+    };
+    let read = pi_normalize(&header(Some(json!(3)))).expect("v3 is read");
+    assert_eq!(read.session_id, "s1");
+    assert_eq!(pi_branch_ids(&read), vec!["u1"]);
+    for version in [
+        None,
+        Some(json!(1)),
+        Some(json!(2)),
+        Some(json!(4)),
+        Some(json!("3")),
+        Some(json!(3.5)),
+        Some(Value::Null),
+    ] {
+        assert_eq!(
+            pi_normalize(&header(version.clone())),
+            Err(PiNormalizeRefusal::UnsupportedVersion),
+            "{version:?}"
+        );
+    }
+    for first in [
+        json!({"type": "message", "id": "m1", "parentId": null}),
+        json!({"type": "session", "version": 3}),
+        json!(["session"]),
+    ] {
+        assert_eq!(
+            pi_normalize(&PiV3File::with_header(first.clone()).message("u1", None, "user")),
+            Err(PiNormalizeRefusal::NotASession),
+            "{first}"
+        );
+    }
+    assert_eq!(
+        libra::internal::ai::observed_agents::builtin::pi::normalize_pi_session(
+            b"\n\n",
+            Default::default()
+        ),
+        Err(PiNormalizeRefusal::NotASession)
+    );
+    // Pi skips an unparseable line before the header; so does the reader,
+    // and the result is partial.
+    let mut torn_first = PiV3File::new().message("u1", None, "user");
+    torn_first.lines.insert(0, "{\"type\":\"sess".to_string());
+    torn_first.lines.insert(0, "null".to_string());
+    let read = pi_normalize(&torn_first).expect("header after a torn line");
+    assert!(read.partial());
+    assert_eq!(pi_branch_ids(&read), vec!["u1"]);
+    // A header line with repeated keys keeps each key's last value, as
+    // `JSON.parse` does, and is partial; a last `version` that is not the
+    // integer 3 is refused.
+    let repeated = PiV3File {
+        lines: vec![
+            r#"{"type":"session","version":2,"version":3,"id":"old","id":"s9","cwd":"/work"}"#
+                .to_string(),
+        ],
+    }
+    .message("u1", None, "user");
+    let read = pi_normalize(&repeated).expect("repeated-key header");
+    assert_eq!(read.session_id, "s9");
+    assert_eq!(
+        read.partial_reasons,
+        BTreeSet::from([
+            libra::internal::ai::observed_agents::builtin::pi::PiBranchPartialReason::DuplicateKey
+        ])
+    );
+    let last_version_text = PiV3File {
+        lines: vec![
+            r#"{"type":"session","version":3,"version":"3","id":"s1","cwd":"/work"}"#.to_string(),
+        ],
+    }
+    .message("u1", None, "user");
+    assert_eq!(
+        pi_normalize(&last_version_text),
+        Err(PiNormalizeRefusal::UnsupportedVersion)
+    );
+}
+
+/// PI-03 AC2: every entry type in the PI-20 frozen table and every message
+/// role in the PI-21 table reads whole; a type or role outside them (or
+/// none), a line Pi's loader skips, a repeated key, or a second header makes
+/// the result partial.
+#[test]
+fn pi_v3_marks_unlisted_entry_types_partial() {
+    use libra::internal::ai::observed_agents::builtin::pi::PiBranchPartialReason;
+
+    let listed = PiV3File::new()
+        .message("sys", None, "system")
+        .entry(
+            "model_change",
+            "mc",
+            Some("sys"),
+            json!({"provider": "p", "modelId": "m"}),
+        )
+        .entry(
+            "thinking_level_change",
+            "tl",
+            Some("mc"),
+            json!({"thinkingLevel": "high"}),
+        )
+        .message("u1", Some("tl"), "user")
+        .message("a1", Some("u1"), "assistant")
+        .message("t1", Some("a1"), "toolResult")
+        .message("b1", Some("t1"), "bashExecution")
+        .entry(
+            "custom_message",
+            "cm",
+            Some("b1"),
+            json!({"customType": "x", "content": "c", "display": true}),
+        )
+        .entry(
+            "custom",
+            "cu",
+            Some("cm"),
+            json!({"customType": "x", "data": {}}),
+        )
+        .entry(
+            "usage",
+            "us",
+            Some("cu"),
+            json!({"kind": "anything", "provider": "p", "model": "m", "usage": {}}),
+        )
+        .entry(
+            "context_edit",
+            "ce",
+            Some("us"),
+            json!({"targetId": "a1", "replacement": null}),
+        )
+        .entry(
+            "branch_summary",
+            "bs",
+            Some("ce"),
+            json!({"fromId": "u1", "summary": "s"}),
+        )
+        .entry(
+            "label",
+            "lb",
+            Some("bs"),
+            json!({"targetId": "u1", "label": "l"}),
+        )
+        .entry("session_info", "si", Some("lb"), json!({"name": "n"}))
+        .entry(
+            "compaction",
+            "co",
+            Some("si"),
+            json!({"summary": "s", "firstKeptEntryId": "u1", "tokensBefore": 1}),
+        );
+    let whole = pi_normalize(&listed).expect("listed types");
+    assert!(!whole.partial(), "{:?}", whole.partial_reasons);
+    assert_eq!(whole.entries.len(), 15);
+
+    for (file, reason) in [
+        (
+            PiV3File::new().message("u1", None, "user").entry(
+                "future_entry",
+                "f1",
+                Some("u1"),
+                json!({}),
+            ),
+            PiBranchPartialReason::UnknownEntryType,
+        ),
+        (
+            PiV3File::new()
+                .message("u1", None, "user")
+                .message("c1", Some("u1"), "custom"),
+            PiBranchPartialReason::UnknownMessageRole,
+        ),
+        (
+            PiV3File::new().message("u1", None, "user").entry(
+                "message",
+                "c2",
+                Some("u1"),
+                json!({"message": {}}),
+            ),
+            PiBranchPartialReason::UnknownMessageRole,
+        ),
+        (
+            PiV3File::new()
+                .message("u1", None, "user")
+                .raw("{\"type\":\"message\",\"id\":\"torn\""),
+            PiBranchPartialReason::MalformedLine,
+        ),
+        (
+            PiV3File::new()
+                .message("u1", None, "user")
+                .raw(r#"{"id":"x1","parentId":"u1"}"#),
+            PiBranchPartialReason::UnknownEntryType,
+        ),
+        (
+            PiV3File::new()
+                .message("u1", None, "user")
+                .raw(r#"{"type":"label","id":"l1","parentId":"u1","label":"a","label":"b"}"#),
+            PiBranchPartialReason::DuplicateKey,
+        ),
+        (
+            PiV3File::new()
+                .message("u1", None, "user")
+                .raw("null")
+                .raw("0")
+                .raw("false")
+                .raw("\"\""),
+            PiBranchPartialReason::MalformedLine,
+        ),
+        (
+            PiV3File::new()
+                .message("u1", None, "user")
+                .raw(r#"{"type":"session","version":3,"id":"again","cwd":"/work"}"#),
+            PiBranchPartialReason::ExtraHeader,
+        ),
+    ] {
+        let branch = pi_normalize(&file).expect("partial, not refused");
+        assert_eq!(
+            branch.partial_reasons,
+            BTreeSet::from([reason]),
+            "{:?}",
+            file.lines
+        );
+    }
+}
+
+/// PI-03 AC3: the disk leaf is Pi's: the last entry `_buildIndex` indexes
+/// in file order (`session-manager.ts:1103-1121`) after the loader drops
+/// lines `JSON.parse` rejects and falsy values (`:616-648`), and the branch
+/// is the walk from it to its root (`getBranch`, `:1469-1479`). An
+/// independent oracle reads each fixture with that algorithm, including a
+/// trailing torn line, an entry without a `type`, and a repeated key. An
+/// entry whose place in Pi's tree cannot be reproduced refuses the file
+/// instead of yielding an earlier leaf.
+#[test]
+fn pi_v3_recovers_the_disk_leaf() {
+    use libra::internal::ai::observed_agents::builtin::pi::PiNormalizeRefusal;
+
+    /// The pinned recovery algorithm (`JSON.parse` keeps a repeated key's
+    /// last value, as `serde_json::Value` does).
+    fn oracle(file: &PiV3File) -> (Option<String>, Vec<String>) {
+        let entries: Vec<Value> = file.lines[1..]
+            .iter()
+            .filter_map(|line| serde_json::from_str::<Value>(line).ok())
+            .filter(|entry| {
+                !matches!(entry, Value::Null | Value::Bool(false))
+                    && entry.as_f64() != Some(0.0)
+                    && entry.as_str() != Some("")
+            })
+            .filter(|entry| entry["type"] != "session")
+            .collect();
+        let leaf = entries
+            .last()
+            .map(|entry| entry["id"].as_str().expect("id").to_string());
+        let mut path = Vec::new();
+        let mut current = leaf.clone();
+        while let Some(id) = current {
+            let entry = entries
+                .iter()
+                .find(|entry| entry["id"] == id.as_str())
+                .expect("entry");
+            path.push(id);
+            current = entry["parentId"].as_str().map(str::to_string);
+        }
+        path.reverse();
+        (leaf, path)
+    }
+
+    let base = || {
+        PiV3File::new()
+            .message("u1", None, "user")
+            .message("a1", Some("u1"), "assistant")
+            .message("u2", Some("a1"), "user")
+            .message("a2", Some("u2"), "assistant")
+    };
+    let fixtures = [
+        base(),
+        // A branch back to `a1`, appended after the abandoned `u2`/`a2`.
+        base()
+            .message("u3", Some("a1"), "user")
+            .message("a3", Some("u3"), "assistant"),
+        // A label appended last becomes the leaf.
+        base().entry(
+            "label",
+            "l1",
+            Some("a2"),
+            json!({"targetId": "u1", "label": "x"}),
+        ),
+        // A new root appended last leaves the old tree off the branch.
+        base().message("r1", None, "user"),
+        // Only a header.
+        PiV3File::new(),
+        // A torn last line is dropped by the loader: the leaf is before it.
+        base().raw(r#"{"type":"message","id":"torn","parentId":"a2""#),
+        // An entry without a `type` is still indexed and is the leaf.
+        base().raw(r#"{"id":"untyped","parentId":"a1"}"#),
+        // A repeated key keeps its last value, so the leaf is `last`, a
+        // child of `u2`; falsy lines are dropped.
+        base()
+            .raw("null")
+            .raw(r#"{"type":"label","id":"first","id":"last","parentId":"a2","parentId":"u2"}"#),
+        // A second header is not indexed.
+        base().raw(r#"{"type":"session","version":3,"id":"again","cwd":"/work"}"#),
+    ];
+    for file in &fixtures {
+        let branch = pi_normalize(file).expect("normalize");
+        let (leaf, path) = oracle(file);
+        assert_eq!(branch.leaf_id, leaf, "{:?}", file.lines);
+        assert_eq!(
+            branch
+                .entries
+                .iter()
+                .map(|entry| entry.id.clone())
+                .collect::<Vec<_>>(),
+            path,
+            "{:?}",
+            file.lines
+        );
+    }
+    assert_eq!(
+        pi_normalize(&fixtures[6])
+            .expect("normalize")
+            .leaf_id
+            .as_deref(),
+        Some("untyped")
+    );
+    assert_eq!(
+        pi_branch_ids(&pi_normalize(&fixtures[7]).expect("normalize")),
+        vec!["u1", "a1", "u2", "last"]
+    );
+    let branched = pi_normalize(&fixtures[1]).expect("normalize");
+    assert_eq!(pi_branch_ids(&branched), vec!["u1", "a1", "u3", "a3"]);
+    assert_eq!(branched.off_branch_entries, 2);
+    // Lines point back at each entry's line in the file (header is line 1).
+    assert_eq!(
+        branched
+            .entries
+            .iter()
+            .map(|entry| entry.line)
+            .collect::<Vec<_>>(),
+        vec![2, 3, 6, 7]
+    );
+
+    for line in [
+        r#"{"type":"label","parentId":"a2"}"#,
+        r#"{"type":"label","id":7,"parentId":"a2"}"#,
+        r#"{"type":"label","id":"","parentId":"a2"}"#,
+        r#"{"type":"label","id":"x","parentId":7}"#,
+        r#"{"type":"label","id":"x","parentId":""}"#,
+        r#"{"type":"label","id":"x","parentId":false}"#,
+        "5",
+        "\"text\"",
+        "[1]",
+        "true",
+    ] {
+        assert_eq!(
+            pi_normalize(&base().raw(line)),
+            Err(PiNormalizeRefusal::UnrepresentableEntry),
+            "{line}"
+        );
+    }
+}
+
+/// PI-03 AC4: two entries with one `id` refuse the file, on or off the
+/// branch, including an `id` a repeated key sets.
+#[test]
+fn pi_v3_refuses_duplicate_entry_ids() {
+    use libra::internal::ai::observed_agents::builtin::pi::PiNormalizeRefusal;
+
+    for file in [
+        PiV3File::new()
+            .message("u1", None, "user")
+            .message("u1", Some("u1"), "assistant"),
+        PiV3File::new()
+            .message("u1", None, "user")
+            .message("x", Some("u1"), "assistant")
+            .message("x", Some("u1"), "assistant")
+            .message("u2", Some("u1"), "user"),
+        // A repeated `id` key whose last value repeats another entry's id.
+        PiV3File::new()
+            .message("u1", None, "user")
+            .raw(r#"{"type":"label","id":"fresh","id":"u1","parentId":null}"#),
+    ] {
+        assert_eq!(
+            pi_normalize(&file),
+            Err(PiNormalizeRefusal::DuplicateEntryId),
+            "{:?}",
+            file.lines
+        );
+    }
+}
+
+/// PI-03 AC5: a `parentId` that names no entry refuses the file, on or off
+/// the branch, including one that names a skipped malformed line.
+#[test]
+fn pi_v3_refuses_a_missing_parent() {
+    use libra::internal::ai::observed_agents::builtin::pi::PiNormalizeRefusal;
+
+    for file in [
+        PiV3File::new()
+            .message("u1", None, "user")
+            .message("a1", Some("ghost"), "assistant"),
+        PiV3File::new()
+            .message("u1", None, "user")
+            .message("x", Some("ghost"), "assistant")
+            .message("a1", Some("u1"), "assistant"),
+        PiV3File::new()
+            .message("u1", None, "user")
+            .raw(r#"{"type":"message","id":"torn","parentId":"u1""#)
+            .message("a1", Some("torn"), "assistant"),
+    ] {
+        assert_eq!(
+            pi_normalize(&file),
+            Err(PiNormalizeRefusal::MissingParent),
+            "{:?}",
+            file.lines
+        );
+    }
+}
+
+/// PI-03 AC6: a parent cycle refuses the file, whether it is reachable from
+/// the leaf, a self-parent, or off the branch.
+#[test]
+fn pi_v3_refuses_a_parent_cycle() {
+    use libra::internal::ai::observed_agents::builtin::pi::PiNormalizeRefusal;
+
+    for file in [
+        PiV3File::new()
+            .message("a", Some("b"), "user")
+            .message("b", Some("a"), "assistant"),
+        PiV3File::new().message("self", Some("self"), "user"),
+        PiV3File::new()
+            .message("x", Some("z"), "user")
+            .message("y", Some("x"), "assistant")
+            .message("z", Some("y"), "user")
+            .message("u1", None, "user"),
+    ] {
+        assert_eq!(
+            pi_normalize(&file),
+            Err(PiNormalizeRefusal::Cycle),
+            "{:?}",
+            file.lines
+        );
+    }
+}
+
+/// PI-03 AC7: turns before the latest compaction boundary are incomplete.
+/// A retain-none compaction (`firstKeptEntryId` is its own id) puts the
+/// boundary at itself; a kept entry earlier on the branch puts it there; a
+/// kept entry that is not earlier on the branch is partial and falls back
+/// to the compaction. Only the latest compaction on the branch counts.
+#[test]
+fn pi_v3_marks_history_before_compaction_incomplete() {
+    use libra::internal::ai::observed_agents::{
+        builtin::pi::PiBranchPartialReason, coverage::Completeness,
+    };
+
+    let with_compaction = |kept: &str| {
+        PiV3File::new()
+            .message("u1", None, "user")
+            .message("a1", Some("u1"), "assistant")
+            .message("u2", Some("a1"), "user")
+            .message("a2", Some("u2"), "assistant")
+            .entry(
+                "compaction",
+                "c1",
+                Some("a2"),
+                json!({"summary": "s", "firstKeptEntryId": kept, "tokensBefore": 10}),
+            )
+            .message("u3", Some("c1"), "user")
+            .message("a3", Some("u3"), "assistant")
+    };
+    let completeness =
+        |branch: &libra::internal::ai::observed_agents::builtin::pi::PiActiveBranch| {
+            branch
+                .turns
+                .iter()
+                .map(|turn| turn.completeness)
+                .collect::<Vec<_>>()
+        };
+
+    let retain_none = pi_normalize(&with_compaction("c1")).expect("retain-none");
+    assert!(!retain_none.partial());
+    assert_eq!(retain_none.before_compaction, 0..4);
+    assert_eq!(
+        completeness(&retain_none),
+        vec![
+            Completeness::Incomplete,
+            Completeness::Incomplete,
+            Completeness::Complete
+        ]
+    );
+
+    let keeps_u2 = pi_normalize(&with_compaction("u2")).expect("keeps u2");
+    assert!(!keeps_u2.partial());
+    assert_eq!(keeps_u2.before_compaction, 0..2);
+    assert_eq!(
+        completeness(&keeps_u2),
+        vec![
+            Completeness::Incomplete,
+            Completeness::Complete,
+            Completeness::Complete
+        ]
+    );
+
+    let dangling = pi_normalize(&with_compaction("elsewhere")).expect("dangling kept id");
+    assert_eq!(
+        dangling.partial_reasons,
+        BTreeSet::from([PiBranchPartialReason::CompactionBoundaryNotOnBranch])
+    );
+    assert_eq!(dangling.before_compaction, 0..4);
+
+    // Only the latest compaction on the branch sets the boundary, as in
+    // `buildContextEntries`: a later compaction may keep history an earlier
+    // retain-none compaction summarized.
+    let twice = |first_kept: &str, second_kept: &str| {
+        with_compaction(first_kept)
+            .entry(
+                "compaction",
+                "c2",
+                Some("a3"),
+                json!({"summary": "s", "firstKeptEntryId": second_kept, "tokensBefore": 20}),
+            )
+            .message("u4", Some("c2"), "user")
+            .message("a4", Some("u4"), "assistant")
+    };
+    use Completeness::{Complete, Incomplete};
+    for (first_kept, second_kept, before, expected, partial) in [
+        (
+            "c1",
+            "u2",
+            0..2,
+            vec![Incomplete, Complete, Complete, Complete],
+            false,
+        ),
+        (
+            "u1",
+            "u3",
+            0..5,
+            vec![Incomplete, Incomplete, Complete, Complete],
+            false,
+        ),
+        (
+            "c1",
+            "c2",
+            0..7,
+            vec![Incomplete, Incomplete, Incomplete, Complete],
+            false,
+        ),
+        (
+            "u2",
+            "u4",
+            0..7,
+            vec![Incomplete, Incomplete, Incomplete, Complete],
+            true,
+        ),
+    ] {
+        let branch = pi_normalize(&twice(first_kept, second_kept)).expect("two compactions");
+        assert_eq!(
+            branch.before_compaction, before,
+            "{first_kept} {second_kept}"
+        );
+        assert_eq!(
+            completeness(&branch),
+            expected,
+            "{first_kept} {second_kept}"
+        );
+        assert_eq!(branch.partial(), partial, "{first_kept} {second_kept}");
+    }
+
+    // A compaction on an abandoned branch does not touch the active one.
+    let off_branch = PiV3File::new()
+        .message("u1", None, "user")
+        .message("a1", Some("u1"), "assistant")
+        .entry(
+            "compaction",
+            "c1",
+            Some("a1"),
+            json!({"summary": "s", "firstKeptEntryId": "c1", "tokensBefore": 10}),
+        )
+        .message("u2", Some("a1"), "user");
+    let off_branch = pi_normalize(&off_branch).expect("off-branch compaction");
+    assert_eq!(off_branch.before_compaction, 0..0);
+    assert!(
+        completeness(&off_branch)
+            .iter()
+            .all(|completeness| *completeness == Completeness::Complete)
+    );
+}
+
+/// PI-03 AC8: only a `user` role message opens a turn. A system message,
+/// model change, bash execution, custom message, usage entry, and unknown
+/// type open none; entries before the first user message are a preamble.
+#[test]
+fn pi_v3_only_user_messages_open_turns() {
+    let file = PiV3File::new()
+        .message("sys", None, "system")
+        .entry(
+            "model_change",
+            "mc",
+            Some("sys"),
+            json!({"provider": "p", "modelId": "m"}),
+        )
+        .message("u1", Some("mc"), "user")
+        .message("a1", Some("u1"), "assistant")
+        .message("t1", Some("a1"), "toolResult")
+        .message("b1", Some("t1"), "bashExecution")
+        .entry(
+            "custom_message",
+            "cm",
+            Some("b1"),
+            json!({"customType": "x", "content": "c", "display": true}),
+        )
+        .entry(
+            "usage",
+            "us",
+            Some("cm"),
+            json!({"kind": "k", "provider": "p", "model": "m", "usage": {}}),
+        )
+        .entry("future_entry", "fu", Some("us"), json!({}))
+        .message("sys2", Some("fu"), "system")
+        .message("u2", Some("sys2"), "user")
+        .message("a2", Some("u2"), "assistant");
+    let branch = pi_normalize(&file).expect("normalize");
+    assert!(branch.partial(), "the unknown type is partial");
+    assert_eq!(branch.preamble, 0..2);
+    assert_eq!(
+        branch
+            .turns
+            .iter()
+            .map(|turn| (
+                turn.ordinal,
+                turn.opening_entry_id.as_str(),
+                turn.entries.clone()
+            ))
+            .collect::<Vec<_>>(),
+        vec![(0, "u1", 2..10), (1, "u2", 10..12)]
+    );
+
+    let no_user =
+        PiV3File::new()
+            .message("sys", None, "system")
+            .message("a1", Some("sys"), "assistant");
+    let no_user = pi_normalize(&no_user).expect("normalize");
+    assert!(no_user.turns.is_empty());
+    assert_eq!(no_user.preamble, 0..2);
 }

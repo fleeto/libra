@@ -3,9 +3,11 @@
 //!
 //! PI-01 registered the identity; PI-02 adds restricted provider-root
 //! discovery of session files; PI-15 keeps the discovered sessions of one
-//! repository, by header `cwd`, with the session id from the header `id`.
-//! Pi stays unsupported: nothing here imports a session, installs hooks, or
-//! reads a transcript for capture.
+//! repository, by header `cwd`, with the session id from the header `id`;
+//! PI-03 normalizes one v3 session file into its tree, disk leaf, active
+//! branch, and user turns, without keeping content. Pi stays unsupported:
+//! nothing here imports a session, installs hooks, or reads a transcript for
+//! capture.
 //!
 //! Pi writes sessions under `<agent-dir>/sessions/--<encoded-cwd>--/` by
 //! default (`session-manager.ts:585-601`, `<agent-dir>` defaulting to
@@ -438,6 +440,447 @@ fn without_verbatim_prefix(path: PathBuf) -> PathBuf {
 #[cfg(not(windows))]
 fn without_verbatim_prefix(path: PathBuf) -> PathBuf {
     path
+}
+
+/// The session file version this normalizer reads (`CURRENT_SESSION_VERSION`,
+/// `session-manager.ts:41`). Pi migrates v1/v2 files in place on open; Libra
+/// never rewrites a file, so it refuses them.
+pub const PI_SESSION_VERSION: i64 = 3;
+/// Default bound on the session file bytes one normalization reads.
+pub const PI_NORMALIZE_MAX_BYTES: u64 =
+    super::super::transcript_source::TRANSCRIPT_READ_HARD_CAP_BYTES;
+/// Default bound on the entries one normalization indexes.
+pub const PI_NORMALIZE_MAX_ENTRIES: usize = 200_000;
+
+/// Bounds for one normalization.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct PiNormalizeLimits {
+    pub max_bytes: u64,
+    pub max_entries: usize,
+}
+
+impl Default for PiNormalizeLimits {
+    fn default() -> Self {
+        Self {
+            max_bytes: PI_NORMALIZE_MAX_BYTES,
+            max_entries: PI_NORMALIZE_MAX_ENTRIES,
+        }
+    }
+}
+
+/// The role of a `message` entry: the five roles Pi persists as `message`
+/// entries (PI-21 frozen table; `custom`, `branchSummary`, and
+/// `compactionSummary` are derived or stored as other entry types).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum PiMessageRole {
+    User,
+    Assistant,
+    ToolResult,
+    System,
+    BashExecution,
+    /// A role outside the PI-21 frozen table, or none.
+    Unknown,
+}
+
+/// The type of one session entry (PI-20 frozen table,
+/// `session-manager.ts:183-194`); `message` roles follow PI-21.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum PiEntryKind {
+    Message(PiMessageRole),
+    CustomMessage,
+    Custom,
+    ModelChange,
+    ThinkingLevelChange,
+    Usage,
+    Compaction,
+    ContextEdit,
+    BranchSummary,
+    Label,
+    SessionInfo,
+    /// A type outside the PI-20 frozen table, or none.
+    Unknown,
+}
+
+impl PiEntryKind {
+    fn from_entry(entry: &serde_json::Value) -> Self {
+        match entry.get("type").and_then(serde_json::Value::as_str) {
+            Some("message") => Self::Message(
+                match entry
+                    .get("message")
+                    .and_then(|message| message.get("role"))
+                    .and_then(serde_json::Value::as_str)
+                {
+                    Some("user") => PiMessageRole::User,
+                    Some("assistant") => PiMessageRole::Assistant,
+                    Some("toolResult") => PiMessageRole::ToolResult,
+                    Some("system") => PiMessageRole::System,
+                    Some("bashExecution") => PiMessageRole::BashExecution,
+                    _ => PiMessageRole::Unknown,
+                },
+            ),
+            Some("custom_message") => Self::CustomMessage,
+            Some("custom") => Self::Custom,
+            Some("model_change") => Self::ModelChange,
+            Some("thinking_level_change") => Self::ThinkingLevelChange,
+            Some("usage") => Self::Usage,
+            Some("compaction") => Self::Compaction,
+            Some("context_edit") => Self::ContextEdit,
+            Some("branch_summary") => Self::BranchSummary,
+            Some("label") => Self::Label,
+            Some("session_info") => Self::SessionInfo,
+            _ => Self::Unknown,
+        }
+    }
+}
+
+/// Why a session file was refused as a whole.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum PiNormalizeRefusal {
+    /// The input is larger than [`PiNormalizeLimits`] allow.
+    TooLarge,
+    /// The first parsed line is not a session header (`type` `"session"`
+    /// with a session id); Pi loads such a file as empty
+    /// (`session-manager.ts:660-665`).
+    NotASession,
+    /// The header `version` is not [`PI_SESSION_VERSION`].
+    UnsupportedVersion,
+    /// Two entries have the same `id`.
+    DuplicateEntryId,
+    /// An entry's `parentId` names no entry in the file.
+    MissingParent,
+    /// Following `parentId` from some entry returns to it.
+    Cycle,
+    /// A parsed entry Pi would index under something other than a
+    /// non-empty string `id`, a parsed line that is not an object, or a
+    /// `parentId` that is neither absent, null, nor a non-empty string: its
+    /// place in Pi's tree cannot be reproduced.
+    UnrepresentableEntry,
+}
+
+/// Why a normalized branch may not show everything the file holds.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
+pub enum PiBranchPartialReason {
+    /// A line `JSON.parse` rejects, or a falsy JSON value, was skipped, as
+    /// Pi's loader skips it (`session-manager.ts:616-648`).
+    MalformedLine,
+    /// A line repeats a key; like `JSON.parse`, the last value is used.
+    DuplicateKey,
+    /// A second session header was skipped.
+    ExtraHeader,
+    /// An entry type outside the PI-20 frozen table, or none.
+    UnknownEntryType,
+    /// A `message` role outside the PI-21 frozen table, or none.
+    UnknownMessageRole,
+    /// The latest compaction's `firstKeptEntryId` is missing, or names
+    /// neither the compaction itself (retain-none) nor an entry earlier on
+    /// the branch; the boundary is taken at the compaction, as Pi keeps
+    /// nothing before it then (`session-manager.ts:497-509`).
+    CompactionBoundaryNotOnBranch,
+}
+
+/// One entry on the active branch. No content is kept: `line` points back
+/// at the entry's line (1-based) in the normalized bytes.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct PiBranchEntry {
+    pub id: String,
+    pub parent_id: Option<String>,
+    pub line: usize,
+    pub kind: PiEntryKind,
+}
+
+/// One user turn on the active branch: the entries from a user message up
+/// to the next one.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct PiTurn {
+    pub ordinal: usize,
+    /// The `id` of the user message that opens the turn.
+    pub opening_entry_id: String,
+    /// The turn's entries, as indices into [`PiActiveBranch::entries`].
+    pub entries: std::ops::Range<usize>,
+    /// `Incomplete` when any entry lies before a compaction boundary: from
+    /// there on Pi replaced that history with the compaction summary in the
+    /// model context (`session-manager.ts:468-515`), although the raw
+    /// entries stay on disk.
+    pub completeness: super::super::coverage::Completeness,
+}
+
+/// The v3 tree of one session file and its active branch.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct PiActiveBranch {
+    /// The header `id`.
+    pub session_id: String,
+    /// The disk leaf: the last entry in file order (`_buildIndex`,
+    /// `session-manager.ts:1103-1121`). `None` for a file with only a
+    /// header.
+    pub leaf_id: Option<String>,
+    /// The branch from its root to the leaf.
+    pub entries: Vec<PiBranchEntry>,
+    /// Entries before the first user message, as indices into `entries`.
+    /// They open no turn.
+    pub preamble: std::ops::Range<usize>,
+    pub turns: Vec<PiTurn>,
+    /// Indices into `entries` before the latest compaction boundary.
+    pub before_compaction: std::ops::Range<usize>,
+    /// Entries in the file that are not on the active branch.
+    pub off_branch_entries: usize,
+    pub partial_reasons: BTreeSet<PiBranchPartialReason>,
+}
+
+impl PiActiveBranch {
+    pub fn partial(&self) -> bool {
+        !self.partial_reasons.is_empty()
+    }
+}
+
+/// One indexed entry while the tree is built.
+struct IndexedEntry {
+    id: String,
+    parent_id: Option<String>,
+    line: usize,
+    kind: PiEntryKind,
+    first_kept_entry_id: Option<String>,
+}
+
+/// Normalize one Pi v3 session file: index its tree, recover the disk leaf,
+/// and segment the active branch into user turns. The bytes are only read;
+/// nothing is written, resolved, or logged.
+pub fn normalize_pi_session(
+    bytes: &[u8],
+    limits: PiNormalizeLimits,
+) -> std::result::Result<PiActiveBranch, PiNormalizeRefusal> {
+    use serde_json::Value;
+
+    use super::super::coverage::{Completeness, parse_canon_value};
+
+    if bytes.len() as u64 > limits.max_bytes {
+        return Err(PiNormalizeRefusal::TooLarge);
+    }
+    let mut partial_reasons = BTreeSet::new();
+    let mut header: Option<String> = None;
+    let mut entries: Vec<IndexedEntry> = Vec::new();
+    for (index, line) in bytes.split(|byte| *byte == b'\n').enumerate() {
+        if line.iter().all(u8::is_ascii_whitespace) {
+            continue;
+        }
+        // Pi's loader keeps every line `JSON.parse` accepts except a falsy
+        // value, and skips the rest, before the header too
+        // (`session-manager.ts:616-648`). A repeated key keeps its last value,
+        // as `JSON.parse` does.
+        let value = match serde_json::from_slice::<Value>(line) {
+            Ok(value) if !is_js_falsy(&value) => value,
+            _ => {
+                partial_reasons.insert(PiBranchPartialReason::MalformedLine);
+                continue;
+            }
+        };
+        if parse_canon_value(line).is_err() {
+            partial_reasons.insert(PiBranchPartialReason::DuplicateKey);
+        }
+        let kind = value.get("type").and_then(Value::as_str);
+        if header.is_none() {
+            let Some(session_id) = value
+                .get("id")
+                .and_then(Value::as_str)
+                .filter(|_| kind == Some("session"))
+            else {
+                return Err(PiNormalizeRefusal::NotASession);
+            };
+            if value.get("version").and_then(Value::as_i64) != Some(PI_SESSION_VERSION) {
+                return Err(PiNormalizeRefusal::UnsupportedVersion);
+            }
+            header = Some(session_id.to_owned());
+            continue;
+        }
+        // `_buildIndex` skips every session-typed entry.
+        if kind == Some("session") {
+            partial_reasons.insert(PiBranchPartialReason::ExtraHeader);
+            continue;
+        }
+        // `_buildIndex` indexes every other entry under its `id` and makes it
+        // the leaf. One whose `id` is not a non-empty string, or whose
+        // `parentId` is neither absent, null, nor a non-empty string, has no
+        // place in the tree that can be reproduced, so the file is refused
+        // rather than given an earlier leaf.
+        let id = value
+            .get("id")
+            .and_then(Value::as_str)
+            .filter(|id| !id.is_empty())
+            .ok_or(PiNormalizeRefusal::UnrepresentableEntry)?;
+        let parent_id = match value.get("parentId") {
+            None | Some(Value::Null) => None,
+            Some(Value::String(parent)) if !parent.is_empty() => Some(parent.clone()),
+            Some(_) => return Err(PiNormalizeRefusal::UnrepresentableEntry),
+        };
+        if entries.len() >= limits.max_entries {
+            return Err(PiNormalizeRefusal::TooLarge);
+        }
+        let kind = PiEntryKind::from_entry(&value);
+        match kind {
+            PiEntryKind::Unknown => {
+                partial_reasons.insert(PiBranchPartialReason::UnknownEntryType);
+            }
+            PiEntryKind::Message(PiMessageRole::Unknown) => {
+                partial_reasons.insert(PiBranchPartialReason::UnknownMessageRole);
+            }
+            _ => {}
+        }
+        entries.push(IndexedEntry {
+            id: id.to_owned(),
+            parent_id,
+            line: index + 1,
+            kind,
+            first_kept_entry_id: value
+                .get("firstKeptEntryId")
+                .and_then(Value::as_str)
+                .map(str::to_owned),
+        });
+    }
+    let Some(session_id) = header else {
+        return Err(PiNormalizeRefusal::NotASession);
+    };
+
+    let mut by_id = std::collections::HashMap::with_capacity(entries.len());
+    for (position, entry) in entries.iter().enumerate() {
+        if by_id.insert(entry.id.as_str(), position).is_some() {
+            return Err(PiNormalizeRefusal::DuplicateEntryId);
+        }
+    }
+    let mut parents = Vec::with_capacity(entries.len());
+    for entry in &entries {
+        parents.push(match &entry.parent_id {
+            None => None,
+            Some(parent) => Some(
+                *by_id
+                    .get(parent.as_str())
+                    .ok_or(PiNormalizeRefusal::MissingParent)?,
+            ),
+        });
+    }
+    reject_parent_cycles(&parents)?;
+
+    let mut path = Vec::new();
+    let mut current = entries.len().checked_sub(1);
+    while let Some(position) = current {
+        path.push(position);
+        current = parents[position];
+    }
+    path.reverse();
+    let off_branch_entries = entries.len() - path.len();
+
+    // Pi's context follows the latest compaction on the branch only: the
+    // history before its kept entry (earlier on the branch) is replaced by
+    // the summary, and without such an entry (retain-none names the
+    // compaction itself) everything before the compaction is
+    // (`buildContextEntries`, `session-manager.ts:468-515`).
+    let boundary = match path
+        .iter()
+        .rposition(|&position| entries[position].kind == PiEntryKind::Compaction)
+    {
+        None => 0,
+        Some(compaction) => {
+            let entry = &entries[path[compaction]];
+            let kept = entry.first_kept_entry_id.as_deref();
+            let found = kept.and_then(|kept| {
+                path[..compaction]
+                    .iter()
+                    .position(|&earlier| entries[earlier].id == kept)
+            });
+            if found.is_none() && kept != Some(entry.id.as_str()) {
+                partial_reasons.insert(PiBranchPartialReason::CompactionBoundaryNotOnBranch);
+            }
+            found.unwrap_or(compaction)
+        }
+    };
+
+    let branch: Vec<PiBranchEntry> = path
+        .iter()
+        .map(|&position| {
+            let entry = &entries[position];
+            PiBranchEntry {
+                id: entry.id.clone(),
+                parent_id: entry.parent_id.clone(),
+                line: entry.line,
+                kind: entry.kind,
+            }
+        })
+        .collect();
+    let openings: Vec<usize> = branch
+        .iter()
+        .enumerate()
+        .filter(|(_, entry)| entry.kind == PiEntryKind::Message(PiMessageRole::User))
+        .map(|(index, _)| index)
+        .collect();
+    let preamble = 0..openings.first().copied().unwrap_or(branch.len());
+    let turns = openings
+        .iter()
+        .enumerate()
+        .map(|(ordinal, &start)| {
+            let end = openings.get(ordinal + 1).copied().unwrap_or(branch.len());
+            PiTurn {
+                ordinal,
+                opening_entry_id: branch[start].id.clone(),
+                entries: start..end,
+                completeness: if start < boundary {
+                    Completeness::Incomplete
+                } else {
+                    Completeness::Complete
+                },
+            }
+        })
+        .collect();
+    Ok(PiActiveBranch {
+        session_id,
+        leaf_id: branch.last().map(|entry| entry.id.clone()),
+        entries: branch,
+        preamble,
+        turns,
+        before_compaction: 0..boundary,
+        off_branch_entries,
+        partial_reasons,
+    })
+}
+
+/// Whether `JSON.parse` would give a value Pi's loader drops (`if (entry)`).
+fn is_js_falsy(value: &serde_json::Value) -> bool {
+    use serde_json::Value;
+
+    match value {
+        Value::Null | Value::Bool(false) => true,
+        Value::Number(number) => number.as_f64() == Some(0.0),
+        Value::String(text) => text.is_empty(),
+        _ => false,
+    }
+}
+
+/// Refuse a parent graph with a cycle. Each entry is walked toward its root
+/// once; meeting an entry still on the current walk is a cycle.
+fn reject_parent_cycles(parents: &[Option<usize>]) -> std::result::Result<(), PiNormalizeRefusal> {
+    #[derive(Clone, Copy, PartialEq, Eq)]
+    enum State {
+        Unvisited,
+        OnWalk,
+        Done,
+    }
+    let mut state = vec![State::Unvisited; parents.len()];
+    let mut walk = Vec::new();
+    for start in 0..parents.len() {
+        let mut current = Some(start);
+        while let Some(position) = current {
+            match state[position] {
+                State::Done => break,
+                State::OnWalk => return Err(PiNormalizeRefusal::Cycle),
+                State::Unvisited => {
+                    state[position] = State::OnWalk;
+                    walk.push(position);
+                    current = parents[position];
+                }
+            }
+        }
+        for position in walk.drain(..) {
+            state[position] = State::Done;
+        }
+    }
+    Ok(())
 }
 
 #[cfg(any(unix, windows))]

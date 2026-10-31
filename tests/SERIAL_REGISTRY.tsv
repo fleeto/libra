@@ -141,6 +141,13 @@ opencode_historical_import_e2e_uses_trusted_export_bytes	lane:opencode_export_br
 opencode_registered_failure_releases_dirty_job_claim_and_marker	lane:opencode_export_bridge	shares environment and repository state with OpenCode export bridge integration tests
 paged_upload_finalize_and_download_round_trip	lane:cwd	changes the process working directory (ChangeDirGuard/set_current_dir)
 passphrase_and_plaintext_buffers_are_zeroized	global	shares the process-global scanning allocator needle with the leak-calibration test
+pi_discovery_bounds_bytes	lane:env	PI-02 AC6: sets LIBRA_TEST_HOME in-process (ScopedEnvVar) so the Pi provider root is an isolated temporary home
+pi_discovery_bounds_entries	lane:env	PI-02 AC5: sets LIBRA_TEST_HOME in-process (ScopedEnvVar) so the Pi provider root is an isolated temporary home
+pi_discovery_reads_nothing_outside_the_provider_root	lane:env	PI-02 AC2: sets LIBRA_TEST_HOME in-process (ScopedEnvVar) so the Pi provider root is an isolated temporary home
+pi_discovery_refuses_non_regular_files	lane:env	PI-02 AC4: sets LIBRA_TEST_HOME in-process (ScopedEnvVar) so the Pi provider root is an isolated temporary home
+pi_discovery_refuses_relative_and_parent_roots	lane:env	PI-02 AC1: sets LIBRA_TEST_HOME in-process (ScopedEnvVar) so the Pi provider root is an isolated temporary home
+pi_discovery_refuses_symlinks	lane:env	PI-02 AC3: sets LIBRA_TEST_HOME in-process (ScopedEnvVar) so the Pi provider root is an isolated temporary home
+pi_discovery_reports_partial_past_any_limit	lane:env	PI-02 AC7: sets LIBRA_TEST_HOME in-process (ScopedEnvVar) so the Pi provider root is an isolated temporary home
 porcelain_v2_unmerged_row_from_subdirectory_keeps_real_worktree_mode	lane:cwd	changes the process working directory (ChangeDirGuard/set_current_dir)
 porcelain_v2_unmerged_u_line	lane:cwd	changes the process working directory (ChangeDirGuard/set_current_dir)
 prior_chunk_cli_upload_consumes_cached_layout_and_rejects_source_change	lane:cwd	changes the process working directory (ChangeDirGuard/set_current_dir)

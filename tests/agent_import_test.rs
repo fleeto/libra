@@ -5426,3 +5426,543 @@ fn scalar_text(fixture: &ImportRepo, sql: &str) -> String {
     assert!(output.status.success(), "{}", describe(&output));
     String::from_utf8_lossy(&output.stdout).trim().to_string()
 }
+
+// ---- PI-02: restricted Pi provider-root discovery ----
+
+/// A Pi provider root (`<home>/.pi`) under an isolated `LIBRA_TEST_HOME`,
+/// with a default-layout sessions root at `<home>/.pi/agent/sessions`.
+struct PiDiscoveryHome {
+    home: tempfile::TempDir,
+    _home_env: libra::utils::test::ScopedEnvVar,
+}
+
+impl PiDiscoveryHome {
+    fn new() -> Self {
+        let home = tempfile::tempdir().expect("pi home");
+        let home_env = libra::utils::test::ScopedEnvVar::set("LIBRA_TEST_HOME", home.path());
+        Self {
+            home,
+            _home_env: home_env,
+        }
+    }
+
+    fn sessions(&self) -> PathBuf {
+        self.home.path().join(".pi").join("agent").join("sessions")
+    }
+
+    /// Write one session file under `--<cwd>--` with a header line and a body.
+    fn write_session(&self, cwd_dir: &str, name: &str) -> PathBuf {
+        let dir = self.sessions().join(cwd_dir);
+        std::fs::create_dir_all(&dir).expect("pi session dir");
+        let path = dir.join(name);
+        std::fs::write(
+            &path,
+            format!(
+                "{{\"type\":\"session\",\"version\":3,\"id\":\"{name}\",\"cwd\":\"/work\"}}\n{{\"type\":\"message\"}}\n"
+            ),
+        )
+        .expect("pi session file");
+        path
+    }
+}
+
+fn pi_header(name: &str) -> Vec<u8> {
+    format!("{{\"type\":\"session\",\"version\":3,\"id\":\"{name}\",\"cwd\":\"/work\"}}")
+        .into_bytes()
+}
+
+/// PI-02 AC1: a relative root, or one with a `..` component, is refused
+/// before anything is read.
+#[test]
+#[serial_test::serial(env)]
+fn pi_discovery_refuses_relative_and_parent_roots() {
+    use libra::internal::ai::observed_agents::{
+        PiDiscoveryLimits, PiRootRefusal, PiSessionLayout, discover_pi_sessions,
+    };
+
+    let home = PiDiscoveryHome::new();
+    home.write_session("--work--", "a.jsonl");
+    for (root, reason) in [
+        (
+            PathBuf::from(".pi/agent/sessions"),
+            PiRootRefusal::NotAbsolute,
+        ),
+        (PathBuf::from("sessions"), PiRootRefusal::NotAbsolute),
+        (
+            home.sessions().join("--work--").join("..").join("--work--"),
+            PiRootRefusal::ParentComponent,
+        ),
+        (
+            home.home.path().join(".pi").join("..").join(".pi"),
+            PiRootRefusal::ParentComponent,
+        ),
+    ] {
+        let discovery = discover_pi_sessions(
+            &root,
+            PiSessionLayout::Default,
+            PiDiscoveryLimits::default(),
+        )
+        .expect("discovery");
+        assert_eq!(discovery.refused, Some(reason), "{}", root.display());
+        assert_eq!(discovery.source_reads, 0, "{}", root.display());
+        assert_eq!(discovery.bytes_read, 0);
+        assert_eq!(discovery.entries_scanned, 0);
+        assert!(discovery.candidates.is_empty());
+    }
+    // Control: the same tree from its absolute root is discovered.
+    let found = discover_pi_sessions(
+        &home.sessions(),
+        PiSessionLayout::Default,
+        PiDiscoveryLimits::default(),
+    )
+    .expect("discovery");
+    assert_eq!(found.refused, None);
+    assert_eq!(found.candidates.len(), 1);
+    assert_eq!(found.candidates[0].header, pi_header("a.jsonl"));
+}
+
+/// PI-02 AC2: roots outside the Pi provider root are refused with zero
+/// source reads, including paths taken from a session context and the
+/// `sessionDir` a project's `.pi/settings.json` names (Pi reads that file
+/// before trust is decided, so it grants nothing).
+#[test]
+#[serial_test::serial(env)]
+fn pi_discovery_reads_nothing_outside_the_provider_root() {
+    use libra::internal::ai::observed_agents::{
+        PiDiscoveryLimits, PiRootRefusal, PiSessionLayout, discover_pi_sessions,
+    };
+
+    let home = PiDiscoveryHome::new();
+    let project = tempfile::tempdir().expect("project");
+    // A project-local session directory, named by the project's settings.
+    let project_sessions = project.path().join("pi-sessions");
+    std::fs::create_dir_all(project_sessions.join("--work--")).expect("project sessions");
+    std::fs::write(
+        project_sessions.join("--work--").join("p.jsonl"),
+        "{\"type\":\"session\"}\n",
+    )
+    .expect("project session");
+    std::fs::write(
+        project_sessions.join("flat.jsonl"),
+        "{\"type\":\"session\"}\n",
+    )
+    .expect("flat project session");
+    std::fs::create_dir_all(project.path().join(".pi")).expect("project .pi");
+    std::fs::write(
+        project.path().join(".pi").join("settings.json"),
+        format!("{{\"sessionDir\":\"{}\"}}", project_sessions.display()),
+    )
+    .expect("project settings");
+    // Session-context paths: the working directory, a transcript path in it,
+    // and the project's own `.pi` directory.
+    let ctx_transcript = project.path().join("transcript.jsonl");
+    std::fs::write(&ctx_transcript, "{\"type\":\"session\"}\n").expect("ctx transcript");
+    let outside = tempfile::tempdir().expect("outside");
+    for (root, layout) in [
+        (project_sessions.clone(), PiSessionLayout::Default),
+        (project_sessions.clone(), PiSessionLayout::Flat),
+        (project.path().to_path_buf(), PiSessionLayout::Flat),
+        (ctx_transcript.clone(), PiSessionLayout::Flat),
+        (project.path().join(".pi"), PiSessionLayout::Flat),
+        (outside.path().to_path_buf(), PiSessionLayout::Default),
+        // The home itself is not the provider root.
+        (home.home.path().to_path_buf(), PiSessionLayout::Default),
+    ] {
+        let discovery =
+            discover_pi_sessions(&root, layout, PiDiscoveryLimits::default()).expect("discovery");
+        assert_eq!(
+            discovery.refused,
+            Some(PiRootRefusal::OutsideProviderRoot),
+            "{}",
+            root.display()
+        );
+        assert_eq!(discovery.source_reads, 0, "{}", root.display());
+        assert_eq!(discovery.bytes_read, 0, "{}", root.display());
+        assert_eq!(discovery.entries_scanned, 0, "{}", root.display());
+        assert!(discovery.candidates.is_empty());
+    }
+}
+
+/// PI-02 AC3: a symlinked root, or a symlink between it and the provider
+/// root, refuses the walk; a symlinked entry is refused without being
+/// followed or read.
+#[cfg(unix)]
+#[test]
+#[serial_test::serial(env)]
+fn pi_discovery_refuses_symlinks() {
+    use libra::internal::ai::observed_agents::{
+        PiDiscoveryLimits, PiPartialReason, PiRootRefusal, PiSessionLayout, discover_pi_sessions,
+    };
+
+    let home = PiDiscoveryHome::new();
+    home.write_session("--work--", "real.jsonl");
+    let elsewhere = tempfile::tempdir().expect("elsewhere");
+    std::fs::create_dir_all(elsewhere.path().join("--other--")).expect("elsewhere dir");
+    std::fs::write(
+        elsewhere.path().join("--other--").join("target.jsonl"),
+        "{\"type\":\"session\"}\n",
+    )
+    .expect("symlink target");
+    let agent = home.home.path().join(".pi").join("agent");
+    // The root itself, and a directory above it, as symlinks.
+    std::os::unix::fs::symlink(elsewhere.path(), agent.join("linked-sessions"))
+        .expect("root symlink");
+    std::os::unix::fs::symlink(&agent, home.home.path().join(".pi").join("agent-link"))
+        .expect("ancestor symlink");
+    for root in [
+        agent.join("linked-sessions"),
+        home.home
+            .path()
+            .join(".pi")
+            .join("agent-link")
+            .join("sessions"),
+    ] {
+        let discovery = discover_pi_sessions(
+            &root,
+            PiSessionLayout::Default,
+            PiDiscoveryLimits::default(),
+        )
+        .expect("discovery");
+        assert_eq!(
+            discovery.refused,
+            Some(PiRootRefusal::Symlink),
+            "{}",
+            root.display()
+        );
+        assert_eq!(discovery.source_reads, 0);
+        assert!(discovery.candidates.is_empty());
+    }
+    // Entries: a symlinked cwd directory and a symlinked session file.
+    std::os::unix::fs::symlink(
+        elsewhere.path().join("--other--"),
+        home.sessions().join("--linked--"),
+    )
+    .expect("dir entry symlink");
+    std::os::unix::fs::symlink(
+        elsewhere.path().join("--other--").join("target.jsonl"),
+        home.sessions().join("--work--").join("linked.jsonl"),
+    )
+    .expect("file entry symlink");
+    let discovery = discover_pi_sessions(
+        &home.sessions(),
+        PiSessionLayout::Default,
+        PiDiscoveryLimits::default(),
+    )
+    .expect("discovery");
+    assert_eq!(discovery.refused, None);
+    assert!(
+        discovery
+            .partial_reasons
+            .contains(&PiPartialReason::SymlinkEntry)
+    );
+    assert_eq!(discovery.source_reads, 1, "only the real file was read");
+    assert_eq!(
+        discovery
+            .candidates
+            .iter()
+            .map(|candidate| candidate.path.file_name().expect("name").to_owned())
+            .collect::<Vec<_>>(),
+        vec![std::ffi::OsString::from("real.jsonl")]
+    );
+}
+
+/// PI-02 AC4: a FIFO or other non-regular entry is refused without being
+/// opened (a FIFO opened for reading would block).
+#[cfg(unix)]
+#[test]
+#[serial_test::serial(env)]
+fn pi_discovery_refuses_non_regular_files() {
+    use libra::internal::ai::observed_agents::{
+        PiDiscoveryLimits, PiPartialReason, PiSessionLayout, discover_pi_sessions,
+    };
+
+    let home = PiDiscoveryHome::new();
+    home.write_session("--work--", "real.jsonl");
+    let fifo = home.sessions().join("--work--").join("fifo.jsonl");
+    let made = Command::new("mkfifo")
+        .arg(&fifo)
+        .status()
+        .expect("run mkfifo");
+    assert!(made.success(), "mkfifo");
+    let discovery = discover_pi_sessions(
+        &home.sessions(),
+        PiSessionLayout::Default,
+        PiDiscoveryLimits::default(),
+    )
+    .expect("discovery");
+    assert!(
+        discovery
+            .partial_reasons
+            .contains(&PiPartialReason::NonRegularEntry)
+    );
+    assert_eq!(discovery.source_reads, 1, "the FIFO was not opened");
+    assert_eq!(discovery.candidates.len(), 1);
+    assert_eq!(discovery.candidates[0].header, pi_header("real.jsonl"));
+
+    // A directory its group or others can write is not walked: an entry
+    // there could be swapped between its type check and its open.
+    use std::os::unix::fs::PermissionsExt;
+    let shared = home.write_session("--shared--", "shared.jsonl");
+    let shared_dir = shared.parent().expect("shared dir").to_path_buf();
+    std::fs::set_permissions(&shared_dir, std::fs::Permissions::from_mode(0o777))
+        .expect("make the directory writable by others");
+    let discovery = discover_pi_sessions(
+        &home.sessions(),
+        PiSessionLayout::Default,
+        PiDiscoveryLimits::default(),
+    )
+    .expect("discovery");
+    std::fs::set_permissions(&shared_dir, std::fs::Permissions::from_mode(0o700))
+        .expect("restore the directory mode");
+    assert!(
+        discovery
+            .partial_reasons
+            .contains(&PiPartialReason::UnsafeDirectory)
+    );
+    assert!(
+        discovery
+            .candidates
+            .iter()
+            .all(|candidate| candidate.path != shared),
+        "nothing under the shared directory was read"
+    );
+    assert_eq!(discovery.source_reads, 1);
+    std::fs::remove_dir_all(&shared_dir).expect("remove the shared directory");
+
+    // macOS: an extended ACL can let another user add or delete entries
+    // whatever the mode bits say, so a directory with one is not walked.
+    #[cfg(target_os = "macos")]
+    {
+        let acl = home.write_session("--acl--", "acl.jsonl");
+        let acl_dir = acl.parent().expect("acl dir").to_path_buf();
+        let granted = Command::new("chmod")
+            .args(["+a", "everyone allow add_file,delete_child"])
+            .arg(&acl_dir)
+            .status()
+            .expect("run chmod +a");
+        assert!(granted.success(), "chmod +a");
+        let discovery = discover_pi_sessions(
+            &home.sessions(),
+            PiSessionLayout::Default,
+            PiDiscoveryLimits::default(),
+        )
+        .expect("discovery");
+        assert!(
+            discovery
+                .partial_reasons
+                .contains(&PiPartialReason::UnsafeDirectory)
+        );
+        assert!(
+            discovery
+                .candidates
+                .iter()
+                .all(|candidate| candidate.path != acl),
+            "nothing under the ACL directory was read"
+        );
+        assert_eq!(discovery.source_reads, 1);
+    }
+}
+
+/// PI-02 AC5: the walk inspects at most `max_entries` directory entries.
+#[test]
+#[serial_test::serial(env)]
+fn pi_discovery_bounds_entries() {
+    use libra::internal::ai::observed_agents::{
+        PiDiscoveryLimits, PiPartialReason, PiSessionLayout, discover_pi_sessions,
+    };
+
+    let home = PiDiscoveryHome::new();
+    for index in 0..6 {
+        home.write_session("--work--", &format!("s{index}.jsonl"));
+    }
+    let limits = PiDiscoveryLimits {
+        max_entries: 4,
+        ..PiDiscoveryLimits::default()
+    };
+    let discovery = discover_pi_sessions(&home.sessions(), PiSessionLayout::Default, limits)
+        .expect("discovery");
+    assert_eq!(discovery.entries_scanned, 4);
+    assert!(
+        discovery
+            .partial_reasons
+            .contains(&PiPartialReason::EntryLimit)
+    );
+    // One entry is the `--work--` directory itself; the rest are files.
+    assert_eq!(discovery.candidates.len(), 3);
+    assert_eq!(discovery.source_reads, 3);
+}
+
+/// PI-02 AC6: the walk reads at most `max_total_bytes`, and at most
+/// `max_header_bytes` from any one file.
+#[test]
+#[serial_test::serial(env)]
+fn pi_discovery_bounds_bytes() {
+    use libra::internal::ai::observed_agents::{
+        PiDiscoveryLimits, PiPartialReason, PiSessionLayout, discover_pi_sessions,
+    };
+
+    let home = PiDiscoveryHome::new();
+    let mut file_len = 0;
+    for index in 0..4 {
+        let path = home.write_session("--work--", &format!("s{index}.jsonl"));
+        file_len = std::fs::metadata(path).expect("session size").len();
+    }
+    // Reads go in chunks, so a short file is read whole. Total budget: two
+    // whole files and too little of a third to reach its newline.
+    let limits = PiDiscoveryLimits {
+        max_total_bytes: 2 * file_len + 3,
+        ..PiDiscoveryLimits::default()
+    };
+    let discovery = discover_pi_sessions(&home.sessions(), PiSessionLayout::Default, limits)
+        .expect("discovery");
+    assert!(discovery.bytes_read <= limits.max_total_bytes);
+    assert!(
+        discovery
+            .partial_reasons
+            .contains(&PiPartialReason::ByteLimit)
+    );
+    assert_eq!(discovery.candidates.len(), 2);
+    // Per-file cap: a header longer than it drops that file, not the walk.
+    let long = home.sessions().join("--work--").join("long.jsonl");
+    std::fs::write(&long, format!("{}\n", "x".repeat(4096))).expect("long header");
+    let limits = PiDiscoveryLimits {
+        max_header_bytes: 1024,
+        ..PiDiscoveryLimits::default()
+    };
+    let discovery = discover_pi_sessions(&home.sessions(), PiSessionLayout::Default, limits)
+        .expect("discovery");
+    assert!(
+        discovery
+            .partial_reasons
+            .contains(&PiPartialReason::ByteLimit)
+    );
+    assert_eq!(discovery.candidates.len(), 4, "the other files are kept");
+    assert!(
+        discovery
+            .candidates
+            .iter()
+            .all(|candidate| candidate.path != long)
+    );
+    assert!(discovery.bytes_read <= 4 * file_len + 1024);
+
+    // A short header in a large session file reads at most one 512-byte
+    // chunk of the body, so large bodies do not use up the walk's budget.
+    let large = PiDiscoveryHome::new();
+    let body = "{\"type\":\"message\"}\n".repeat(64 * 1024);
+    for index in 0..8 {
+        let dir = large.sessions().join("--work--");
+        std::fs::create_dir_all(&dir).expect("large dir");
+        std::fs::write(
+            dir.join(format!("big{index}.jsonl")),
+            format!("{{\"type\":\"session\",\"id\":\"big{index}\"}}\n{body}"),
+        )
+        .expect("large session");
+    }
+    let discovery = discover_pi_sessions(
+        &large.sessions(),
+        PiSessionLayout::Default,
+        PiDiscoveryLimits::default(),
+    )
+    .expect("discovery");
+    assert!(!discovery.partial(), "{:?}", discovery.partial_reasons);
+    assert_eq!(discovery.candidates.len(), 8);
+    assert!(
+        discovery.bytes_read <= 8 * 512,
+        "read {} bytes for eight headers",
+        discovery.bytes_read
+    );
+}
+
+/// PI-02 AC7: a walk within every limit is complete; exceeding any one limit
+/// reports partial.
+#[test]
+#[serial_test::serial(env)]
+fn pi_discovery_reports_partial_past_any_limit() {
+    use libra::internal::ai::observed_agents::{
+        PiDiscoveryLimits, PiPartialReason, PiSessionLayout, discover_pi_sessions,
+    };
+
+    let home = PiDiscoveryHome::new();
+    for index in 0..3 {
+        home.write_session("--work--", &format!("s{index}.jsonl"));
+    }
+    let header_len = pi_header("s0.jsonl").len() as u64;
+    let complete = discover_pi_sessions(
+        &home.sessions(),
+        PiSessionLayout::Default,
+        PiDiscoveryLimits::default(),
+    )
+    .expect("discovery");
+    assert!(!complete.partial());
+    assert_eq!(complete.candidates.len(), 3);
+    for (limits, reason) in [
+        (
+            PiDiscoveryLimits {
+                max_entries: 2,
+                ..PiDiscoveryLimits::default()
+            },
+            PiPartialReason::EntryLimit,
+        ),
+        (
+            PiDiscoveryLimits {
+                max_total_bytes: header_len,
+                ..PiDiscoveryLimits::default()
+            },
+            PiPartialReason::ByteLimit,
+        ),
+        (
+            PiDiscoveryLimits {
+                max_header_bytes: header_len / 2,
+                ..PiDiscoveryLimits::default()
+            },
+            PiPartialReason::ByteLimit,
+        ),
+    ] {
+        let discovery = discover_pi_sessions(&home.sessions(), PiSessionLayout::Default, limits)
+            .expect("discovery");
+        assert!(discovery.partial(), "{limits:?}");
+        assert!(discovery.partial_reasons.contains(&reason), "{limits:?}");
+    }
+    // A flat explicit directory inside the provider root walks the same way.
+    let flat = home.home.path().join(".pi").join("flat");
+    std::fs::create_dir_all(&flat).expect("flat dir");
+    std::fs::write(flat.join("f.jsonl"), "{\"type\":\"session\"}\n").expect("flat session");
+    let flat_discovery =
+        discover_pi_sessions(&flat, PiSessionLayout::Flat, PiDiscoveryLimits::default())
+            .expect("discovery");
+    assert!(!flat_discovery.partial());
+    assert_eq!(flat_discovery.candidates.len(), 1);
+}
+
+/// PI-02 AC8: discovery does not promote Pi: its registry row stays
+/// unsupported, with no hooks or transcript reading, and it is not listed.
+#[test]
+fn pi_discovery_keeps_pi_unsupported() {
+    use libra::internal::ai::observed_agents::{
+        AgentSessionCtx, agent_for, is_preview, live_capture_matches_hook_installable,
+        registration_for, supported_slugs,
+    };
+
+    let row = registration_for(AgentKind::Pi);
+    assert!(!row.supported);
+    assert_eq!(row.support_wave, None);
+    assert!(!row.transcript_readable);
+    assert!(!row.hook_installable);
+    assert!(!row.launchable_review && !row.launchable_investigate);
+    assert!(!row.capabilities.hooks);
+    assert!(!supported_slugs().contains(&"pi"));
+    assert!(!is_preview(AgentKind::Pi));
+    assert!(live_capture_matches_hook_installable(AgentKind::Pi));
+    let agent = agent_for(AgentKind::Pi);
+    assert!(agent.as_hooks().is_none());
+    assert!(
+        agent
+            .read_transcript(&AgentSessionCtx {
+                session_id: "s".to_string(),
+                provider_session_id: "p".to_string(),
+                working_dir: PathBuf::from("/work"),
+                transcript_path: None,
+            })
+            .is_err()
+    );
+}

@@ -67,12 +67,14 @@ use builtin::stable_promoted::{
 pub use builtin::{
     ClaudeCodeObservedAgent, CodexRolloutScanLimit, FlushOutcome, GeminiObservedAgent,
     HermesMessage, HermesObservedAgent, HermesReadLimits, HermesScope, HermesSourceRequest,
-    HermesSourceStatus, HermesTranscript, STABLE_PROMOTED_SPECS, StablePromotedAgent,
+    HermesSourceStatus, HermesTranscript, PI_DISCOVERY_MAX_ENTRIES, PI_DISCOVERY_MAX_HEADER_BYTES,
+    PI_DISCOVERY_MAX_TOTAL_BYTES, PiDiscovery, PiDiscoveryLimits, PiPartialReason, PiRootRefusal,
+    PiSessionCandidate, PiSessionLayout, STABLE_PROMOTED_SPECS, StablePromotedAgent,
     claude_project_slug, claude_session_dir, claude_session_file_candidate,
-    claude_session_id_is_safe_path_component, find_codex_rollout, find_codex_rollout_for_import,
-    flush_wait, read_hermes_jsonl, read_hermes_jsonl_file, read_hermes_source, read_hermes_sqlite,
-    resolve_session_file, rfc3339_boundary_for_unix_seconds, stable_promoted_spec_for,
-    write_truncated_transcript,
+    claude_session_id_is_safe_path_component, discover_pi_sessions, find_codex_rollout,
+    find_codex_rollout_for_import, flush_wait, read_hermes_jsonl, read_hermes_jsonl_file,
+    read_hermes_source, read_hermes_sqlite, resolve_session_file,
+    rfc3339_boundary_for_unix_seconds, stable_promoted_spec_for, write_truncated_transcript,
 };
 pub use capability::{
     CapabilityDeclarer, DeclaredAgentCaps, HookResponseWriter, ModelExtractor, PromptExtractor,
@@ -168,7 +170,7 @@ pub fn agent_for(kind: AgentKind) -> &'static dyn ObservedAgent {
     static GEMINI: GeminiObservedAgent = GeminiObservedAgent::new();
     static GROK: GrokObservedAgent = GrokObservedAgent;
     static HERMES: builtin::hermes::HermesObservedAgent = builtin::hermes::HermesObservedAgent;
-    static PI: PiObservedAgent = PiObservedAgent;
+    static PI: builtin::pi::PiObservedAgent = builtin::pi::PiObservedAgent;
 
     match kind {
         AgentKind::ClaudeCode => &CLAUDE_CODE,
@@ -307,35 +309,6 @@ impl ObservedAgent for GrokObservedAgent {
 
     fn as_hooks(&self) -> Option<&dyn crate::internal::ai::hooks::provider::HookProvider> {
         Some(crate::internal::ai::hooks::providers::grok_provider())
-    }
-}
-
-/// PI-01 identity stub. The db tag is accepted, but the registry row stays
-/// unsupported: discovery, capture, hook install, and launch are closed until
-/// later cards replace this stub.
-struct PiObservedAgent;
-
-impl ObservedAgent for PiObservedAgent {
-    fn provider_kind(&self) -> AgentKind {
-        AgentKind::Pi
-    }
-
-    fn provider_name(&self) -> &'static str {
-        "pi"
-    }
-
-    fn stability(&self) -> AgentStability {
-        AgentStability::Stable
-    }
-
-    fn read_transcript(&self, _session: &AgentSessionCtx) -> anyhow::Result<Option<Vec<u8>>> {
-        Err(anyhow::anyhow!(
-            "pi capture is not available; the identity is registered but discovery, capture, hook install, and launch stay disabled"
-        ))
-    }
-
-    fn protected_dirs(&self) -> &'static [&'static str] {
-        &[".pi"]
     }
 }
 

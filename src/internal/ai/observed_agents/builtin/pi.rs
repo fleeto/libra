@@ -1,0 +1,1084 @@
+//! Pi coding agent adapter (plan-20260911). Source pin: `earendil-works/pi`
+//! `v1.4.0` (`4a08025`).
+//!
+//! PI-01 registered the identity; PI-02 adds restricted provider-root
+//! discovery of session files. Pi stays unsupported: nothing here imports a
+//! session, installs hooks, or reads a transcript for capture.
+//!
+//! Pi writes sessions under `<agent-dir>/sessions/--<encoded-cwd>--/` by
+//! default (`session-manager.ts:585-601`, `<agent-dir>` defaulting to
+//! `~/.pi/agent`) and directly into an explicit session directory otherwise
+//! (`session-manager.ts:1752-1756`). Discovery only walks roots inside the
+//! configured provider root (`~/.pi`); a project's `.pi/settings.json`
+//! `sessionDir` is read by Pi before trust is decided, so it never grants a
+//! root here, and neither does any path taken from a session context.
+
+use std::{
+    collections::BTreeSet,
+    path::{Component, Path, PathBuf},
+};
+
+use anyhow::{Context, Result};
+
+use super::super::adapter::{AgentKind, AgentSessionCtx, AgentStability, ObservedAgent};
+
+/// PI-01 identity stub. The db tag is accepted, but the registry row stays
+/// unsupported: discovery is internal (PI-02), and capture, hook install, and
+/// launch are closed until later cards.
+pub struct PiObservedAgent;
+
+impl ObservedAgent for PiObservedAgent {
+    fn provider_kind(&self) -> AgentKind {
+        AgentKind::Pi
+    }
+
+    fn provider_name(&self) -> &'static str {
+        "pi"
+    }
+
+    fn stability(&self) -> AgentStability {
+        AgentStability::Stable
+    }
+
+    fn read_transcript(&self, _session: &AgentSessionCtx) -> Result<Option<Vec<u8>>> {
+        Err(anyhow::anyhow!(
+            "pi capture is not available; the identity is registered but discovery, capture, hook install, and launch stay disabled"
+        ))
+    }
+
+    fn protected_dirs(&self) -> &'static [&'static str] {
+        &[".pi"]
+    }
+}
+
+/// Default bound on directory entries one discovery walk inspects.
+pub const PI_DISCOVERY_MAX_ENTRIES: usize = 4096;
+/// Default bound on the bytes read from one session file's header line.
+pub const PI_DISCOVERY_MAX_HEADER_BYTES: u64 = 64 * 1024;
+/// Default bound on the bytes one discovery walk reads in total.
+pub const PI_DISCOVERY_MAX_TOTAL_BYTES: u64 = 16 * 1024 * 1024;
+
+/// Bounds for one discovery walk.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct PiDiscoveryLimits {
+    /// Directory entries inspected across every level of the walk.
+    pub max_entries: usize,
+    /// Bytes read from one session file looking for its header line.
+    pub max_header_bytes: u64,
+    /// Bytes read from all session files together.
+    pub max_total_bytes: u64,
+}
+
+impl Default for PiDiscoveryLimits {
+    fn default() -> Self {
+        Self {
+            max_entries: PI_DISCOVERY_MAX_ENTRIES,
+            max_header_bytes: PI_DISCOVERY_MAX_HEADER_BYTES,
+            max_total_bytes: PI_DISCOVERY_MAX_TOTAL_BYTES,
+        }
+    }
+}
+
+/// How the session files sit under the discovery root.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum PiSessionLayout {
+    /// `<root>/--<encoded-cwd>--/<file>.jsonl`, Pi's default sessions root.
+    Default,
+    /// `<root>/<file>.jsonl`, an explicit session directory.
+    Flat,
+}
+
+/// Why a discovery root was refused before anything under it was read.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum PiRootRefusal {
+    /// The root is not an absolute path.
+    NotAbsolute,
+    /// The root contains a `..` component.
+    ParentComponent,
+    /// The root is not inside the configured Pi provider root (`~/.pi`).
+    OutsideProviderRoot,
+    /// The root, or a directory between it and the provider root, is a
+    /// symlink.
+    Symlink,
+    /// The root exists but is not a directory.
+    NotADirectory,
+}
+
+/// Why a discovery result is partial.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
+pub enum PiPartialReason {
+    /// More entries existed than [`PiDiscoveryLimits::max_entries`].
+    EntryLimit,
+    /// A header or the walk needed more bytes than the limits allow.
+    ByteLimit,
+    /// A symlinked entry was refused without being followed or read.
+    SymlinkEntry,
+    /// A FIFO, device, or other non-regular entry was refused unread.
+    NonRegularEntry,
+    /// A directory another user owns, that its group or others can write, or
+    /// (macOS) that carries an extended ACL, was not walked: an entry there
+    /// could be swapped between its type check and its open.
+    UnsafeDirectory,
+    /// An entry vanished or changed type between enumeration and its open,
+    /// or vanished before its type could be read.
+    ChangedEntry,
+}
+
+/// One session file found by discovery: its path and its first line.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct PiSessionCandidate {
+    pub path: PathBuf,
+    /// The header line without its newline. Session identity and repository
+    /// attribution are decided from it later (PI-15).
+    pub header: Vec<u8>,
+}
+
+/// The result of one discovery walk.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct PiDiscovery {
+    /// Session files found, sorted by path.
+    pub candidates: Vec<PiSessionCandidate>,
+    /// Set when the root was refused; nothing under it was read.
+    pub refused: Option<PiRootRefusal>,
+    pub partial_reasons: BTreeSet<PiPartialReason>,
+    /// Directory entries inspected.
+    pub entries_scanned: usize,
+    /// Session files read: opened and confirmed to be regular files.
+    pub source_reads: usize,
+    /// Bytes read from session files.
+    pub bytes_read: u64,
+}
+
+impl PiDiscovery {
+    /// Whether some session files may be missing from [`Self::candidates`].
+    pub fn partial(&self) -> bool {
+        !self.partial_reasons.is_empty()
+    }
+
+    fn refuse(reason: PiRootRefusal) -> Self {
+        Self {
+            refused: Some(reason),
+            ..Self::default()
+        }
+    }
+}
+
+/// Discover Pi session files under `root`, which must be an absolute path
+/// inside the configured Pi provider root. Symlinked entries are never
+/// followed and non-regular entries are never read; walks past a limit stop
+/// and report [`PiPartialReason`]s. A missing root yields an empty result.
+pub fn discover_pi_sessions(
+    root: &Path,
+    layout: PiSessionLayout,
+    limits: PiDiscoveryLimits,
+) -> Result<PiDiscovery> {
+    discover_pi_sessions_observed(root, layout, limits, &mut |_| {})
+}
+
+/// [`discover_pi_sessions`] with `before_open` called on each session file
+/// just before it is opened (tests use it to swap the entry).
+fn discover_pi_sessions_observed(
+    root: &Path,
+    layout: PiSessionLayout,
+    limits: PiDiscoveryLimits,
+    before_open: &mut dyn FnMut(&Path),
+) -> Result<PiDiscovery> {
+    if !root.is_absolute() {
+        return Ok(PiDiscovery::refuse(PiRootRefusal::NotAbsolute));
+    }
+    if root
+        .components()
+        .any(|component| matches!(component, Component::ParentDir))
+    {
+        return Ok(PiDiscovery::refuse(PiRootRefusal::ParentComponent));
+    }
+    let adapter = super::super::agent_for(AgentKind::Pi);
+    let normalized = super::super::transcript_source::normalize_macos_system_directory_alias(root);
+    let Some(provider_root) = super::super::transcript_source::configured_provider_roots(adapter)
+        .into_iter()
+        .find(|provider_root| normalized.starts_with(provider_root))
+    else {
+        return Ok(PiDiscovery::refuse(PiRootRefusal::OutsideProviderRoot));
+    };
+    discover_within_provider_root(
+        adapter,
+        &provider_root,
+        &normalized,
+        layout,
+        limits,
+        before_open,
+    )
+}
+
+#[cfg(any(unix, windows))]
+fn discover_within_provider_root(
+    adapter: &dyn ObservedAgent,
+    provider_root: &Path,
+    root: &Path,
+    layout: PiSessionLayout,
+    limits: PiDiscoveryLimits,
+    before_open: &mut dyn FnMut(&Path),
+) -> Result<PiDiscovery> {
+    let directory =
+        match super::super::transcript_source::open_provider_directory_for_discovery(adapter, root)
+        {
+            Ok(Some(directory)) => directory,
+            Ok(None) => return Ok(PiDiscovery::default()),
+            Err(error) => {
+                return match root_refusal(provider_root, root) {
+                    Some(reason) => Ok(PiDiscovery::refuse(reason)),
+                    None => Err(error).context("open the Pi session root"),
+                };
+            }
+        };
+    let mut discovery = PiDiscovery::default();
+    let mut walk = Walk {
+        limits,
+        discovery: &mut discovery,
+        before_open,
+    };
+    walk.directory(&directory, root, layout)?;
+    discovery
+        .candidates
+        .sort_by(|left, right| left.path.cmp(&right.path));
+    Ok(discovery)
+}
+
+#[cfg(not(any(unix, windows)))]
+fn discover_within_provider_root(
+    _adapter: &dyn ObservedAgent,
+    _provider_root: &Path,
+    _root: &Path,
+    _layout: PiSessionLayout,
+    _limits: PiDiscoveryLimits,
+    _before_open: &mut dyn FnMut(&Path),
+) -> Result<PiDiscovery> {
+    anyhow::bail!("Pi session discovery is unavailable on this platform; it fails closed")
+}
+
+/// Classify a root the no-follow open refused: a symlink at or above it
+/// (below the provider root), or a non-directory. `None` leaves the open
+/// error as it was.
+#[cfg(any(unix, windows))]
+fn root_refusal(provider_root: &Path, root: &Path) -> Option<PiRootRefusal> {
+    let relative = root.strip_prefix(provider_root).ok()?;
+    let mut current = provider_root.to_path_buf();
+    for path in std::iter::once(current.clone()).chain(relative.components().map(|component| {
+        current.push(component);
+        current.clone()
+    })) {
+        match std::fs::symlink_metadata(&path) {
+            Ok(metadata) if metadata.file_type().is_symlink() => {
+                return Some(PiRootRefusal::Symlink);
+            }
+            Ok(metadata) if path == root && !metadata.is_dir() => {
+                return Some(PiRootRefusal::NotADirectory);
+            }
+            Ok(_) => {}
+            Err(_) => return None,
+        }
+    }
+    None
+}
+
+/// Bytes requested per read while looking for a header's newline. Up to
+/// `PI_HEADER_READ_CHUNK - 1` bytes after the newline may be read into the
+/// transient read buffer; they are dropped at once, never kept, parsed, or
+/// logged, and are charged to the byte limits.
+#[cfg(any(unix, windows))]
+const PI_HEADER_READ_CHUNK: usize = 512;
+
+/// One bounded walk. Returns `false` from a step once a limit stopped it.
+#[cfg(any(unix, windows))]
+struct Walk<'a> {
+    limits: PiDiscoveryLimits,
+    discovery: &'a mut PiDiscovery,
+    before_open: &'a mut dyn FnMut(&Path),
+}
+
+#[cfg(any(unix, windows))]
+impl Walk<'_> {
+    fn directory(
+        &mut self,
+        directory: &std::fs::File,
+        logical: &Path,
+        layout: PiSessionLayout,
+    ) -> Result<bool> {
+        use super::super::transcript_source::PinnedEntryType;
+
+        if !directory_is_private(directory)
+            .with_context(|| format!("inspect Pi session directory {}", logical.display()))?
+        {
+            self.discovery
+                .partial_reasons
+                .insert(PiPartialReason::UnsafeDirectory);
+            return Ok(true);
+        }
+        let mut entries =
+            super::super::transcript_source::read_dir_pinned_provider_directory_reporting_vanished(
+                directory,
+            )
+            .with_context(|| format!("read Pi session directory {}", logical.display()))?;
+        loop {
+            // Checked before the next entry is fetched, so the walk never
+            // inspects more than `max_entries`; at the limit it is partial
+            // whether or not more entries exist.
+            if self.discovery.entries_scanned >= self.limits.max_entries {
+                self.discovery
+                    .partial_reasons
+                    .insert(PiPartialReason::EntryLimit);
+                return Ok(false);
+            }
+            let Some(entry) = entries.next() else {
+                return Ok(true);
+            };
+            self.discovery.entries_scanned += 1;
+            let entry = entry.with_context(|| {
+                format!("read Pi session directory entry in {}", logical.display())
+            })?;
+            let name = entry.file_name;
+            match entry.file_type {
+                PinnedEntryType::Symlink => {
+                    self.discovery
+                        .partial_reasons
+                        .insert(PiPartialReason::SymlinkEntry);
+                }
+                PinnedEntryType::Other => {
+                    self.discovery
+                        .partial_reasons
+                        .insert(PiPartialReason::NonRegularEntry);
+                }
+                // Listed, then gone before its type could be read; counted
+                // against `max_entries` like any other entry.
+                PinnedEntryType::Vanished => {
+                    self.discovery
+                        .partial_reasons
+                        .insert(PiPartialReason::ChangedEntry);
+                }
+                PinnedEntryType::Directory => {
+                    if layout == PiSessionLayout::Default && is_encoded_cwd_dir(&name) {
+                        (self.before_open)(&logical.join(&name));
+                        let opened =
+                            super::super::transcript_source::open_directory_beneath_pinned_directory(
+                                directory,
+                                Path::new(&name),
+                            );
+                        let subdirectory = match opened {
+                            Ok(subdirectory) => subdirectory,
+                            Err(error) => match changed_entry_reason(&error) {
+                                Some(reason) => {
+                                    self.discovery.partial_reasons.insert(reason);
+                                    continue;
+                                }
+                                None => {
+                                    return Err(error).with_context(|| {
+                                        format!(
+                                            "open Pi session directory {}",
+                                            logical.join(&name).display()
+                                        )
+                                    });
+                                }
+                            },
+                        };
+                        if !self.directory(
+                            &subdirectory,
+                            &logical.join(&name),
+                            PiSessionLayout::Flat,
+                        )? {
+                            return Ok(false);
+                        }
+                    }
+                }
+                PinnedEntryType::File => {
+                    if layout == PiSessionLayout::Flat
+                        && Path::new(&name)
+                            .extension()
+                            .is_some_and(|extension| extension == "jsonl")
+                        && !self.session_file(directory, logical, &name)?
+                    {
+                        return Ok(false);
+                    }
+                }
+            }
+        }
+    }
+
+    /// Read one session file's header line within the limits.
+    fn session_file(
+        &mut self,
+        directory: &std::fs::File,
+        logical: &Path,
+        name: &std::ffi::OsStr,
+    ) -> Result<bool> {
+        use std::io::Read;
+
+        let remaining = self
+            .limits
+            .max_total_bytes
+            .saturating_sub(self.discovery.bytes_read);
+        if remaining == 0 {
+            self.discovery
+                .partial_reasons
+                .insert(PiPartialReason::ByteLimit);
+            return Ok(false);
+        }
+        let path = logical.join(name);
+        (self.before_open)(&path);
+        let opened = match open_regular_session_file(directory, name) {
+            Ok(opened) => opened,
+            Err(error) => match changed_entry_reason(&error) {
+                Some(reason) => {
+                    self.discovery.partial_reasons.insert(reason);
+                    return Ok(true);
+                }
+                None => {
+                    return Err(error)
+                        .with_context(|| format!("open Pi session file {}", path.display()));
+                }
+            },
+        };
+        let Some(file) = opened else {
+            // Replaced by a non-regular entry after its type was read.
+            self.discovery
+                .partial_reasons
+                .insert(PiPartialReason::NonRegularEntry);
+            return Ok(true);
+        };
+        self.discovery.source_reads += 1;
+        let cap = self.limits.max_header_bytes.min(remaining);
+        let mut header = Vec::new();
+        let mut reader = file.take(cap);
+        let mut chunk = [0u8; PI_HEADER_READ_CHUNK];
+        let mut ended_line = false;
+        loop {
+            let read = reader
+                .read(&mut chunk)
+                .with_context(|| format!("read Pi session file {}", path.display()))?;
+            if read == 0 {
+                break;
+            }
+            self.discovery.bytes_read += read as u64;
+            if let Some(index) = chunk[..read].iter().position(|byte| *byte == b'\n') {
+                header.extend_from_slice(&chunk[..index]);
+                ended_line = true;
+                break;
+            }
+            header.extend_from_slice(&chunk[..read]);
+        }
+        let truncated = !ended_line && header.len() as u64 == cap;
+        if truncated {
+            self.discovery
+                .partial_reasons
+                .insert(PiPartialReason::ByteLimit);
+            // A header longer than one file's cap drops that file only; a
+            // walk out of total budget stops.
+            return Ok(cap == self.limits.max_header_bytes);
+        }
+        self.discovery
+            .candidates
+            .push(PiSessionCandidate { path, header });
+        Ok(true)
+    }
+}
+
+/// Whether only the current user can change `directory`'s entries: it is
+/// theirs and neither its group nor others can write it. Then no other user
+/// can swap an entry between its type check and its open.
+#[cfg(unix)]
+fn directory_is_private(directory: &std::fs::File) -> Result<bool> {
+    use std::os::unix::fs::MetadataExt;
+
+    let metadata = directory.metadata()?;
+    // SAFETY: geteuid has no preconditions and cannot fail.
+    let euid = unsafe { libc::geteuid() };
+    // On Linux a POSIX ACL entry that grants write is capped by the ACL mask,
+    // which the group mode bits report, so the mode check covers it.
+    Ok(metadata.uid() == euid
+        && metadata.mode() & 0o022 == 0
+        && !directory_has_extended_acl(directory)?)
+}
+
+/// Whether a macOS directory carries an extended ACL. Such an ACL can let
+/// another user add or delete entries whatever the mode bits say, so any
+/// extended ACL object, whatever its entries, makes the directory unsafe.
+#[cfg(target_os = "macos")]
+fn directory_has_extended_acl(directory: &std::fs::File) -> Result<bool> {
+    use std::os::fd::AsRawFd;
+
+    // <sys/acl.h>: `acl_type_t` is a C enum (int).
+    const ACL_TYPE_EXTENDED: libc::c_int = 0x0000_0100;
+    unsafe extern "C" {
+        fn acl_get_fd_np(fd: libc::c_int, kind: libc::c_int) -> *mut libc::c_void;
+        fn acl_free(object: *mut libc::c_void) -> libc::c_int;
+    }
+
+    // SAFETY: the descriptor stays open for the call; a non-null result is
+    // an ACL this function owns and frees at once.
+    let acl = unsafe { acl_get_fd_np(directory.as_raw_fd(), ACL_TYPE_EXTENDED) };
+    if !acl.is_null() {
+        // SAFETY: `acl` is the live ACL obtained above, freed exactly once.
+        unsafe { acl_free(acl) };
+        return Ok(true);
+    }
+    extended_acl_lookup_failure(std::io::Error::last_os_error())
+}
+
+/// The verdict for an extended-ACL lookup that returned no ACL: none
+/// (`ENOENT`) or none possible on this filesystem (`ENOTSUP`, `EOPNOTSUPP`)
+/// is safe; any other failure could hide an ACL and is an error, so the walk
+/// fails closed.
+#[cfg(target_os = "macos")]
+fn extended_acl_lookup_failure(error: std::io::Error) -> Result<bool> {
+    match error.raw_os_error() {
+        Some(libc::ENOENT) | Some(libc::ENOTSUP) | Some(libc::EOPNOTSUPP) => Ok(false),
+        _ => Err(error).context("read the directory's extended ACL"),
+    }
+}
+
+#[cfg(all(unix, not(target_os = "macos")))]
+fn directory_has_extended_acl(_directory: &std::fs::File) -> Result<bool> {
+    Ok(false)
+}
+
+/// The partial reason for an open that failed because the entry vanished
+/// (`ChangedEntry`), became a symlink (`SymlinkEntry`), or changed type
+/// (`ChangedEntry`) after enumeration. `None` for any other failure.
+#[cfg(any(unix, windows))]
+fn changed_entry_reason(error: &anyhow::Error) -> Option<PiPartialReason> {
+    let io = error.downcast_ref::<std::io::Error>()?;
+    if io.kind() == std::io::ErrorKind::NotFound {
+        return Some(PiPartialReason::ChangedEntry);
+    }
+    #[cfg(unix)]
+    if io.raw_os_error() == Some(libc::ELOOP) {
+        return Some(PiPartialReason::SymlinkEntry);
+    }
+    #[cfg(unix)]
+    if io.raw_os_error() == Some(libc::ENOTDIR) {
+        return Some(PiPartialReason::ChangedEntry);
+    }
+    // The Windows openers report an entry that is now a reparse point, the
+    // other kind (file or directory), or not a disk object as `InvalidData`.
+    #[cfg(windows)]
+    if io.kind() == std::io::ErrorKind::InvalidData {
+        return Some(PiPartialReason::ChangedEntry);
+    }
+    None
+}
+
+/// Whether only the current user (with SYSTEM and Administrators) can change
+/// `directory`'s entries: it is owned by one of them and no allowed ACE that
+/// applies to it gives write rights to anyone else. Windows directories hold
+/// no FIFOs or device nodes, and reparse points are refused by the no-follow
+/// walk. A security lookup that fails is an error.
+#[cfg(windows)]
+fn directory_is_private(directory: &std::fs::File) -> Result<bool> {
+    Ok(crate::utils::windows_fs::directory_entries_private(
+        directory,
+    )?)
+}
+
+/// Open `name` beneath `directory` without following a symlink and without
+/// blocking, and return it only if the opened object is a regular file. A
+/// FIFO or device swapped in after the entry's type was read is closed
+/// unread (`None`).
+#[cfg(unix)]
+fn open_regular_session_file(
+    directory: &std::fs::File,
+    name: &std::ffi::OsStr,
+) -> Result<Option<std::fs::File>> {
+    use std::{
+        ffi::CString,
+        os::{
+            fd::{AsRawFd, FromRawFd},
+            unix::ffi::OsStrExt,
+        },
+    };
+
+    let name = CString::new(name.as_bytes()).context("session file name contains NUL")?;
+    // SAFETY: the pinned directory descriptor and the NUL-terminated basename
+    // stay alive for the call; O_NOFOLLOW refuses a symlink and O_NONBLOCK
+    // keeps a FIFO from blocking the open.
+    let fd = unsafe {
+        libc::openat(
+            directory.as_raw_fd(),
+            name.as_ptr(),
+            libc::O_RDONLY | libc::O_NOFOLLOW | libc::O_NONBLOCK | libc::O_CLOEXEC,
+        )
+    };
+    if fd < 0 {
+        return Err(std::io::Error::last_os_error()).context("open the session file (no-follow)");
+    }
+    // SAFETY: `fd` is a fresh descriptor from `openat`, owned from here on.
+    let file = unsafe { std::fs::File::from_raw_fd(fd) };
+    if !file
+        .metadata()
+        .context("inspect the session file")?
+        .is_file()
+    {
+        return Ok(None);
+    }
+    Ok(Some(file))
+}
+
+#[cfg(windows)]
+fn open_regular_session_file(
+    directory: &std::fs::File,
+    name: &std::ffi::OsStr,
+) -> Result<Option<std::fs::File>> {
+    super::super::open_file_beneath_pinned_provider_directory(directory, Path::new(name)).map(Some)
+}
+
+/// Pi names a default-layout directory `--<encoded-cwd>--`.
+#[cfg(any(unix, windows))]
+fn is_encoded_cwd_dir(name: &std::ffi::OsStr) -> bool {
+    name.to_str()
+        .is_some_and(|name| name.len() > 4 && name.starts_with("--") && name.ends_with("--"))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// PI-02 AC4: a session file replaced by a FIFO after its directory entry
+    /// was read as a regular file is closed unread, without blocking.
+    #[cfg(unix)]
+    #[test]
+    #[serial_test::serial(env)]
+    fn pi_discovery_refuses_a_fifo_swapped_in_before_open() {
+        let home = tempfile::tempdir().expect("pi home");
+        let _home = crate::utils::test::ScopedEnvVar::set("LIBRA_TEST_HOME", home.path());
+        let sessions = home.path().join(".pi").join("agent").join("sessions");
+        let cwd_dir = sessions.join("--work--");
+        std::fs::create_dir_all(&cwd_dir).expect("session dir");
+        std::fs::write(cwd_dir.join("swapped.jsonl"), "{\"type\":\"session\"}\n")
+            .expect("session file");
+        std::fs::write(cwd_dir.join("kept.jsonl"), "{\"type\":\"session\"}\n")
+            .expect("session file");
+        let mut swapped = 0;
+        let discovery = discover_pi_sessions_observed(
+            &sessions,
+            PiSessionLayout::Default,
+            PiDiscoveryLimits::default(),
+            &mut |path| {
+                if path.file_name().is_some_and(|name| name == "swapped.jsonl") {
+                    std::fs::remove_file(path).expect("remove the regular file");
+                    let made = std::process::Command::new("mkfifo")
+                        .arg(path)
+                        .status()
+                        .expect("run mkfifo");
+                    assert!(made.success(), "mkfifo");
+                    swapped += 1;
+                }
+            },
+        )
+        .expect("discovery");
+        assert_eq!(swapped, 1, "the hook ran before the swapped file's open");
+        assert!(
+            discovery
+                .partial_reasons
+                .contains(&PiPartialReason::NonRegularEntry)
+        );
+        assert_eq!(discovery.source_reads, 1, "only the kept file was read");
+        assert_eq!(
+            discovery
+                .candidates
+                .iter()
+                .map(|candidate| candidate.path.file_name().expect("name").to_owned())
+                .collect::<Vec<_>>(),
+            vec![std::ffi::OsString::from("kept.jsonl")]
+        );
+    }
+    /// PI-02 AC3/AC4: an entry that vanishes, becomes a symlink, or (for a
+    /// cwd directory) disappears between enumeration and its open is recorded
+    /// as partial; the walk goes on and reads the other sessions.
+    #[cfg(unix)]
+    #[test]
+    #[serial_test::serial(env)]
+    fn pi_discovery_survives_a_removed_or_swapped_entry() {
+        let home = tempfile::tempdir().expect("pi home");
+        let _home = crate::utils::test::ScopedEnvVar::set("LIBRA_TEST_HOME", home.path());
+        let sessions = home.path().join(".pi").join("agent").join("sessions");
+        let cwd_dir = sessions.join("--work--");
+        let gone_dir = sessions.join("--gone--");
+        std::fs::create_dir_all(&cwd_dir).expect("session dir");
+        std::fs::create_dir_all(&gone_dir).expect("vanishing dir");
+        for name in ["kept.jsonl", "gone.jsonl", "linked.jsonl"] {
+            std::fs::write(cwd_dir.join(name), "{\"type\":\"session\"}\n").expect("session file");
+        }
+        std::fs::write(gone_dir.join("inside.jsonl"), "{\"type\":\"session\"}\n")
+            .expect("session file");
+        let target = home.path().join("target.jsonl");
+        std::fs::write(&target, "{\"type\":\"session\"}\n").expect("symlink target");
+        let discovery = discover_pi_sessions_observed(
+            &sessions,
+            PiSessionLayout::Default,
+            PiDiscoveryLimits::default(),
+            &mut |path| match path.file_name().and_then(|name| name.to_str()) {
+                Some("gone.jsonl") => std::fs::remove_file(path).expect("remove the file"),
+                Some("linked.jsonl") => {
+                    std::fs::remove_file(path).expect("remove the file");
+                    std::os::unix::fs::symlink(&target, path).expect("swap in a symlink");
+                }
+                Some("--gone--") => std::fs::remove_dir_all(path).expect("remove the dir"),
+                _ => {}
+            },
+        )
+        .expect("a changed entry does not abort the walk");
+        assert!(
+            discovery
+                .partial_reasons
+                .contains(&PiPartialReason::ChangedEntry),
+            "{:?}",
+            discovery.partial_reasons
+        );
+        assert!(
+            discovery
+                .partial_reasons
+                .contains(&PiPartialReason::SymlinkEntry),
+            "{:?}",
+            discovery.partial_reasons
+        );
+        assert_eq!(discovery.source_reads, 1);
+        assert_eq!(
+            discovery
+                .candidates
+                .iter()
+                .map(|candidate| candidate.path.file_name().expect("name").to_owned())
+                .collect::<Vec<_>>(),
+            vec![std::ffi::OsString::from("kept.jsonl")]
+        );
+    }
+
+    /// PI-02 AC3 on Windows: a symlinked (reparse-point) root refuses the
+    /// walk, and a symlinked entry is refused unread. Creating a symlink
+    /// needs Developer Mode or elevation; without it the test prints
+    /// `skipped`, unless `LIBRA_REQUIRE_WINDOWS_SYMLINKS=1` (set by the
+    /// native Windows CI job) makes that a failure.
+    #[cfg(windows)]
+    #[test]
+    #[serial_test::serial(env)]
+    fn pi_discovery_refuses_reparse_points_on_windows() {
+        let home = tempfile::tempdir().expect("pi home");
+        let _home = crate::utils::test::ScopedEnvVar::set("LIBRA_TEST_HOME", home.path());
+        let agent = home.path().join(".pi").join("agent");
+        let sessions = agent.join("sessions");
+        let cwd_dir = sessions.join("--work--");
+        std::fs::create_dir_all(&cwd_dir).expect("session dir");
+        std::fs::write(cwd_dir.join("real.jsonl"), "{\"type\":\"session\"}\n")
+            .expect("session file");
+        let elsewhere = tempfile::tempdir().expect("elsewhere");
+        std::fs::write(
+            elsewhere.path().join("target.jsonl"),
+            "{\"type\":\"session\"}\n",
+        )
+        .expect("symlink target");
+        if let Err(error) =
+            std::os::windows::fs::symlink_dir(elsewhere.path(), agent.join("linked-sessions"))
+        {
+            assert!(
+                std::env::var_os("LIBRA_REQUIRE_WINDOWS_SYMLINKS").is_none(),
+                "LIBRA_REQUIRE_WINDOWS_SYMLINKS is set but a symlink cannot be created: {error}"
+            );
+            eprintln!("skipped (creating a symlink needs Developer Mode or elevation: {error})");
+            return;
+        }
+        let discovery = discover_pi_sessions(
+            &agent.join("linked-sessions"),
+            PiSessionLayout::Flat,
+            PiDiscoveryLimits::default(),
+        )
+        .expect("discovery");
+        assert_eq!(discovery.refused, Some(PiRootRefusal::Symlink));
+        assert_eq!(discovery.source_reads, 0);
+        std::os::windows::fs::symlink_file(
+            elsewhere.path().join("target.jsonl"),
+            cwd_dir.join("linked.jsonl"),
+        )
+        .expect("file symlink");
+        let discovery = discover_pi_sessions(
+            &sessions,
+            PiSessionLayout::Default,
+            PiDiscoveryLimits::default(),
+        )
+        .expect("discovery");
+        assert!(
+            discovery
+                .partial_reasons
+                .contains(&PiPartialReason::SymlinkEntry)
+        );
+        assert_eq!(discovery.source_reads, 1);
+        assert_eq!(discovery.candidates.len(), 1);
+
+        // A regular file swapped for a reparse point after enumeration is
+        // recorded as changed; the walk still reads the other session.
+        std::fs::remove_file(cwd_dir.join("linked.jsonl")).expect("remove the file symlink");
+        std::fs::write(cwd_dir.join("swapped.jsonl"), "{\"type\":\"session\"}\n")
+            .expect("session file");
+        let target = elsewhere.path().join("target.jsonl");
+        let discovery = discover_pi_sessions_observed(
+            &sessions,
+            PiSessionLayout::Default,
+            PiDiscoveryLimits::default(),
+            &mut |path| {
+                if path.file_name().is_some_and(|name| name == "swapped.jsonl") {
+                    std::fs::remove_file(path).expect("remove the regular file");
+                    std::os::windows::fs::symlink_file(&target, path)
+                        .expect("swap in a file symlink");
+                }
+            },
+        )
+        .expect("a swapped entry does not abort the walk");
+        assert!(
+            discovery
+                .partial_reasons
+                .contains(&PiPartialReason::ChangedEntry),
+            "{:?}",
+            discovery.partial_reasons
+        );
+        assert_eq!(discovery.source_reads, 1);
+        assert_eq!(discovery.candidates.len(), 1);
+    }
+
+    /// PI-02 AC4 on Windows: a session directory whose DACL lets another
+    /// principal (here Everyone) write is not walked, so nothing in it is read.
+    #[cfg(windows)]
+    #[test]
+    #[serial_test::serial(env)]
+    fn pi_discovery_refuses_a_directory_others_can_write_on_windows() {
+        let home = tempfile::tempdir().expect("pi home");
+        let _home = crate::utils::test::ScopedEnvVar::set("LIBRA_TEST_HOME", home.path());
+        let sessions = home.path().join(".pi").join("agent").join("sessions");
+        let private_dir = sessions.join("--work--");
+        let shared_dir = sessions.join("--shared--");
+        for dir in [&private_dir, &shared_dir] {
+            std::fs::create_dir_all(dir).expect("session dir");
+            std::fs::write(dir.join("s.jsonl"), "{\"type\":\"session\"}\n").expect("session file");
+        }
+        let granted = std::process::Command::new("icacls")
+            .arg(&shared_dir)
+            .args(["/grant", "*S-1-1-0:(W)"])
+            .output()
+            .expect("run icacls");
+        assert!(
+            granted.status.success(),
+            "icacls: {}",
+            String::from_utf8_lossy(&granted.stderr)
+        );
+        let discovery = discover_pi_sessions(
+            &sessions,
+            PiSessionLayout::Default,
+            PiDiscoveryLimits::default(),
+        )
+        .expect("discovery");
+        assert!(
+            discovery
+                .partial_reasons
+                .contains(&PiPartialReason::UnsafeDirectory),
+            "{:?}",
+            discovery.partial_reasons
+        );
+        assert_eq!(
+            discovery.source_reads, 1,
+            "only the private directory was read"
+        );
+        assert!(
+            discovery
+                .candidates
+                .iter()
+                .all(|candidate| !candidate.path.starts_with(&shared_dir))
+        );
+    }
+
+    /// PI-02 AC3/AC4 on macOS: an extended-ACL lookup that fails for any
+    /// reason but "no ACL" or "unsupported here" is an error, so a directory
+    /// whose ACL cannot be read is never walked.
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn pi_discovery_treats_an_unreadable_acl_as_an_error() {
+        for errno in [libc::ENOENT, libc::ENOTSUP, libc::EOPNOTSUPP] {
+            assert!(
+                !extended_acl_lookup_failure(std::io::Error::from_raw_os_error(errno))
+                    .expect("no ACL is safe"),
+                "{errno}"
+            );
+        }
+        for errno in [libc::EACCES, libc::EBADF, libc::EIO, libc::ENOMEM] {
+            assert!(
+                extended_acl_lookup_failure(std::io::Error::from_raw_os_error(errno)).is_err(),
+                "{errno}"
+            );
+        }
+    }
+    /// The shared pinned iterator, given an entry that vanishes between
+    /// enumeration and its type lookup: the default mode skips it (Unix) or
+    /// fails (Windows) as before, and the reporting mode yields it as
+    /// `Vanished`.
+    #[test]
+    fn pi_discovery_pinned_iterator_reports_an_entry_vanishing_before_type_lookup() {
+        use super::super::super::transcript_source::{
+            PinnedEntryType, open_absolute_directory_no_follow, read_dir_pinned_provider_directory,
+            read_dir_pinned_provider_directory_reporting_vanished, type_lookup_hook,
+        };
+
+        let names = |reporting: bool| -> Vec<Result<(String, PinnedEntryType), String>> {
+            let dir = tempfile::tempdir().expect("dir");
+            for name in ["a.jsonl", "gone.jsonl"] {
+                std::fs::write(dir.path().join(name), "x").expect("file");
+            }
+            let directory = open_absolute_directory_no_follow(
+                &super::super::super::transcript_source::normalize_macos_system_directory_alias(
+                    dir.path(),
+                ),
+            )
+            .expect("pin the directory");
+            let gone = dir.path().join("gone.jsonl");
+            type_lookup_hook::with(
+                move |name| {
+                    if name == "gone.jsonl" {
+                        let _ = std::fs::remove_file(&gone);
+                    }
+                },
+                || {
+                    let entries = if reporting {
+                        read_dir_pinned_provider_directory_reporting_vanished(&directory)
+                    } else {
+                        read_dir_pinned_provider_directory(&directory)
+                    }
+                    .expect("read the directory");
+                    let mut seen: Vec<_> = entries
+                        .map(|entry| {
+                            entry
+                                .map(|entry| {
+                                    (
+                                        entry.file_name.to_string_lossy().into_owned(),
+                                        entry.file_type,
+                                    )
+                                })
+                                .map_err(|error| error.to_string())
+                        })
+                        .collect();
+                    seen.sort_by(|left, right| format!("{left:?}").cmp(&format!("{right:?}")));
+                    seen
+                },
+            )
+        };
+        let reported = names(true);
+        assert!(
+            reported.contains(&Ok(("gone.jsonl".to_string(), PinnedEntryType::Vanished))),
+            "{reported:?}"
+        );
+        assert!(
+            reported.contains(&Ok(("a.jsonl".to_string(), PinnedEntryType::File))),
+            "{reported:?}"
+        );
+        let default = names(false);
+        assert!(
+            default.contains(&Ok(("a.jsonl".to_string(), PinnedEntryType::File))),
+            "{default:?}"
+        );
+        assert!(
+            !default
+                .iter()
+                .any(|entry| matches!(entry, Ok((_, PinnedEntryType::Vanished)))),
+            "the default mode never yields Vanished: {default:?}"
+        );
+        #[cfg(unix)]
+        assert_eq!(
+            default.len(),
+            1,
+            "Unix skips the vanished entry: {default:?}"
+        );
+        #[cfg(windows)]
+        assert!(
+            default.iter().any(Result::is_err),
+            "Windows fails on the vanished entry: {default:?}"
+        );
+    }
+
+    /// PI-02: an entry that vanishes before its type is read is recorded as
+    /// `ChangedEntry` and counted against `max_entries`, and the walk reads
+    /// the remaining session.
+    #[test]
+    #[serial_test::serial(env)]
+    fn pi_discovery_counts_an_entry_vanishing_before_type_lookup() {
+        use super::super::super::transcript_source::type_lookup_hook;
+
+        let home = tempfile::tempdir().expect("pi home");
+        let _home = crate::utils::test::ScopedEnvVar::set("LIBRA_TEST_HOME", home.path());
+        let sessions = home.path().join(".pi").join("agent").join("sessions");
+        let cwd_dir = sessions.join("--work--");
+        std::fs::create_dir_all(&cwd_dir).expect("session dir");
+        for name in ["kept.jsonl", "gone.jsonl"] {
+            std::fs::write(cwd_dir.join(name), "{\"type\":\"session\"}\n").expect("session file");
+        }
+        let gone = cwd_dir.join("gone.jsonl");
+        let discover = |limits: PiDiscoveryLimits| {
+            let gone = gone.clone();
+            let _ = std::fs::write(&gone, "{\"type\":\"session\"}\n");
+            type_lookup_hook::with(
+                move |name| {
+                    if name == "gone.jsonl" {
+                        let _ = std::fs::remove_file(&gone);
+                    }
+                },
+                || discover_pi_sessions(&sessions, PiSessionLayout::Default, limits),
+            )
+            .expect("discovery")
+        };
+        let discovery = discover(PiDiscoveryLimits::default());
+        assert!(
+            discovery
+                .partial_reasons
+                .contains(&PiPartialReason::ChangedEntry),
+            "{:?}",
+            discovery.partial_reasons
+        );
+        // `--work--`, `kept.jsonl`, and the vanished `gone.jsonl`.
+        assert_eq!(discovery.entries_scanned, 3);
+        assert_eq!(discovery.source_reads, 1);
+        assert_eq!(discovery.candidates.len(), 1);
+        // The vanished entry uses up the bound like any other entry. Only
+        // the cwd directory and the vanishing file exist here, so the walk
+        // cannot reach the bound without visiting it.
+        std::fs::remove_file(cwd_dir.join("kept.jsonl")).expect("remove the kept session");
+        std::fs::write(&gone, "{\"type\":\"session\"}\n").expect("session file");
+        let visited = std::rc::Rc::new(std::cell::Cell::new(false));
+        let bounded = {
+            let gone = gone.clone();
+            let visited = visited.clone();
+            type_lookup_hook::with(
+                move |name| {
+                    if name == "gone.jsonl" {
+                        visited.set(true);
+                        let _ = std::fs::remove_file(&gone);
+                    }
+                },
+                || {
+                    discover_pi_sessions(
+                        &sessions,
+                        PiSessionLayout::Default,
+                        PiDiscoveryLimits {
+                            max_entries: 2,
+                            ..PiDiscoveryLimits::default()
+                        },
+                    )
+                },
+            )
+            .expect("discovery")
+        };
+        assert!(visited.get(), "the vanishing entry was visited");
+        assert_eq!(bounded.entries_scanned, 2);
+        assert!(
+            bounded
+                .partial_reasons
+                .contains(&PiPartialReason::EntryLimit)
+        );
+        assert!(
+            bounded
+                .partial_reasons
+                .contains(&PiPartialReason::ChangedEntry)
+        );
+        assert!(bounded.candidates.is_empty());
+    }
+}

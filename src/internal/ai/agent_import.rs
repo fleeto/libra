@@ -7515,6 +7515,103 @@ pub(crate) mod tests {
         );
     }
 
+    /// PI-01: the identity-only `pi` kind is outside `IMPORTABLE_AGENT_KINDS`,
+    /// so every prepared-import entry refuses it (PI-29's gate) before any
+    /// lease, catalog row, checkpoint or object is written. On Unix the same
+    /// request as `codex` imports, so the refusal is the kind gate's.
+    #[tokio::test]
+    async fn pi_role_prepared_import_entries_write_nothing() {
+        assert!(!is_importable_kind(AgentKind::Pi));
+        let (_tmp, conn, root, scope) = cov2_import_test_setup().await;
+        let storage = root.join(util::ROOT_DIR);
+        let pi_request = || {
+            let mut request =
+                cov2_import_test_request(&root, &scope, vec![cov2_test_turn("pi", 0)]);
+            request.agent_kind = AgentKind::Pi;
+            request.provider_session_id = "pi-refused".to_owned();
+            request.session_id = "pi__pi-refused".to_owned();
+            request
+        };
+        let tables = [
+            "agent_session",
+            "agent_import_identity",
+            "agent_checkpoint",
+            "agent_coverage_claim",
+            "object_index",
+        ];
+        let counts = |conn: DatabaseConnection| async move {
+            let mut counts = Vec::new();
+            for table in tables {
+                counts.push(cov2_count(&conn, &format!("SELECT COUNT(*) AS n FROM {table}")).await);
+            }
+            counts
+        };
+        let before = counts(conn.clone()).await;
+        let before_files = cov2_object_files(&storage);
+        let before_traces = cov2_traces_head(&conn).await;
+        let refusals = [
+            import_prepared(
+                &conn,
+                &storage,
+                pi_request(),
+                commit_deadline_after(Duration::from_secs(30)),
+            )
+            .await
+            .map(|_| ())
+            .unwrap_err(),
+            import_prepared_with_retention(
+                &conn,
+                &storage,
+                pi_request(),
+                commit_deadline_after(Duration::from_secs(30)),
+                super::super::subagent_content::SubagentDiscovery::default(),
+                None,
+                None,
+                None,
+            )
+            .await
+            .map(|_| ())
+            .unwrap_err(),
+            import_prepared_with_coverage_versions(
+                &conn,
+                &storage,
+                pi_request(),
+                &[2],
+                Duration::from_secs(30),
+                None,
+            )
+            .await
+            .map(|_| ())
+            .unwrap_err(),
+        ];
+        for error in refusals {
+            assert!(
+                error.to_string().contains(
+                    "agent kind 'pi' cannot be imported (prepared imports accept claude_code, codex, opencode, or hermes); nothing was written"
+                ),
+                "{error:#}"
+            );
+        }
+        assert_eq!(counts(conn.clone()).await, before);
+        assert_eq!(cov2_object_files(&storage), before_files);
+        assert_eq!(cov2_traces_head(&conn).await, before_traces);
+
+        #[cfg(unix)]
+        {
+            let imported = import_prepared_with_coverage_versions(
+                &conn,
+                &storage,
+                cov2_import_test_request(&root, &scope, vec![cov2_test_turn("pi", 0)]),
+                &[2],
+                Duration::from_secs(30),
+                Some(&native_import_test_helper_program()),
+            )
+            .await
+            .unwrap();
+            assert_eq!(imported.checkpoints_written, 1);
+        }
+    }
+
     /// PI-29: every prepared-import entry refuses a kind outside
     /// `IMPORTABLE_AGENT_KINDS` before any lease, catalog row, checkpoint or
     /// object is written, on every platform. On Unix the same request as

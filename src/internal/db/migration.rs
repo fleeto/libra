@@ -607,6 +607,23 @@ const AGENT_KIND_WITH_HERMES: &[&str] = &[
     "hermes",
 ];
 
+/// PI-01: Repository `agent_session.agent_kind` CHECK gains `pi`.
+/// The previous complete set, including `grok`, `opencode`, and `hermes`,
+/// stays.
+const AGENT_KIND_PI_VERSION: i64 = 2026103101;
+const AGENT_KIND_WITH_PI: &[&str] = &[
+    "claude_code",
+    "cursor",
+    "codex",
+    "gemini",
+    "opencode",
+    "copilot",
+    "factory_ai",
+    "grok",
+    "hermes",
+    "pi",
+];
+
 #[derive(Clone, Copy)]
 struct AgentKindCheckSpec {
     version: i64,
@@ -636,11 +653,22 @@ const HERMES_KIND_CHECK: AgentKindCheckSpec = AgentKindCheckSpec {
     staging: "agent_session__hm_new",
 };
 
+const PI_KIND_CHECK: AgentKindCheckSpec = AgentKindCheckSpec {
+    version: AGENT_KIND_PI_VERSION,
+    receipt_name: "agent_kind_pi",
+    marker: "pi",
+    with_values: AGENT_KIND_WITH_PI,
+    without_values: AGENT_KIND_WITH_HERMES,
+    staging: "agent_session__pi_new",
+};
+
 fn agent_kind_check_spec(version: i64) -> Option<&'static AgentKindCheckSpec> {
     if version == AGENT_KIND_GROK_VERSION {
         Some(&GROK_KIND_CHECK)
     } else if version == AGENT_KIND_HERMES_VERSION {
         Some(&HERMES_KIND_CHECK)
+    } else if version == AGENT_KIND_PI_VERSION {
+        Some(&PI_KIND_CHECK)
     } else {
         None
     }
@@ -1076,7 +1104,7 @@ async fn claim_and_rebuild(
             .await?;
         if marker_rows > 0 {
             return Err(DbErr::Custom(format!(
-                "cannot roll back agent_kind {marker}: {marker_rows} agent_session row(s) use agent_kind '{marker}' and were kept. Delete or migrate those rows before rolling back"
+                "cannot roll back agent_kind {marker}: {marker_rows} agent_session row(s) use agent_kind '{marker}' and were kept; nothing was changed. The repository stays at this schema: keep using a Libra binary that supports it (or a newer one) and fix forward; do not delete captured sessions to roll back"
             )));
         }
         held.drop_receipt(spec.version).await?
@@ -3158,6 +3186,16 @@ pub(crate) fn repository_migrations() -> Vec<Migration> {
             include_str!("../../../sql/migrations/2026103001_agent_kind_hermes.sql"),
             include_str!("../../../sql/migrations/2026103001_agent_kind_hermes_down.sql"),
         ),
+        // PI-01: Repository agent_session.agent_kind CHECK gains 'pi'.
+        // The SQL body aborts if executed raw; the runner rebuilds the table
+        // on a dedicated connection (ADR-CAP-CHECK). Down refuses while any
+        // pi row exists and keeps those rows. Cloud sync stays refused.
+        sql_migration(
+            AGENT_KIND_PI_VERSION,
+            "agent_kind_pi",
+            include_str!("../../../sql/migrations/2026103101_agent_kind_pi.sql"),
+            include_str!("../../../sql/migrations/2026103101_agent_kind_pi_down.sql"),
+        ),
     ]
 }
 
@@ -3619,9 +3657,9 @@ mod tests {
         // `builtin_migrations()` so silent registry regressions surface
         // here in addition to `tests/db_migration_test.rs`.
         let runner = builtin_runner().expect("CEX-12.5 builtin registry must build clean");
-        assert_eq!(runner.len(), 72);
+        assert_eq!(runner.len(), 73);
         assert!(!runner.is_empty());
-        assert_eq!(runner.max_registered_version(), Some(2026103001));
+        assert_eq!(runner.max_registered_version(), Some(2026103101));
     }
 
     #[test]

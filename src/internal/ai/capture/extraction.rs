@@ -437,6 +437,7 @@ fn extract_deadline_provider_once(
         // `decode_extraction_request` accepts only the first-batch provider
         // codes, so this arm is defensive and cannot carry an error string.
         // Formats without a registered extractor stay explicitly partial.
+        // The PI-01 `pi` identity has no extractor and stays in this arm.
         _ => crate::internal::ai::observed_agents::extract::ExtractionSummary {
             partial: true,
             ..Default::default()
@@ -739,7 +740,8 @@ fn extraction_agent_code(agent_kind: AgentKind) -> Option<u8> {
         AgentKind::ClaudeCode => Some(1),
         AgentKind::Codex => Some(2),
         AgentKind::OpenCode => Some(3),
-        // Hermes has no extraction provider code. Keep it in this arm.
+        // Hermes and the PI-01 `pi` identity have no extraction provider
+        // code. Keep them in this arm.
         _ => None,
     }
 }

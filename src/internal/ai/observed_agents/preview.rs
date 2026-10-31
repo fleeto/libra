@@ -73,6 +73,8 @@ pub fn preview_spec_for(kind: AgentKind) -> Option<&'static PreviewSpec> {
 ///
 /// Hermes is an unsupported stable identity, not a preview spec.
 /// Its source reader lives in `builtin/hermes.rs`. Install and launch stay off.
+/// The PI-01 `pi` identity is likewise a stable stub in `observed_agents`,
+/// not a preview spec, so `agent doctor` lists no new provider row.
 pub fn is_preview(kind: AgentKind) -> bool {
     preview_spec_for(kind).is_some()
 }

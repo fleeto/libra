@@ -1749,8 +1749,14 @@ mod stderr_gc_tests {
     }
 
     #[tokio::test]
-    #[serial_test::serial(env)]
+    #[serial_test::serial(cwd, env)]
     async fn storage_config_upcast_clean_local_word_is_ready() {
+        // The storage lookup resolves the repository from the current
+        // directory; run it in a disposable one so it never opens (and
+        // migrates) whatever repository the test process started in.
+        let repo = tempfile::tempdir().expect("create isolated repository");
+        crate::utils::test::setup_with_new_libra_in(repo.path()).await;
+        let _cwd = crate::utils::test::ChangeDirGuard::new(repo.path());
         let _type = crate::utils::test::ScopedEnvVar::set("LIBRA_STORAGE_TYPE", "local");
         let dir = tempfile::tempdir().expect("temp");
         let storage = match crate::utils::client_storage::ClientStorage::open_init_storage(

@@ -41,6 +41,9 @@ pub enum AgentKind {
     /// External Hermes sessions. HM-01 accepts the db tag. Capture, hook
     /// install, and review/investigate launch stay disabled.
     Hermes,
+    /// External Pi sessions. PI-01 accepts the db tag only. Discovery,
+    /// capture, hook install, and review/investigate launch stay disabled.
+    Pi,
 }
 
 impl AgentKind {
@@ -57,6 +60,7 @@ impl AgentKind {
             Self::FactoryAi => "factory_ai",
             Self::Grok => "grok",
             Self::Hermes => "hermes",
+            Self::Pi => "pi",
         }
     }
 
@@ -85,6 +89,7 @@ impl AgentKind {
             "factory_ai" => Some(Self::FactoryAi),
             "grok" => Some(Self::Grok),
             "hermes" => Some(Self::Hermes),
+            "pi" => Some(Self::Pi),
             _ => None,
         }
     }
@@ -102,6 +107,7 @@ impl AgentKind {
             Self::FactoryAi => "factory-ai",
             Self::Grok => "grok",
             Self::Hermes => "hermes",
+            Self::Pi => "pi",
         }
     }
 
@@ -119,6 +125,7 @@ impl AgentKind {
             "factory-ai" | "factory_ai" | "factory" => Some(Self::FactoryAi),
             "grok" => Some(Self::Grok),
             "hermes" => Some(Self::Hermes),
+            "pi" => Some(Self::Pi),
             _ => None,
         }
     }
@@ -136,6 +143,7 @@ impl AgentKind {
             Self::FactoryAi,
             Self::Grok,
             Self::Hermes,
+            Self::Pi,
         ]
     }
 }
@@ -452,6 +460,7 @@ mod tests {
             (AgentKind::FactoryAi, "factory_ai"),
             (AgentKind::Grok, "grok"),
             (AgentKind::Hermes, "hermes"),
+            (AgentKind::Pi, "pi"),
         ] {
             assert_eq!(kind.as_db_str(), expected);
         }
@@ -472,6 +481,7 @@ mod tests {
             (AgentKind::FactoryAi, "factory-ai"),
             (AgentKind::Grok, "grok"),
             (AgentKind::Hermes, "hermes"),
+            (AgentKind::Pi, "pi"),
         ] {
             assert_eq!(kind.as_cli_slug(), expected);
         }
@@ -502,15 +512,16 @@ mod tests {
     #[test]
     fn agent_kind_all_returns_variants_in_registration_order() {
         let all = AgentKind::all();
-        assert_eq!(all.len(), 9);
+        assert_eq!(all.len(), 10);
         assert_eq!(all[0], AgentKind::ClaudeCode);
         assert_eq!(all[6], AgentKind::FactoryAi);
         assert_eq!(all[7], AgentKind::Grok);
         assert_eq!(all[8], AgentKind::Hermes);
+        assert_eq!(all[9], AgentKind::Pi);
 
         use std::collections::HashSet;
         let set: HashSet<AgentKind> = all.iter().copied().collect();
-        assert_eq!(set.len(), 9);
+        assert_eq!(set.len(), 10);
     }
 
     /// `AgentStability` serde-serialises as snake_case — the

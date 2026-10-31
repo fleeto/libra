@@ -361,7 +361,7 @@ async fn worktree_layout_capability_upgrade_is_metadata_only_and_idempotent() {
             .unwrap(),
         SchemaCompatibility::UpgradeRequired {
             current_version: Some(2026101902),
-            latest_version: 2026103001,
+            latest_version: 2026103101,
         }
     ));
 }
@@ -417,7 +417,7 @@ async fn worktree_layout_capability_is_present_in_a_fresh_repository() {
         db::schema::current_schema_version_for_role(&conn, DatabaseRole::Repository)
             .await
             .unwrap(),
-        Some(2026103001)
+        Some(2026103101)
     );
     conn.close().await.unwrap();
     let reopened =
@@ -439,8 +439,8 @@ async fn agent_session_commit_schema_is_repository_only_and_forward_only() {
     assert!(commit.down.is_none(), "CX-11 stays forward-only");
     assert_eq!(
         repository.last().map(|migration| migration.version),
-        Some(2026103001),
-        "HM-01 is the repository tip after the session-commit barrier"
+        Some(2026103101),
+        "PI-01 is the repository tip after the session-commit barrier"
     );
     for role in [
         DatabaseRole::GlobalConfig,
@@ -474,7 +474,7 @@ async fn agent_session_commit_schema_is_repository_only_and_forward_only() {
         db::schema::current_schema_version_for_role(&conn, DatabaseRole::Repository)
             .await
             .unwrap(),
-        Some(2026103001)
+        Some(2026103101)
     );
     let error = all_builtin_runner()
         .unwrap()
@@ -6254,6 +6254,9 @@ async fn memory_path_search_is_repository_role_only() {
 /// The schema tip just below the `hermes` CHECK expansion.
 const PRE_HERMES_TIP: i64 = 2026102201;
 const HERMES_CHECK_VERSION: i64 = 2026103001;
+/// The `pi` CHECK expansion (PI-01) above it. Taking a repository below the
+/// hermes CHECK rolls it back first; opening it re-applies both.
+const PI_CHECK_VERSION: i64 = 2026103101;
 /// In-transaction failpoint stages of the rebuild, in order.
 const CHECK_REBUILD_STAGES: [&str; 7] = [
     "claimed", "created", "copied", "dropped", "renamed", "restored", "verified",
@@ -6356,7 +6359,7 @@ async fn pre_hermes_repository() -> CheckRebuildRepo {
         .rollback_to(&conn, PRE_HERMES_TIP)
         .await
         .expect("take the repository below the hermes CHECK");
-    assert_eq!(rolled_back, vec![HERMES_CHECK_VERSION]);
+    assert_eq!(rolled_back, vec![PI_CHECK_VERSION, HERMES_CHECK_VERSION]);
     for kind in KINDS_BEFORE_HERMES {
         check_rebuild_exec(
             &conn,
@@ -7449,7 +7452,7 @@ async fn agent_kind_check_rebuild_holds_the_in_memory_connection_until_restored(
         async move {
             all_builtin_runner()
                 .expect("builtin registry")
-                .run_pending(&conn)
+                .run_pending_up_to(&conn, HERMES_CHECK_VERSION)
                 .await
         }
     });

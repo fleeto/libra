@@ -67,12 +67,14 @@ use builtin::stable_promoted::{
 pub use builtin::{
     ClaudeCodeObservedAgent, CodexRolloutScanLimit, FlushOutcome, GeminiObservedAgent,
     HermesMessage, HermesObservedAgent, HermesReadLimits, HermesScope, HermesSourceRequest,
-    HermesSourceStatus, HermesTranscript, STABLE_PROMOTED_SPECS, StablePromotedAgent,
+    HermesSourceStatus, HermesTranscript, PI_DISCOVERY_MAX_ENTRIES, PI_DISCOVERY_MAX_HEADER_BYTES,
+    PI_DISCOVERY_MAX_TOTAL_BYTES, PiDiscovery, PiDiscoveryLimits, PiPartialReason, PiRootRefusal,
+    PiSessionCandidate, PiSessionLayout, STABLE_PROMOTED_SPECS, StablePromotedAgent,
     claude_project_slug, claude_session_dir, claude_session_file_candidate,
-    claude_session_id_is_safe_path_component, find_codex_rollout, find_codex_rollout_for_import,
-    flush_wait, read_hermes_jsonl, read_hermes_jsonl_file, read_hermes_source, read_hermes_sqlite,
-    resolve_session_file, rfc3339_boundary_for_unix_seconds, stable_promoted_spec_for,
-    write_truncated_transcript,
+    claude_session_id_is_safe_path_component, discover_pi_sessions, find_codex_rollout,
+    find_codex_rollout_for_import, flush_wait, read_hermes_jsonl, read_hermes_jsonl_file,
+    read_hermes_source, read_hermes_sqlite, resolve_session_file,
+    rfc3339_boundary_for_unix_seconds, stable_promoted_spec_for, write_truncated_transcript,
 };
 pub use capability::{
     CapabilityDeclarer, DeclaredAgentCaps, HookResponseWriter, ModelExtractor, PromptExtractor,
@@ -168,6 +170,7 @@ pub fn agent_for(kind: AgentKind) -> &'static dyn ObservedAgent {
     static GEMINI: GeminiObservedAgent = GeminiObservedAgent::new();
     static GROK: GrokObservedAgent = GrokObservedAgent;
     static HERMES: builtin::hermes::HermesObservedAgent = builtin::hermes::HermesObservedAgent;
+    static PI: builtin::pi::PiObservedAgent = builtin::pi::PiObservedAgent;
 
     match kind {
         AgentKind::ClaudeCode => &CLAUDE_CODE,
@@ -179,6 +182,7 @@ pub fn agent_for(kind: AgentKind) -> &'static dyn ObservedAgent {
         AgentKind::FactoryAi => &FACTORY_AI,
         AgentKind::Grok => &GROK,
         AgentKind::Hermes => &HERMES,
+        AgentKind::Pi => &PI,
     }
 }
 
@@ -212,7 +216,8 @@ pub fn truncator_for(kind: AgentKind) -> Option<&'static dyn TranscriptTruncator
         | AgentKind::Copilot
         | AgentKind::FactoryAi
         | AgentKind::Grok
-        | AgentKind::Hermes => None,
+        | AgentKind::Hermes
+        | AgentKind::Pi => None,
     }
 }
 
@@ -262,7 +267,11 @@ pub(crate) fn live_capture_for(
         AgentKind::ClaudeCode => Some(&CLAUDE_CODE_LIVE),
         AgentKind::Codex => Some(&CODEX_LIVE),
         AgentKind::OpenCode => Some(&OPENCODE_LIVE),
-        AgentKind::Cursor | AgentKind::Gemini | AgentKind::Copilot | AgentKind::FactoryAi => None,
+        AgentKind::Cursor
+        | AgentKind::Gemini
+        | AgentKind::Copilot
+        | AgentKind::FactoryAi
+        | AgentKind::Pi => None,
         AgentKind::Grok => Some(&GROK_LIVE),
         AgentKind::Hermes => Some(&HERMES_LIVE),
     }

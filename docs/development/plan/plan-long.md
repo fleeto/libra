@@ -1259,7 +1259,7 @@ MEM-03 → MEM-04；LR-09（plan-20260913 `FL-04/05` 收口）；LR-10；MEM-05 
 | [`plan-20260903.md`](plan-20260903.md) | A（LR-05 merge） | 实施中 | MG-01..MG-21 已有代码、测试与发布提交；最终计划收口与 deferred 差异仍待完成 |
 | [`plan-20260904.md`](plan-20260904.md) | B（RG基础 / Codex capture） | 已排期 | DATA-CAP-20261019：CX-00 source-qualified/Claude R2 PASS已signed main交接；CX-12语料locally-accepted/Claude PASS，当前下一卡CX-15，其余27张CX pending；thinking 原文及 encrypted_content 普通保留，native 缺证不阻塞获取；旧 R5 为历史；本次修订实际审查见计划 |
 | [`plan-20260905.md`](plan-20260905.md) | B（Claude hooks/reasoning） | 已排期 | DATA-CAP-20261019：9卡 pending；CC-00/04 审 event/实际 envelope 与 thinking 设置；CC-07/05 保留正文及 signature/data；native 认证不作前置，旧 R5 为历史；本次修订实际审查见计划 |
-| [`plan-20260906.md`](plan-20260906.md) | 横切（安全扫描） | 已排期 | 设计计划，任务卡尚未完成 |
+| [`plan-20260906.md`](plan-20260906.md) | 横切（安全扫描） | 已收口 | 收口发布 v0.30.119 / `d92a838`。SC-01/02/03/04/05/06/07/SC-CLOSE 均 `done`/`complete`。CodeQL 41155298045 四条 rule open=0。release 41155338030 八个 job success |
 | [`plan-20260907.md`](plan-20260907.md) | 横切（BLAKE3 object format） | 已完成 | B3-00..B3-17 全部 `done`/`complete`（`v0.23.68`→`v0.29.0`）；最终 Codex/Claude R40 双 PASS；`DEP-B3-05` 已满足 |
 | [`plan-20260910.md`](plan-20260910.md) | 横切（数据库迁移作用域） | 已排期 | 设计计划，任务卡尚未执行 |
 | [`plan-20260911.md`](plan-20260911.md) | B（Pi hook/capture boundary） | 已排期 | DATA-CAP-20261019：11卡 pending；PI-00 先核系统版本/模型；PI-08 保留 thinking/thoughtSignature；云围栏与 identity/schema 顺序不变，旧 R5 为历史；本次修订实际审查见计划 |

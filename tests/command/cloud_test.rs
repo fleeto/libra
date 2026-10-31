@@ -174,11 +174,12 @@ fn unsupported_capture_kind_allowlist_matches_d1_ddl() {
 }
 
 /// PI-05: an unknown future kind is refused like `hermes`, in every mode.
+/// PI-01 registers `pi` as a local-only identity; it stays refused too.
 #[test]
 fn unsupported_capture_kind_future_kind_is_refused() {
     let repo = tempdir().unwrap();
     init_repo_via_cli(repo.path());
-    plant_capture_kinds(repo.path(), &["claude_code", "pi"]);
+    plant_capture_kinds(repo.path(), &["claude_code", "pi", "vogon"]);
 
     for args in [
         &["cloud", "sync"][..],
@@ -188,6 +189,7 @@ fn unsupported_capture_kind_future_kind_is_refused() {
     ] {
         let output = run_libra_command(args, repo.path());
         assert_capture_kind_refused(&output, "pi");
+        assert_capture_kind_refused(&output, "vogon");
         let stderr = String::from_utf8_lossy(&output.stderr);
         assert!(
             !stderr.contains("claude_code"),

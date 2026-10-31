@@ -5789,6 +5789,12 @@ printf 'tty=detached'"#,
     #[serial_test::serial(cwd, env)]
     #[tokio::test]
     async fn macos_export_requires_trusted_binary_before_spawn() {
+        // The trust lookup resolves the repository from the current
+        // directory; run it in a disposable one so it never opens (and
+        // migrates) whatever repository the test process started in.
+        let repo = tempfile::tempdir().expect("create isolated repository");
+        crate::utils::test::setup_with_new_libra_in(repo.path()).await;
+        let _cwd = crate::utils::test::ChangeDirGuard::new(repo.path());
         let dir = tempfile::tempdir().expect("create fake exporter directory");
         let marker = dir.path().join("must-not-run");
         let bin = fake_exporter(dir.path(), &format!("touch {}", marker.display()));

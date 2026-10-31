@@ -941,16 +941,11 @@ struct BatchFailure {
     reason_key: Option<&'static str>,
 }
 
+/// The CLI accepts exactly the prepared-import kind set, so the two can never
+/// disagree (PI-29).
 fn importable_kind_from_slug(slug: &str) -> Option<AgentKind> {
-    match AgentKind::from_cli_slug(slug) {
-        Some(
-            kind @ (AgentKind::ClaudeCode
-            | AgentKind::Codex
-            | AgentKind::OpenCode
-            | AgentKind::Hermes),
-        ) => Some(kind),
-        _ => None,
-    }
+    AgentKind::from_cli_slug(slug)
+        .filter(|kind| crate::internal::ai::agent_import::is_importable_kind(*kind))
 }
 
 /// Parse the user's own `--agent` argv. The echo is bounded and has control
@@ -2545,12 +2540,7 @@ fn descriptor_preparation_control_from_environment() -> Result<PreparationDescri
             .as_ref()
             .is_some_and(|transport| transport.version != 1)
         || !matches!(control.source_kind.as_str(), "file" | "export")
-        || AgentKind::from_cli_slug(&control.agent_kind).is_none_or(|kind| {
-            !matches!(
-                kind,
-                AgentKind::ClaudeCode | AgentKind::Codex | AgentKind::OpenCode | AgentKind::Hermes
-            )
-        })
+        || importable_kind_from_slug(&control.agent_kind).is_none()
     {
         anyhow::bail!("invalid internal descriptor preparation control");
     }
@@ -4540,6 +4530,37 @@ mod tests {
         },
     };
     use crate::utils::error::CliErrorKind;
+
+    /// PI-29: `agent import --agent` accepts exactly the prepared-import kind
+    /// set, through every slug form, and its error names that same set.
+    #[test]
+    fn import_kind_gate_cli_accepts_exactly_the_set() {
+        use crate::internal::ai::agent_import::{IMPORTABLE_AGENT_KINDS, is_importable_kind};
+
+        for kind in AgentKind::all() {
+            assert_eq!(
+                importable_kind_from_slug(kind.as_cli_slug()),
+                is_importable_kind(*kind).then_some(*kind),
+                "{kind:?}"
+            );
+            assert_eq!(
+                importable_kind_from_slug(kind.as_db_str()),
+                is_importable_kind(*kind).then_some(*kind),
+                "{kind:?}"
+            );
+        }
+        let refused = importable_kind("grok").expect_err("grok is not importable");
+        let message = refused.to_string();
+        assert!(
+            message.contains(
+                "agent import supports claude-code, codex, opencode, or hermes; got 'grok'"
+            ),
+            "{message}"
+        );
+        for kind in IMPORTABLE_AGENT_KINDS {
+            assert!(message.contains(kind.as_cli_slug()), "{kind:?}: {message}");
+        }
+    }
 
     #[cfg(feature = "test-live-agent")]
     #[test]

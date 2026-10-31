@@ -3969,6 +3969,34 @@ fn historical_child_capture_is_partial(
     summary.partial_sources > 0 || (kind == AgentKind::Codex && summary.skipped_inflight > 0)
 }
 
+/// The agent kinds a historical import may store: the single source for the
+/// CLI `agent import --agent` parser and every prepared-import entry point
+/// (PI-29). Readability alone does not make a kind importable.
+pub const IMPORTABLE_AGENT_KINDS: &[AgentKind] = &[
+    AgentKind::ClaudeCode,
+    AgentKind::Codex,
+    AgentKind::OpenCode,
+    AgentKind::Hermes,
+];
+
+/// Whether a historical import may store sessions of `kind`.
+pub fn is_importable_kind(kind: AgentKind) -> bool {
+    IMPORTABLE_AGENT_KINDS.contains(&kind)
+}
+
+/// Refuse a kind outside [`IMPORTABLE_AGENT_KINDS`] before any lease, catalog
+/// row, checkpoint, or object is written, so an embedding caller cannot
+/// store a session the CLI would refuse.
+fn refuse_unimportable_kind(kind: AgentKind) -> Result<()> {
+    if is_importable_kind(kind) {
+        return Ok(());
+    }
+    bail!(
+        "agent kind '{}' cannot be imported (prepared imports accept claude_code, codex, opencode, or hermes); nothing was written",
+        kind.as_db_str()
+    )
+}
+
 /// Persist one prepared source with per-turn checkpoints and the shared
 /// claim/ref/catalog/identity transaction.
 pub async fn import_prepared(
@@ -3977,6 +4005,7 @@ pub async fn import_prepared(
     request: ImportRequest,
     deadline: CaptureCommitDeadline,
 ) -> Result<ImportSummary> {
+    refuse_unimportable_kind(request.agent_kind)?;
     let monotonic_deadline = deadline.monotonic();
     let binding = LiveCaptureBinding::for_stored(request.agent_kind);
     let discovery = if let Some(port) = binding.subagent_discovery() {
@@ -4038,6 +4067,7 @@ pub async fn import_prepared_with_coverage_versions(
     budget: Duration,
     helper_program: Option<&Path>,
 ) -> Result<ImportSummary> {
+    refuse_unimportable_kind(request.agent_kind)?;
     if budget.is_zero() || budget > Duration::from_secs(300) {
         bail!("explicit import budget must be greater than zero and at most 300 seconds");
     }
@@ -4692,6 +4722,7 @@ pub(crate) async fn import_prepared_with_retention(
     coverage_runtime: Option<CaptureCoverageRuntime>,
     codex_retention: Option<CodexRetention>,
 ) -> Result<DetailedImportSummary> {
+    refuse_unimportable_kind(request.agent_kind)?;
     if codex_retention.is_some()
         && (request.agent_kind != AgentKind::Codex
             || native_reasoning.is_some()
@@ -4969,6 +5000,9 @@ async fn import_prepared_with_reasoning_identity_batches_and_coverage(
     codex_retention: Option<CodexRetention>,
 ) -> Result<DetailedImportSummary> {
     let monotonic_deadline = deadline.monotonic();
+    // The shared persistence path repeats the kind gate for crate callers
+    // that reach it without a public entry point.
+    refuse_unimportable_kind(request.agent_kind)?;
     // A prepared request can cross the private preparation-helper boundary or
     // be supplied by an embedding caller. Revalidate all durable time fields
     // before even resolving a capture scope, let alone acquiring an identity
@@ -5957,7 +5991,6 @@ pub async fn restore_tombstone(
 pub(crate) mod tests {
     use super::*;
 
-    #[cfg(unix)]
     async fn cov2_import_test_setup()
     -> (tempfile::TempDir, DatabaseConnection, PathBuf, CaptureScope) {
         let tmp = tempfile::tempdir().unwrap();
@@ -5974,7 +6007,6 @@ pub(crate) mod tests {
         (tmp, conn, root, scope)
     }
 
-    #[cfg(unix)]
     fn cov2_import_test_request(
         root: &Path,
         scope: &CaptureScope,
@@ -6045,7 +6077,6 @@ pub(crate) mod tests {
         }
     }
 
-    #[cfg(unix)]
     fn cov2_object_files(storage: &Path) -> BTreeMap<PathBuf, String> {
         let mut files = BTreeMap::new();
         let mut directories = vec![storage.join("objects")];
@@ -6068,14 +6099,12 @@ pub(crate) mod tests {
         files
     }
 
-    #[cfg(unix)]
     async fn cov2_traces_head(conn: &DatabaseConnection) -> Option<String> {
         conn.query_one_raw(Statement::from_string(conn.get_database_backend(),
             "SELECT `commit` AS oid FROM reference WHERE name='traces' AND remote IS NULL AND kind='Branch'".to_owned()))
             .await.unwrap().and_then(|row| row.try_get_by::<Option<String>,_>("oid").unwrap())
     }
 
-    #[cfg(unix)]
     async fn cov2_count(conn: &DatabaseConnection, query: &str) -> i64 {
         conn.query_one_raw(Statement::from_string(
             conn.get_database_backend(),
@@ -7484,6 +7513,220 @@ pub(crate) mod tests {
             1,
             "takeover marker must survive old owner cleanup"
         );
+    }
+
+    /// PI-01: the identity-only `pi` kind is outside `IMPORTABLE_AGENT_KINDS`,
+    /// so every prepared-import entry refuses it (PI-29's gate) before any
+    /// lease, catalog row, checkpoint or object is written. On Unix the same
+    /// request as `codex` imports, so the refusal is the kind gate's.
+    #[tokio::test]
+    async fn pi_role_prepared_import_entries_write_nothing() {
+        assert!(!is_importable_kind(AgentKind::Pi));
+        let (_tmp, conn, root, scope) = cov2_import_test_setup().await;
+        let storage = root.join(util::ROOT_DIR);
+        let pi_request = || {
+            let mut request =
+                cov2_import_test_request(&root, &scope, vec![cov2_test_turn("pi", 0)]);
+            request.agent_kind = AgentKind::Pi;
+            request.provider_session_id = "pi-refused".to_owned();
+            request.session_id = "pi__pi-refused".to_owned();
+            request
+        };
+        let tables = [
+            "agent_session",
+            "agent_import_identity",
+            "agent_checkpoint",
+            "agent_coverage_claim",
+            "object_index",
+        ];
+        let counts = |conn: DatabaseConnection| async move {
+            let mut counts = Vec::new();
+            for table in tables {
+                counts.push(cov2_count(&conn, &format!("SELECT COUNT(*) AS n FROM {table}")).await);
+            }
+            counts
+        };
+        let before = counts(conn.clone()).await;
+        let before_files = cov2_object_files(&storage);
+        let before_traces = cov2_traces_head(&conn).await;
+        let refusals = [
+            import_prepared(
+                &conn,
+                &storage,
+                pi_request(),
+                commit_deadline_after(Duration::from_secs(30)),
+            )
+            .await
+            .map(|_| ())
+            .unwrap_err(),
+            import_prepared_with_retention(
+                &conn,
+                &storage,
+                pi_request(),
+                commit_deadline_after(Duration::from_secs(30)),
+                super::super::subagent_content::SubagentDiscovery::default(),
+                None,
+                None,
+                None,
+            )
+            .await
+            .map(|_| ())
+            .unwrap_err(),
+            import_prepared_with_coverage_versions(
+                &conn,
+                &storage,
+                pi_request(),
+                &[2],
+                Duration::from_secs(30),
+                None,
+            )
+            .await
+            .map(|_| ())
+            .unwrap_err(),
+        ];
+        for error in refusals {
+            assert!(
+                error.to_string().contains(
+                    "agent kind 'pi' cannot be imported (prepared imports accept claude_code, codex, opencode, or hermes); nothing was written"
+                ),
+                "{error:#}"
+            );
+        }
+        assert_eq!(counts(conn.clone()).await, before);
+        assert_eq!(cov2_object_files(&storage), before_files);
+        assert_eq!(cov2_traces_head(&conn).await, before_traces);
+
+        #[cfg(unix)]
+        {
+            let imported = import_prepared_with_coverage_versions(
+                &conn,
+                &storage,
+                cov2_import_test_request(&root, &scope, vec![cov2_test_turn("pi", 0)]),
+                &[2],
+                Duration::from_secs(30),
+                Some(&native_import_test_helper_program()),
+            )
+            .await
+            .unwrap();
+            assert_eq!(imported.checkpoints_written, 1);
+        }
+    }
+
+    /// PI-29: every prepared-import entry refuses a kind outside
+    /// `IMPORTABLE_AGENT_KINDS` before any lease, catalog row, checkpoint or
+    /// object is written, on every platform. On Unix the same request as
+    /// `codex` imports (through the descriptor helper), so the refusal is the
+    /// kind gate's.
+    #[tokio::test]
+    async fn import_kind_gate_refuses_every_other_kind_before_any_write() {
+        let (_tmp, conn, root, scope) = cov2_import_test_setup().await;
+        let storage = root.join(util::ROOT_DIR);
+        let refused_request = |kind: AgentKind| {
+            let mut request =
+                cov2_import_test_request(&root, &scope, vec![cov2_test_turn("gate", 0)]);
+            request.agent_kind = kind;
+            request.provider_session_id = "gate-refused".to_owned();
+            request.session_id = format!("{}__gate-refused", capture_provider_name(kind));
+            request
+        };
+        let tables = [
+            "agent_session",
+            "agent_import_identity",
+            "agent_checkpoint",
+            "agent_coverage_claim",
+            "object_index",
+        ];
+        let counts = |conn: DatabaseConnection| async move {
+            let mut counts = Vec::new();
+            for table in tables {
+                counts.push(cov2_count(&conn, &format!("SELECT COUNT(*) AS n FROM {table}")).await);
+            }
+            counts
+        };
+        let before = counts(conn.clone()).await;
+        let before_files = cov2_object_files(&storage);
+        let before_traces = cov2_traces_head(&conn).await;
+        let refused: Vec<AgentKind> = AgentKind::all()
+            .iter()
+            .copied()
+            .filter(|kind| !is_importable_kind(*kind))
+            .collect();
+        assert!(
+            [
+                AgentKind::Cursor,
+                AgentKind::Gemini,
+                AgentKind::Copilot,
+                AgentKind::FactoryAi,
+                AgentKind::Grok,
+            ]
+            .iter()
+            .all(|kind| refused.contains(kind)),
+            "{refused:?}"
+        );
+        for kind in refused {
+            let errors = [
+                import_prepared(
+                    &conn,
+                    &storage,
+                    refused_request(kind),
+                    commit_deadline_after(Duration::from_secs(30)),
+                )
+                .await
+                .map(|_| ())
+                .unwrap_err(),
+                import_prepared_with_retention(
+                    &conn,
+                    &storage,
+                    refused_request(kind),
+                    commit_deadline_after(Duration::from_secs(30)),
+                    super::super::subagent_content::SubagentDiscovery::default(),
+                    None,
+                    None,
+                    None,
+                )
+                .await
+                .map(|_| ())
+                .unwrap_err(),
+                import_prepared_with_coverage_versions(
+                    &conn,
+                    &storage,
+                    refused_request(kind),
+                    &[2],
+                    Duration::from_secs(30),
+                    None,
+                )
+                .await
+                .map(|_| ())
+                .unwrap_err(),
+            ];
+            for error in errors {
+                assert!(
+                    error.to_string().contains(&format!(
+                        "agent kind '{}' cannot be imported (prepared imports accept claude_code, codex, opencode, or hermes); nothing was written",
+                        kind.as_db_str()
+                    )),
+                    "{kind:?}: {error:#}"
+                );
+            }
+        }
+        assert_eq!(counts(conn.clone()).await, before);
+        assert_eq!(cov2_object_files(&storage), before_files);
+        assert_eq!(cov2_traces_head(&conn).await, before_traces);
+
+        #[cfg(unix)]
+        {
+            let imported = import_prepared_with_coverage_versions(
+                &conn,
+                &storage,
+                cov2_import_test_request(&root, &scope, vec![cov2_test_turn("gate", 0)]),
+                &[2],
+                Duration::from_secs(30),
+                Some(&native_import_test_helper_program()),
+            )
+            .await
+            .unwrap();
+            assert_eq!(imported.checkpoints_written, 1);
+        }
     }
 
     #[tokio::test]

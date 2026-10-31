@@ -581,6 +581,7 @@ pub(crate) fn open_provider_directory_for_discovery(
 pub(crate) struct PinnedReadDir {
     entries: std::fs::ReadDir,
     _pin: crate::utils::windows_fs::PinnedParent,
+    report_vanished: bool,
 }
 
 #[cfg(windows)]
@@ -588,10 +589,29 @@ impl Iterator for PinnedReadDir {
     type Item = Result<PinnedDirEntry>;
     fn next(&mut self) -> Option<Self::Item> {
         use std::os::windows::fs::MetadataExt;
-        self.entries.next().map(|entry| {
-            let entry = entry.context("enumerate Windows provider entry")?;
-            let metadata = std::fs::symlink_metadata(entry.path())
-                .context("inspect Windows provider entry")?;
+        loop {
+            let entry = match self.entries.next()? {
+                Ok(entry) => entry,
+                Err(error) => {
+                    return Some(Err(error).context("enumerate Windows provider entry"));
+                }
+            };
+            #[cfg(test)]
+            type_lookup_hook::run(&entry.file_name());
+            let metadata = match std::fs::symlink_metadata(entry.path()) {
+                Ok(metadata) => metadata,
+                Err(error)
+                    if self.report_vanished && error.kind() == std::io::ErrorKind::NotFound =>
+                {
+                    return Some(Ok(PinnedDirEntry {
+                        file_name: entry.file_name(),
+                        file_type: PinnedEntryType::Vanished,
+                    }));
+                }
+                Err(error) => {
+                    return Some(Err(error).context("inspect Windows provider entry"));
+                }
+            };
             let file_type = if metadata.file_attributes()
                 & windows_sys::Win32::Storage::FileSystem::FILE_ATTRIBUTE_REPARSE_POINT
                 != 0
@@ -604,11 +624,11 @@ impl Iterator for PinnedReadDir {
             } else {
                 PinnedEntryType::Other
             };
-            Ok(PinnedDirEntry {
+            return Some(Ok(PinnedDirEntry {
                 file_name: entry.file_name(),
                 file_type,
-            })
-        })
+            }));
+        }
     }
 }
 
@@ -616,9 +636,31 @@ impl Iterator for PinnedReadDir {
 pub(crate) fn read_dir_pinned_provider_directory(
     directory: &std::fs::File,
 ) -> Result<PinnedReadDir> {
+    read_dir_pinned_windows(directory, false)
+}
+
+/// [`read_dir_pinned_provider_directory`] that yields an entry listed, then
+/// gone before its type could be read, as [`PinnedEntryType::Vanished`]
+/// instead of failing the walk.
+#[cfg(windows)]
+pub(crate) fn read_dir_pinned_provider_directory_reporting_vanished(
+    directory: &std::fs::File,
+) -> Result<PinnedReadDir> {
+    read_dir_pinned_windows(directory, true)
+}
+
+#[cfg(windows)]
+fn read_dir_pinned_windows(
+    directory: &std::fs::File,
+    report_vanished: bool,
+) -> Result<PinnedReadDir> {
     let pin = crate::utils::windows_fs::PinnedParent::new(directory)?;
     let entries = std::fs::read_dir(crate::utils::windows_fs::handle_path(directory)?)?;
-    Ok(PinnedReadDir { entries, _pin: pin })
+    Ok(PinnedReadDir {
+        entries,
+        _pin: pin,
+        report_vanished,
+    })
 }
 
 /// Retain the given root and open only normal relative directory components.
@@ -724,6 +766,45 @@ pub(crate) fn open_provider_directory_for_discovery(
     Ok(None)
 }
 
+/// Test seam: a hook called with each entry's name just before its type is
+/// looked up, so a test can make the entry vanish in that window.
+#[cfg(test)]
+pub(crate) mod type_lookup_hook {
+    use std::{cell::RefCell, ffi::OsStr};
+
+    type Hook = Box<dyn FnMut(&OsStr)>;
+
+    thread_local! {
+        static HOOK: RefCell<Option<Hook>> = const { RefCell::new(None) };
+    }
+
+    struct Reset;
+
+    impl Drop for Reset {
+        fn drop(&mut self) {
+            HOOK.with(|slot| *slot.borrow_mut() = None);
+        }
+    }
+
+    /// Run `body` with `hook` installed on this thread.
+    pub(crate) fn with<R>(hook: impl FnMut(&OsStr) + 'static, body: impl FnOnce() -> R) -> R {
+        HOOK.with(|slot| *slot.borrow_mut() = Some(Box::new(hook)));
+        let _reset = Reset;
+        body()
+    }
+
+    /// Call the installed hook, if any; whether one was installed.
+    pub(crate) fn run(name: &OsStr) -> bool {
+        HOOK.with(|slot| match slot.borrow_mut().as_mut() {
+            Some(hook) => {
+                hook(name);
+                true
+            }
+            None => false,
+        })
+    }
+}
+
 /// File type of one entry yielded by [`read_dir_pinned_provider_directory`],
 /// resolved relative to the pinned directory descriptor so it always refers
 /// to the opened directory object even when its pathname was swapped.
@@ -734,6 +815,11 @@ pub(crate) enum PinnedEntryType {
     Directory,
     Symlink,
     Other,
+    /// Listed, then gone before its type could be read. Only the
+    /// `read_dir_pinned_provider_directory_reporting_vanished` iterators
+    /// yield it; the default ones skip (Unix) or fail on (Windows) such an
+    /// entry.
+    Vanished,
 }
 
 #[cfg(any(unix, windows))]
@@ -763,6 +849,7 @@ pub(crate) struct PinnedDirEntry {
 #[cfg(unix)]
 pub(crate) struct PinnedReadDir {
     stream: *mut libc::DIR,
+    report_vanished: bool,
 }
 
 #[cfg(unix)]
@@ -801,6 +888,7 @@ impl Iterator for PinnedReadDir {
             let file_type = match pinned_entry_type(self.stream, name, entry.d_type.into()) {
                 Ok(Some(file_type)) => file_type,
                 // Vanished between `readdir` and the DT_UNKNOWN fallback.
+                Ok(None) if self.report_vanished => PinnedEntryType::Vanished,
                 Ok(None) => continue,
                 Err(error) => return Some(Err(error)),
             };
@@ -850,6 +938,17 @@ fn pinned_entry_type(
 ) -> Result<Option<PinnedEntryType>> {
     use std::mem::MaybeUninit;
 
+    // Tests that install a type-lookup hook take the descriptor-relative
+    // lookup for every entry, so the hook can remove one first.
+    #[cfg(test)]
+    let d_type = {
+        use std::os::unix::ffi::OsStrExt;
+        if type_lookup_hook::run(std::ffi::OsStr::from_bytes(name.to_bytes())) {
+            libc::DT_UNKNOWN as libc::c_int
+        } else {
+            d_type
+        }
+    };
     if d_type == libc::DT_UNKNOWN as libc::c_int {
         // SAFETY: `stream` is a live directory stream, so `dirfd` yields the
         // pinned descriptor it owns.
@@ -909,6 +1008,21 @@ fn pinned_entry_type(
 pub(crate) fn read_dir_pinned_provider_directory(
     directory: &std::fs::File,
 ) -> Result<PinnedReadDir> {
+    read_dir_pinned_unix(directory, false)
+}
+
+/// [`read_dir_pinned_provider_directory`] that yields an entry listed, then
+/// gone before a `DT_UNKNOWN` type could be resolved, as
+/// [`PinnedEntryType::Vanished`] instead of skipping it.
+#[cfg(unix)]
+pub(crate) fn read_dir_pinned_provider_directory_reporting_vanished(
+    directory: &std::fs::File,
+) -> Result<PinnedReadDir> {
+    read_dir_pinned_unix(directory, true)
+}
+
+#[cfg(unix)]
+fn read_dir_pinned_unix(directory: &std::fs::File, report_vanished: bool) -> Result<PinnedReadDir> {
     use std::os::fd::AsRawFd;
 
     // SAFETY: the fixed dot component opens this held directory itself.
@@ -934,7 +1048,10 @@ pub(crate) fn read_dir_pinned_provider_directory(
         unsafe { libc::close(duplicated) };
         return Err(error).context("open pinned provider directory stream");
     }
-    Ok(PinnedReadDir { stream })
+    Ok(PinnedReadDir {
+        stream,
+        report_vanished,
+    })
 }
 
 /// Open a regular file beneath an already-pinned provider directory without

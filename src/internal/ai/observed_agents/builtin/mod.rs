@@ -10,6 +10,7 @@
 pub mod claude_code;
 pub mod gemini;
 pub mod hermes;
+pub mod pi;
 pub mod stable_promoted;
 
 pub use claude_code::{
@@ -22,6 +23,11 @@ pub use hermes::{
     HermesMessage, HermesObservedAgent, HermesReadLimits, HermesScope, HermesSourceRequest,
     HermesSourceStatus, HermesTranscript, read_hermes_jsonl, read_hermes_jsonl_file,
     read_hermes_source, read_hermes_sqlite,
+};
+pub use pi::{
+    PI_DISCOVERY_MAX_ENTRIES, PI_DISCOVERY_MAX_HEADER_BYTES, PI_DISCOVERY_MAX_TOTAL_BYTES,
+    PiDiscovery, PiDiscoveryLimits, PiObservedAgent, PiPartialReason, PiRootRefusal,
+    PiSessionCandidate, PiSessionLayout, discover_pi_sessions,
 };
 pub use stable_promoted::{
     CodexRolloutScanLimit, STABLE_PROMOTED_SPECS, StablePromotedAgent, find_codex_rollout,

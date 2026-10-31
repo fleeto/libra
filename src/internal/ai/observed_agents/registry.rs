@@ -133,7 +133,7 @@ const CODEX_ROLLOUT_CAPS: DeclaredAgentCaps = DeclaredAgentCaps {
 
 /// The frozen static matrix, one row per [`AgentKind`] variant, in
 /// registration order. Guarded by `compat_agent_capability_matrix_pin`.
-static REGISTRY: [AgentRegistration; 9] = [
+static REGISTRY: [AgentRegistration; 10] = [
     AgentRegistration {
         slug: "claude-code",
         agent_kind: "claude_code",
@@ -299,6 +299,25 @@ static REGISTRY: [AgentRegistration; 9] = [
         external_binary: false,
         config_paths: &["plugins/libra-hermes-capture"],
         capabilities: HOOKS_ONLY,
+    },
+    AgentRegistration {
+        slug: "pi",
+        agent_kind: "pi",
+        db_value: "pi",
+        // PI-01: repository identity only. Discovery, capture, hook
+        // install, and review/investigate launch stay closed until later
+        // cards. Cloud sync stays refused by the capture allowlist.
+        supported: false,
+        support_wave: None,
+        registered: true,
+        transcript_readable: false,
+        hook_installable: false,
+        installed: false,
+        launchable_review: false,
+        launchable_investigate: false,
+        external_binary: false,
+        config_paths: &[],
+        capabilities: NO_CAPS,
     },
 ];
 
@@ -466,7 +485,6 @@ mod tests {
 
     #[test]
     fn unknown_slug_is_quarantined_and_gemini_resolves_unsupported() {
-        assert_eq!(lookup_cli_slug("pi"), SlugLookup::UnknownQuarantined);
         assert_eq!(lookup_cli_slug("vogon"), SlugLookup::UnknownQuarantined);
         assert_eq!(lookup_cli_slug(""), SlugLookup::UnknownQuarantined);
         match lookup_cli_slug("gemini") {
@@ -475,6 +493,15 @@ mod tests {
                 assert!(!row.hook_installable);
             }
             SlugLookup::UnknownQuarantined => panic!("gemini must stay registered"),
+        }
+        match lookup_cli_slug("pi") {
+            SlugLookup::Known(row) => {
+                assert!(!row.supported);
+                assert!(!row.transcript_readable);
+                assert!(!row.hook_installable);
+                assert_eq!(row.support_wave, None);
+            }
+            SlugLookup::UnknownQuarantined => panic!("pi is registered by PI-01"),
         }
     }
 

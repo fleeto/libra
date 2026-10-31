@@ -171,11 +171,13 @@ fn known_agent_capability_matrix_matches_current_roster() {
 
     // Non-first-batch agents other than grok and hermes must never be
     // exposed as installable or launchable (E9 quarantine/unsupported rule).
+    // PI-01 registers pi as such an identity-only row.
     for kind in [
         AgentKind::Gemini,
         AgentKind::Cursor,
         AgentKind::Copilot,
         AgentKind::FactoryAi,
+        AgentKind::Pi,
     ] {
         let row = registration_for(kind);
         assert!(!row.supported, "{}", row.slug);
@@ -251,6 +253,7 @@ fn skill_discovery_registry_matches_roster() {
         AgentKind::FactoryAi,
         AgentKind::Grok,
         AgentKind::Hermes,
+        AgentKind::Pi,
     ] {
         assert!(
             discover_skills(kind).is_empty(),
@@ -276,7 +279,7 @@ fn skill_discovery_registry_matches_roster() {
 /// gemini uninstall-only channel).
 #[test]
 fn unsupported_external_agent_kind_is_quarantined() {
-    for slug in ["pi", "vogon", "copilot-cli", "factoryai-droid", "", "wat"] {
+    for slug in ["vogon", "copilot-cli", "factoryai-droid", "", "wat"] {
         assert_eq!(
             lookup_cli_slug(slug),
             SlugLookup::UnknownQuarantined,

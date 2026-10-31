@@ -164,7 +164,7 @@ fn agent_list_json_contains_capability_fields() {
     // supported roster is shown. Their unsupported registry classification is
     // pinned separately against the static registry by
     // tests/compat/agent_capability_matrix_pin.rs.
-    for slug in ["gemini", "cursor", "copilot", "factory-ai"] {
+    for slug in ["gemini", "cursor", "copilot", "factory-ai", "pi"] {
         assert!(
             !agents.iter().any(|row| row["slug"] == slug),
             "{slug} must not appear in the supported-only listing"
@@ -218,7 +218,7 @@ fn agent_roster_surface() {
     // fully-closed unsupported classification (supported/hook_installable/
     // launchable_*/capabilities.hooks all false) stays pinned against the
     // static registry by tests/compat/agent_capability_matrix_pin.rs.
-    for slug in ["gemini", "cursor", "copilot", "factory-ai"] {
+    for slug in ["gemini", "cursor", "copilot", "factory-ai", "pi"] {
         assert!(
             !agents.iter().any(|row| row["slug"] == slug),
             "{slug} must not appear in the supported-only listing"

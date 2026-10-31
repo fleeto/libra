@@ -1262,6 +1262,64 @@ pub(crate) fn ensure_directory_not_publicly_writable(path: &Path) -> io::Result<
     Ok(())
 }
 
+/// PI-02: whether only the current user, SYSTEM, or Administrators can
+/// change `directory`'s entries: one of them owns it, its DACL is present, and
+/// no allowed ACE that applies to the directory itself gives write rights to
+/// any other principal. A security lookup that fails is an error, so callers
+/// fail closed.
+pub(crate) fn directory_entries_private(directory: &File) -> io::Result<bool> {
+    use windows_sys::Win32::Security::WinBuiltinAdministratorsSid;
+    let user = current_user()?;
+    // SAFETY: the owner SID and ACL pointers belong to the held descriptor's
+    // security buffer, which outlives every use below.
+    unsafe {
+        let user = &*user.as_ptr().cast::<TOKEN_USER>();
+        let mut owner = null_mut();
+        let mut acl: *mut ACL = null_mut();
+        let mut descriptor = null_mut();
+        let result = GetSecurityInfo(
+            directory.as_raw_handle(),
+            SE_FILE_OBJECT,
+            OWNER_SECURITY_INFORMATION | DACL_SECURITY_INFORMATION,
+            &mut owner,
+            null_mut(),
+            &mut acl,
+            null_mut(),
+            &mut descriptor,
+        );
+        if result != 0 {
+            return Err(io::Error::from_raw_os_error(result as i32));
+        }
+        let _descriptor = LocalAllocation(descriptor);
+        let privileged = |sid: *mut core::ffi::c_void| {
+            IsWellKnownSid(sid, WinLocalSystemSid) != 0
+                || IsWellKnownSid(sid, WinBuiltinAdministratorsSid) != 0
+        };
+        if owner.is_null() || acl.is_null() {
+            return Ok(false);
+        }
+        if EqualSid(owner, user.User.Sid) == 0 && !privileged(owner) {
+            return Ok(false);
+        }
+        let mut foreign_write = false;
+        for_each_allowed_ace(acl, |allowed| {
+            // An inherit-only ACE applies to children, not to this directory.
+            const INHERIT_ONLY_ACE: u8 = 0x08;
+            const WRITE_RIGHTS: u32 = 0x4000_0000 | 0x1000_0000 | 0x000D_0046;
+            let sid = std::ptr::addr_of!(allowed.SidStart).cast_mut().cast();
+            if allowed.Header.AceFlags & INHERIT_ONLY_ACE == 0
+                && allowed.Mask & WRITE_RIGHTS != 0
+                && EqualSid(sid, user.User.Sid) == 0
+                && !privileged(sid)
+            {
+                foreign_write = true;
+            }
+            Ok(())
+        })?;
+        Ok(!foreign_write)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

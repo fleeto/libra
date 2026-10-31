@@ -725,7 +725,7 @@ async fn seed_live_agent_checkpoint(
 ) {
     let libra_dir = repo.join(".libra");
     let history = HistoryManager::new_with_ref(
-        Arc::new(ClientStorage::init(libra_dir.join("objects"))),
+        Arc::new(ClientStorage::try_init(libra_dir.join("objects")).expect("storage")),
         libra_dir,
         Arc::new(conn.clone()),
         TRACES_BRANCH,
@@ -1017,7 +1017,7 @@ async fn cloud_agent_capture_roundtrip() {
 
     let libra_dir = source_path.join(".libra");
     let history = HistoryManager::new_with_ref(
-        Arc::new(ClientStorage::init(libra_dir.join("objects"))),
+        Arc::new(ClientStorage::try_init(libra_dir.join("objects")).expect("storage")),
         libra_dir,
         Arc::new(conn.clone()),
         TRACES_BRANCH,
@@ -1111,7 +1111,7 @@ async fn mock_tiered_storage_logic() {
     let remote = RemoteStorage::new(memory_store);
 
     let dir = tempdir().unwrap();
-    let local = LocalStorage::new(dir.path().to_path_buf());
+    let local = LocalStorage::try_new(dir.path().to_path_buf()).expect("storage");
 
     let tiered = TieredStorage::new(local.clone(), remote, 10, 1024);
 
@@ -1560,7 +1560,7 @@ async fn cloud_full_workflow_end_to_end() {
 
     // Check if objects are in `.libra/objects`
     let objects_path_a = restore_path_a.join(".libra/objects");
-    let local_store_a = LocalStorage::new(objects_path_a);
+    let local_store_a = LocalStorage::try_new(objects_path_a).expect("storage");
     assert!(
         local_store_a.exist(&blob_hash).await,
         "Restored repo A should have the text blob {}",
@@ -1619,7 +1619,7 @@ async fn cloud_full_workflow_end_to_end() {
 
     // Check if objects are in `.libra/objects`
     let objects_path_b = restore_path_b.join(".libra/objects");
-    let local_store_b = LocalStorage::new(objects_path_b);
+    let local_store_b = LocalStorage::try_new(objects_path_b).expect("storage");
     assert!(
         local_store_b.exist(&blob_hash).await,
         "Restored repo B should have the blob {}",

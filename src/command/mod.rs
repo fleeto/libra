@@ -277,7 +277,7 @@ pub fn save_object<T>(object: &T, obj_id: &ObjectHash) -> Result<(), GitError>
 where
     T: ObjectTrait,
 {
-    let storage = util::objects_storage();
+    let storage = util::objects_storage()?;
     save_object_to_storage(&storage, object, obj_id)
 }
 

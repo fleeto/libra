@@ -221,6 +221,16 @@ enum BlameError {
     InvalidLineRange(String),
 }
 
+impl From<std::io::Error> for BlameError {
+    fn from(error: std::io::Error) -> Self {
+        BlameError::ObjectLoad {
+            kind: "object",
+            object_id: "storage".to_string(),
+            detail: error.to_string(),
+        }
+    }
+}
+
 impl From<BlameError> for CliError {
     fn from(error: BlameError) -> Self {
         let message = error.to_string();
@@ -573,7 +583,7 @@ fn get_file_lines(
         detail: e.to_string(),
     })?;
 
-    let plain_items = tree.get_plain_items();
+    let plain_items = tree.get_plain_items()?;
     let target_path = util::to_workdir_path(file_path);
 
     let blob_hash = plain_items
@@ -705,7 +715,7 @@ fn detect_moved_lines(
                 object_id: parent.tree_id.to_string(),
                 detail: error.to_string(),
             })?;
-        for (path, blob_hash) in tree.get_plain_items() {
+        for (path, blob_hash) in tree.get_plain_items()? {
             if path == target_path {
                 continue;
             }

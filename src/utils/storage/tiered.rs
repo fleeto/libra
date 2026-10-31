@@ -865,7 +865,7 @@ mod tests {
         crate::internal::alternates::add(&local_objects, &alternate_objects)
             .expect("register alternate object store");
 
-        let local = LocalStorage::new_with_alternates(local_objects.clone());
+        let local = LocalStorage::try_new_with_alternates(local_objects.clone()).expect("storage");
         let remote = RemoteStorage::new(Arc::new(object_store::memory::InMemory::new()));
         let tiered = TieredStorage::new(local, remote, 1 << 20, 1 << 20);
         let client = ClientStorage::from_test_storage(Arc::new(tiered), local_objects);
@@ -904,7 +904,7 @@ mod tests {
 
         let local_dir = tempdir().expect("tempdir");
         let tiered = TieredStorage::new(
-            LocalStorage::new(local_dir.path().to_path_buf()),
+            LocalStorage::try_new(local_dir.path().to_path_buf()).expect("storage"),
             remote,
             1 << 20,
             1 << 20,
@@ -941,7 +941,7 @@ mod tests {
 
         let local_dir = tempdir().expect("tempdir");
         let tiered = TieredStorage::new(
-            LocalStorage::new(local_dir.path().to_path_buf()),
+            LocalStorage::try_new(local_dir.path().to_path_buf()).expect("storage"),
             remote,
             1 << 20,
             1 << 20,
@@ -976,7 +976,7 @@ mod tests {
         remote.put(&hash, &data, obj_type).await.unwrap();
         let dir = tempdir().unwrap();
         let tiered = TieredStorage::new(
-            LocalStorage::new(dir.path().to_path_buf()),
+            LocalStorage::try_new(dir.path().to_path_buf()).expect("storage"),
             remote,
             1 << 20,
             1 << 20,
@@ -1109,7 +1109,7 @@ mod tests {
         let _kind = set_hash_kind_for_test(HashKind::Sha1);
         let dir = tempdir().expect("local objects");
         let tiered: Arc<dyn Storage> = Arc::new(TieredStorage::new(
-            LocalStorage::new(dir.path().to_path_buf()),
+            LocalStorage::try_new(dir.path().to_path_buf()).expect("storage"),
             RemoteStorage::new(Arc::new(ListDown)),
             1 << 20,
             1 << 20,
@@ -1179,7 +1179,7 @@ mod tests {
             mode: previous,
         };
         let tiered: Arc<dyn Storage> = Arc::new(TieredStorage::new(
-            LocalStorage::new(objects),
+            LocalStorage::try_new(objects).expect("storage"),
             RemoteStorage::new(Arc::new(object_store::memory::InMemory::new())),
             1 << 20,
             1 << 20,
@@ -1215,7 +1215,7 @@ mod tests {
         remote.put(&hash, &data, obj_type).await.unwrap();
         let dir = tempdir().unwrap();
         let tiered = TieredStorage::new(
-            LocalStorage::new(dir.path().to_path_buf()),
+            LocalStorage::try_new(dir.path().to_path_buf()).expect("storage"),
             remote,
             1 << 20,
             1 << 20,
@@ -1252,7 +1252,7 @@ mod tests {
         // Empty remote; the object lives only locally.
         let remote = RemoteStorage::new(Arc::new(object_store::memory::InMemory::new()));
         let dir = tempdir().unwrap();
-        let local = LocalStorage::new(dir.path().to_path_buf());
+        let local = LocalStorage::try_new(dir.path().to_path_buf()).expect("storage");
         local.put(&hash, &data, obj_type).await.unwrap();
         let tiered = TieredStorage::new(local, remote, 1 << 20, 1 << 20);
 
@@ -1286,7 +1286,7 @@ mod tests {
         let dir = tempdir().unwrap();
         // threshold=16 so the 128-byte object is LRU-tracked; cap generous.
         let tiered = TieredStorage::new(
-            LocalStorage::new(dir.path().to_path_buf()),
+            LocalStorage::try_new(dir.path().to_path_buf()).expect("storage"),
             remote,
             16,
             1 << 20,
@@ -1327,7 +1327,7 @@ mod tests {
         let remote = RemoteStorage::new(Arc::new(object_store::memory::InMemory::new()));
         let dir = tempdir().unwrap();
         let tiered = TieredStorage::new(
-            LocalStorage::new(dir.path().to_path_buf()),
+            LocalStorage::try_new(dir.path().to_path_buf()).expect("storage"),
             remote,
             16,
             1 << 20,
@@ -1366,7 +1366,7 @@ mod tests {
 
         let local_dir = tempdir().expect("tempdir");
         let tiered = TieredStorage::new(
-            LocalStorage::new(local_dir.path().to_path_buf()),
+            LocalStorage::try_new(local_dir.path().to_path_buf()).expect("storage"),
             remote,
             1 << 20,
             1 << 20,
@@ -1402,7 +1402,7 @@ mod tests {
             .expect("seed remote");
 
         let local_dir = tempdir().expect("tempdir");
-        let local = LocalStorage::new(local_dir.path().to_path_buf());
+        let local = LocalStorage::try_new(local_dir.path().to_path_buf()).expect("storage");
         // Corrupt the local copy: wrong bytes stored under the correct OID path.
         local
             .put(&hash, b"corrupt bytes", obj_type)
@@ -1431,7 +1431,7 @@ mod tests {
         let remote = RemoteStorage::new(Arc::new(object_store::memory::InMemory::new()));
         let local_dir = tempdir().expect("tempdir");
         let tiered = TieredStorage::new(
-            LocalStorage::new(local_dir.path().to_path_buf()),
+            LocalStorage::try_new(local_dir.path().to_path_buf()).expect("storage"),
             remote,
             1 << 20,
             1 << 20,
@@ -1450,14 +1450,14 @@ mod tests {
         let _kind = set_hash_kind_for_test(HashKind::Sha1);
         let hash = ObjectHash::from_type_and_data(ObjectType::Blob, b"x");
         let local_dir = tempdir().expect("tempdir");
-        let local = LocalStorage::new(local_dir.path().to_path_buf());
+        let local = LocalStorage::try_new(local_dir.path().to_path_buf()).expect("storage");
         assert!(!local.heal(&hash).await.expect("heal"));
     }
 
     #[tokio::test]
     async fn checked_batch_combines_local_and_remote_presence() {
         let local_dir = tempdir().expect("tempdir");
-        let local = LocalStorage::new(local_dir.path().to_path_buf());
+        let local = LocalStorage::try_new(local_dir.path().to_path_buf()).expect("storage");
         let remote = RemoteStorage::new(Arc::new(object_store::memory::InMemory::new()));
         let local_hit = ObjectHash::from_type_and_data(ObjectType::Blob, b"local only");
         let remote_hit = ObjectHash::from_type_and_data(ObjectType::Blob, b"remote only");
@@ -1501,7 +1501,7 @@ mod tests {
             .await
             .expect("seed corrupted remote object");
         let tiered = TieredStorage::new(
-            LocalStorage::new(local_dir.path().to_path_buf()),
+            LocalStorage::try_new(local_dir.path().to_path_buf()).expect("storage"),
             remote,
             1 << 20,
             1 << 20,
@@ -1540,7 +1540,7 @@ mod tests {
             .await
             .expect("seed remote tag");
         let tiered = TieredStorage::new(
-            LocalStorage::new(local_dir.path().to_path_buf()),
+            LocalStorage::try_new(local_dir.path().to_path_buf()).expect("storage"),
             remote,
             1 << 20,
             1 << 20,
@@ -1566,7 +1566,7 @@ mod tests {
 
         let _kind = git_internal::hash::set_hash_kind_for_test(HashKind::Sha1);
         let local_dir = tempdir().expect("tempdir");
-        let local = LocalStorage::new(local_dir.path().to_path_buf());
+        let local = LocalStorage::try_new(local_dir.path().to_path_buf()).expect("storage");
         let remote = RemoteStorage::new(Arc::new(object_store::memory::InMemory::new()));
         let tag =
             b"object 1111111111111111111111111111111111111111\ntype commit\ntag v1\n\nmessage";
@@ -1617,7 +1617,7 @@ mod tests {
             .await
             .expect("seed second tag");
         let tiered = TieredStorage::new(
-            LocalStorage::new(local_dir.path().to_path_buf()),
+            LocalStorage::try_new(local_dir.path().to_path_buf()).expect("storage"),
             remote,
             1 << 20,
             1 << 20,
@@ -1709,7 +1709,7 @@ mod tests {
             .unwrap();
 
         let dir = tempdir().unwrap();
-        let local = LocalStorage::new(dir.path().to_path_buf());
+        let local = LocalStorage::try_new(dir.path().to_path_buf()).expect("storage");
         local
             .put(&in_local, b"local", ObjectType::Blob)
             .await
@@ -1805,7 +1805,7 @@ mod tests {
         let remote = RemoteStorage::new(Arc::new(object_store::memory::InMemory::new()));
         let local_dir = tempdir().expect("tempdir");
         let tiered = TieredStorage::new(
-            LocalStorage::new(local_dir.path().to_path_buf()),
+            LocalStorage::try_new(local_dir.path().to_path_buf()).expect("storage"),
             remote,
             threshold,
             1 << 20,
@@ -1975,7 +1975,7 @@ mod tests {
         let obj_type = ObjectType::Blob;
         let local_dir = tempdir().expect("tempdir");
         let tiered = TieredStorage::new(
-            LocalStorage::new(local_dir.path().to_path_buf()),
+            LocalStorage::try_new(local_dir.path().to_path_buf()).expect("storage"),
             RemoteStorage::new(Arc::new(FailingStore)),
             8,
             1 << 20,
@@ -2026,7 +2026,7 @@ mod tests {
         )
         .expect("build v1 index");
 
-        let local = LocalStorage::new(local_dir.path().to_path_buf());
+        let local = LocalStorage::try_new(local_dir.path().to_path_buf()).expect("storage");
         let remote = RemoteStorage::new(Arc::new(object_store::memory::InMemory::new()));
         let remote_only_payload = b"stored only in remote tier";
         let remote_only = ObjectHash::from_type_and_data(ObjectType::Blob, remote_only_payload);

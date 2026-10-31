@@ -6797,6 +6797,7 @@ mod tests {
 
         let missing = ObjectHash::new_for_kind(HashKind::Sha1, b"missing after failed pack");
         let error = util::objects_storage()
+            .expect("storage")
             .exist_checked_many(&[missing])
             .expect_err("orphan pack must fail closed until repaired");
         assert!(
@@ -6805,6 +6806,7 @@ mod tests {
         );
         std::fs::remove_file(&pack_path).expect("repair orphan pack in test repository");
         let presence = util::objects_storage()
+            .expect("storage")
             .exist_checked_many(&[missing])
             .expect("storage probe works after explicit orphan repair");
         assert_eq!(presence.get(&missing), Some(&false));
@@ -6863,6 +6865,7 @@ mod tests {
         let blob_oid = ObjectHash::new_for_kind(HashKind::Sha1, b"blob 3\0abc");
         assert_eq!(
             crate::utils::util::objects_storage()
+                .expect("storage")
                 .exist_checked_many(&[blob_oid])
                 .expect("indexed pack is readable while keep lease is held")
                 .get(&blob_oid),

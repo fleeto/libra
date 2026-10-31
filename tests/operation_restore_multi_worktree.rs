@@ -164,7 +164,7 @@ async fn concurrent_publications_preserve_sibling_heads() {
     let database = db::create_database(directory.path().join("repo.db").to_str().unwrap())
         .await
         .expect("database");
-    let storage = ClientStorage::init_local(directory.path().join("objects"));
+    let storage = ClientStorage::try_init_local(directory.path().join("objects")).expect("storage");
     let store = OperationStoreV2::new_for_repo("repo", database, storage.clone());
     let scope_key = ""; // WorktreeScope::Main storage key
 
@@ -232,7 +232,7 @@ async fn reconcile_converges_unambiguous_heads() {
     let database = db::create_database(directory.path().join("repo.db").to_str().unwrap())
         .await
         .expect("database");
-    let storage = ClientStorage::init_local(directory.path().join("objects"));
+    let storage = ClientStorage::try_init_local(directory.path().join("objects")).expect("storage");
     let store = OperationStoreV2::new_for_repo("repo", database, storage.clone());
     let scope_key = ""; // WorktreeScope::Main storage key
     let refs = refs_facet(&storage, serde_json::json!([branch_ref("main", "1111")]));
@@ -324,7 +324,7 @@ async fn reconcile_reports_conflicting_refs_without_guessing() {
     let database = db::create_database(directory.path().join("repo.db").to_str().unwrap())
         .await
         .expect("database");
-    let storage = ClientStorage::init_local(directory.path().join("objects"));
+    let storage = ClientStorage::try_init_local(directory.path().join("objects")).expect("storage");
     let store = OperationStoreV2::new_for_repo("repo", database, storage.clone());
     let scope_key = ""; // WorktreeScope::Main storage key
     let refs_a = refs_facet(&storage, serde_json::json!([branch_ref("main", "aaaa")]));
@@ -397,7 +397,7 @@ async fn reconcile_dry_run_does_not_write_objects() {
     let database = db::create_database(directory.path().join("repo.db").to_str().unwrap())
         .await
         .expect("database");
-    let storage = ClientStorage::init_local(directory.path().join("objects"));
+    let storage = ClientStorage::try_init_local(directory.path().join("objects")).expect("storage");
     let store = OperationStoreV2::new_for_repo("repo", database, storage.clone());
     let scope_key = ""; // WorktreeScope::Main storage key
     let refs = refs_facet(&storage, serde_json::json!([branch_ref("main", "1111")]));
@@ -501,7 +501,7 @@ async fn reconcile_conflict_exits_non_zero_with_stable_code() {
         .expect("repo id")
         .expect("repo id entry")
         .value;
-    let storage = ClientStorage::init_local(pinned.storage.join("objects"));
+    let storage = ClientStorage::try_init_local(pinned.storage.join("objects")).expect("storage");
     let store = OperationStoreV2::new_for_repo(&repo_id, database, storage.clone());
     let baseline_id = store
         .read_heads(&repo_id, pinned.scope.storage_key())
@@ -646,7 +646,7 @@ async fn reconcile_nothing_to_do_on_single_head() {
         .expect("repo id")
         .expect("repo id entry")
         .value;
-    let storage = ClientStorage::init_local(pinned.storage.join("objects"));
+    let storage = ClientStorage::try_init_local(pinned.storage.join("objects")).expect("storage");
     let store = OperationStoreV2::new_for_repo(&repo_id, database, storage);
 
     // A single-head repository has nothing to reconcile.
@@ -690,7 +690,7 @@ async fn restore_is_available_after_reconcile_converges() {
         .expect("repo id")
         .expect("repo id entry")
         .value;
-    let storage = ClientStorage::init_local(pinned.storage.join("objects"));
+    let storage = ClientStorage::try_init_local(pinned.storage.join("objects")).expect("storage");
     let store = OperationStoreV2::new_for_repo(&repo_id, database.clone(), storage.clone());
     let baseline_id = store
         .read_heads(&repo_id, pinned.scope.storage_key())

@@ -401,7 +401,7 @@ async fn prune_unreachable_loose(
         StableErrorCode::ConflictOperationBlocked,
     )?;
 
-    let storage = ClientStorage::init(path::objects());
+    let storage = ClientStorage::try_init(path::objects())?;
     let all_loose = list_loose_objects(repo_path)
         .map_err(|e| CliError::fatal(format!("failed to list loose objects: {e}")))?;
     let reachable = collect_reachable_objects(&storage).await?;

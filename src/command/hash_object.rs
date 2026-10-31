@@ -257,7 +257,7 @@ fn hash_one_source(
     if write {
         // `ClientStorage::put` writes the loose object from the raw payload + type, so
         // it works even for `--literally` content that no typed object would parse.
-        util::objects_storage()
+        util::objects_storage()?
             .put(&object_hash, &data, object_type)
             .map_err(|error| {
                 CliError::fatal(format!(

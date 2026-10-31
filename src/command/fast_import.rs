@@ -468,7 +468,7 @@ impl<R: BufRead> Importer<R> {
                 ));
             }
         };
-        let actual_type = util::objects_storage()
+        let actual_type = util::objects_storage()?
             .get_object_type(&id)
             .map_err(|error| {
                 self.fatal(&format!("cannot inspect modified object {id}: {error}"))
@@ -554,7 +554,7 @@ impl<R: BufRead> Importer<R> {
             None
         } else {
             let blob = self.resolve_dataref(dataref)?;
-            let object_type = util::objects_storage()
+            let object_type = util::objects_storage()?
                 .get_object_type(&blob)
                 .map_err(|error| {
                     self.fatal(&format!("cannot inspect note blob {blob}: {error}"))
@@ -596,7 +596,7 @@ impl<R: BufRead> Importer<R> {
                 crate::internal::object_format::parse_repo_oid(&object_text).map_err(|error| {
                     self.fatal(&format!("invalid notes object path '{path}': {error}"))
                 })?;
-            let object_type = util::objects_storage()
+            let object_type = util::objects_storage()?
                 .get_object_type(blob)
                 .map_err(|error| {
                     self.fatal(&format!("cannot inspect note blob {blob}: {error}"))
@@ -647,7 +647,7 @@ impl<R: BufRead> Importer<R> {
         let message = self
             .read_required_data()?
             .ok_or_else(|| self.fatal("tag is missing its message data"))?;
-        let object_type = util::objects_storage()
+        let object_type = util::objects_storage()?
             .get_object_type(&target)
             .map_err(|error| self.fatal(&format!("cannot inspect tag target {target}: {error}")))?;
         if !matches!(
@@ -719,7 +719,7 @@ impl<R: BufRead> Importer<R> {
                     ))
                 })?;
             } else if let Some(object_id) = target {
-                util::objects_storage()
+                util::objects_storage()?
                     .get_object_type(&object_id)
                     .map_err(|error| {
                         self.fatal(&format!(
@@ -746,7 +746,7 @@ impl<R: BufRead> Importer<R> {
         let pending_refs = self.pending_refs.clone();
         let pending_notes = self.pending_notes.clone();
         let pending_note_replacements = self.pending_note_replacements.clone();
-        let storage = util::objects_storage();
+        let storage = util::objects_storage()?;
         for ((notes_ref, object), blob) in &pending_notes {
             if blob.is_none() {
                 continue;

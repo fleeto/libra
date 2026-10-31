@@ -7730,8 +7730,9 @@ mod tests {
         let journal = commit_journal::journal_path(&repo);
         fs::set_permissions(&journal, fs::Permissions::from_mode(0o644))
             .expect("inject unsafe journal permissions");
-        let storage: Arc<dyn Storage + Send + Sync> =
-            Arc::new(LocalStorage::new(repo.join("objects")));
+        let storage: Arc<dyn Storage + Send + Sync> = Arc::new(
+            LocalStorage::try_new(repo.join("objects")).expect("open the test object store"),
+        );
         let history = HistoryManager::for_traces(storage, repo.clone(), Arc::new(conn.clone()));
         let partial = history
             .erase_session_local("codex_erased")
@@ -7846,8 +7847,9 @@ mod tests {
             &CommitJournalRecord::prepared(scope, "sha1", &"b".repeat(40), &["codex_race".into()]),
         )
         .expect("append under commit lock");
-        let storage: Arc<dyn Storage + Send + Sync> =
-            Arc::new(LocalStorage::new(repo.join("objects")));
+        let storage: Arc<dyn Storage + Send + Sync> = Arc::new(
+            LocalStorage::try_new(repo.join("objects")).expect("open the test object store"),
+        );
         let history = HistoryManager::for_traces(storage, repo.clone(), Arc::new(conn.clone()));
         let erase = tokio::spawn(async move { history.erase_session_local("codex_race").await });
         tokio::time::sleep(std::time::Duration::from_millis(50)).await;
@@ -8015,9 +8017,10 @@ mod tests {
             .join(key::CAPTURE_DEDUP_SECRET_FILE);
         std::fs::remove_file(&key_path).unwrap();
 
-        let storage = Arc::new(crate::utils::storage::local::LocalStorage::new(
-            repo.join("objects"),
-        ));
+        let storage = Arc::new(
+            crate::utils::storage::local::LocalStorage::try_new(repo.join("objects"))
+                .expect("storage"),
+        );
         let history = HistoryManager::for_traces(storage, repo.clone(), Arc::new(conn.clone()));
         use tracing::instrument::WithSubscriber;
         #[derive(Clone, Default)]
@@ -8324,7 +8327,7 @@ mod tests {
         .await
         .unwrap();
         let storage: Arc<dyn Storage + Send + Sync> =
-            Arc::new(LocalStorage::new(repo.join("objects")));
+            Arc::new(LocalStorage::try_new(repo.join("objects")).expect("storage"));
         let history = HistoryManager::for_traces(storage, repo.clone(), Arc::new(conn.clone()));
         let repository_entries = || {
             std::fs::read_dir(&repo)
@@ -8484,7 +8487,7 @@ mod tests {
         };
         let keyless_layout = layout();
         let storage: Arc<dyn Storage + Send + Sync> =
-            Arc::new(LocalStorage::new(repo.join("objects")));
+            Arc::new(LocalStorage::try_new(repo.join("objects")).expect("storage"));
         let history = HistoryManager::for_traces(storage, repo.clone(), Arc::new(conn.clone()));
         conn.execute_unprepared("CREATE TRIGGER fail_identity_erase BEFORE DELETE ON agent_session BEGIN SELECT RAISE(ABORT, 'injected catalog erasure failure'); END").await.unwrap();
         assert!(history.erase_session_local(native::CAPTURE).await.is_err());
@@ -8639,9 +8642,10 @@ mod tests {
                 .unwrap();
 
             let storage_root = fixture.dir.path().join(crate::utils::util::ROOT_DIR);
-            let storage = Arc::new(crate::utils::storage::local::LocalStorage::new(
-                storage_root.join("objects"),
-            ));
+            let storage = Arc::new(
+                crate::utils::storage::local::LocalStorage::try_new(storage_root.join("objects"))
+                    .expect("storage"),
+            );
             let history =
                 HistoryManager::for_traces(storage, storage_root, Arc::new(fixture.conn.clone()));
             let prune_id = if prune_identity_checkpoint {
@@ -9262,10 +9266,12 @@ mod tests {
             .await
             .expect_err("the corrupt row blocks the listing");
 
-        let storage: Arc<dyn crate::utils::storage::Storage + Send + Sync> =
-            Arc::new(crate::utils::storage::local::LocalStorage::new(
+        let storage: Arc<dyn crate::utils::storage::Storage + Send + Sync> = Arc::new(
+            crate::utils::storage::local::LocalStorage::try_new(
                 crate::utils::util::storage_path().join("objects"),
-            ));
+            )
+            .expect("storage"),
+        );
         let history = HistoryManager::new_with_ref(
             storage,
             crate::utils::util::storage_path(),
@@ -9477,7 +9483,7 @@ mod tests {
         std::fs::create_dir(&repo_path).unwrap();
         let objects_dir = repo_path.join("objects");
 
-        let storage = Arc::new(LocalStorage::new(objects_dir));
+        let storage = Arc::new(LocalStorage::try_new(objects_dir).expect("storage"));
         let db_conn = Arc::new(setup_test_db().await);
         let manager = HistoryManager::new(storage.clone(), repo_path.clone(), db_conn.clone());
 
@@ -9534,7 +9540,7 @@ mod tests {
         std::fs::create_dir(&repo_path).unwrap();
         let objects_dir = repo_path.join("objects");
 
-        let storage = Arc::new(LocalStorage::new(objects_dir));
+        let storage = Arc::new(LocalStorage::try_new(objects_dir).expect("storage"));
         let db_conn = Arc::new(setup_test_db().await);
         let manager = HistoryManager::new(storage.clone(), repo_path.clone(), db_conn.clone());
 
@@ -9569,7 +9575,7 @@ mod tests {
         std::fs::create_dir(&repo_path).unwrap();
         let objects_dir = repo_path.join("objects");
 
-        let storage = Arc::new(LocalStorage::new(objects_dir));
+        let storage = Arc::new(LocalStorage::try_new(objects_dir).expect("storage"));
         let db_conn = Arc::new(setup_test_db().await);
         let manager = HistoryManager::new(storage.clone(), repo_path.clone(), db_conn.clone());
 
@@ -9604,7 +9610,7 @@ mod tests {
                 .await
                 .expect("failed to create sqlite database"),
         );
-        let storage = Arc::new(LocalStorage::new(objects_dir));
+        let storage = Arc::new(LocalStorage::try_new(objects_dir).expect("storage"));
         let manager = HistoryManager::new(storage, repo_path.clone(), db_conn.clone());
 
         let locker = db::establish_connection_with_lock_timeout(
@@ -9654,7 +9660,7 @@ mod tests {
     fn traces_manager(dir: &tempfile::TempDir, db_conn: Arc<DatabaseConnection>) -> HistoryManager {
         let repo_path = dir.path().join(".libra");
         std::fs::create_dir_all(repo_path.join("objects")).unwrap();
-        let storage = Arc::new(LocalStorage::new(repo_path.join("objects")));
+        let storage = Arc::new(LocalStorage::try_new(repo_path.join("objects")).expect("storage"));
         HistoryManager::new_with_ref(
             storage,
             repo_path,
@@ -9747,7 +9753,7 @@ mod tests {
             .expect("create deadline contention database"),
         );
         let manager = HistoryManager::new_with_ref(
-            Arc::new(LocalStorage::new(objects_dir)),
+            Arc::new(LocalStorage::try_new(objects_dir).expect("storage")),
             repo_path,
             db_conn.clone(),
             crate::internal::branch::TRACES_BRANCH,
@@ -11581,7 +11587,7 @@ mod tests {
         std::fs::create_dir(&repo_path).unwrap();
         let objects_dir = repo_path.join("objects");
 
-        let storage = Arc::new(LocalStorage::new(objects_dir));
+        let storage = Arc::new(LocalStorage::try_new(objects_dir).expect("storage"));
         let db_conn = Arc::new(setup_test_db().await);
         let manager = HistoryManager::new(storage, repo_path, db_conn);
 
@@ -11971,7 +11977,7 @@ mod tests {
             .expect("create rejected cleanup database"),
         );
         let manager = HistoryManager::new_with_ref(
-            Arc::new(LocalStorage::new(objects_dir)),
+            Arc::new(LocalStorage::try_new(objects_dir).expect("storage")),
             repo_path.clone(),
             db_conn.clone(),
             crate::internal::branch::TRACES_BRANCH,
@@ -13169,7 +13175,7 @@ mod tests {
         });
         let db_conn = Arc::new(setup_test_db().await);
         let manager = HistoryManager::new_with_ref(
-            Arc::new(ClientStorage::init(objects_dir)),
+            Arc::new(ClientStorage::try_init(objects_dir).expect("storage")),
             repo_path,
             db_conn,
             crate::internal::branch::TRACES_BRANCH,
@@ -13215,7 +13221,8 @@ mod tests {
         )
         .expect("configure alternate object store");
 
-        let storage = Arc::new(LocalStorage::new_with_alternates(objects_dir));
+        let storage =
+            Arc::new(LocalStorage::try_new_with_alternates(objects_dir).expect("storage"));
         let db_conn = Arc::new(setup_test_db().await);
         let manager = HistoryManager::new_with_ref(
             storage,

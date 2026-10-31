@@ -56,6 +56,15 @@ Nowledge 定向检索已尝试，服务连接被环境阻止；本计划依据�
 - 默认 Docs and compatibility impact=N/A 仅适用于输出与错误完全不变的内部优化；公开行为变化卡须同卡双语与网站文档。网站路径为候选，DEP-SP-DOCS 核验后才允许开工；遵循用户 standing instruction 直接 cf，通过 Libra 提交推送，不能另建网站分支/PR/worktree。
 - 无家族合并发布；C/D coverage=self（实现卡），SP-09 继承下列具体实现卡。SP-00 按用户批准的 EX-SP-00-AUDIT-01 独立文档验收（见下）；该例外不免除评审、fmt、Clippy 或本卡 PR CI，也不授权其它卡开工。
 
+### SP-03 验证数量与CI收口决策（EX-SP-03-VER-01 / EX-SP-03-CLOSE-01）
+
+2026-10-31，用户在“批准数量例外→提交推送建PR跑CI→收口”的建议上明确要求顺序改为“1→3→2”：把本地整改结果、最终CI成功的完成判据及回执的后续登记方式先写进同一提交，以免CI成功后另建进度提交触发第二轮CI。本决策只针对SP-03本仓库修复交付；本机nextest仍not-run，网站与独立版本发布仍未执行，不冒充完整发布或网站部署完成。当前修复卡在同一最终PR head的适用base.yml与CodeQL全部成功后，满足本次用户批准的收口条件；成功回执按模板v2.14随下一次例行状态同步登记，不专建成功记账提交。
+
+| ID | 豁免项/范围 | Approver | Review round | 证据与有效期 |
+|---|---|---|---|---|
+| EX-SP-03-VER-01 | 仅SP-03 Verification列允许15/8；全部15个验证门保留 | 用户（本线程“顺序是1 3 2”） | R-SP03-FINAL | 已核对三模型整改关闭证据、指定门计数和单一stat信任/失效轴；仅当前SP-03交付有效，不扩展到其它卡，不免除全量与静态门 |
+| EX-SP-03-CLOSE-01 | 当前修复交付先预登记本地完成/CI待验，再统一提交推送建PR；全量证据由同一最终PR head的CI取得，不要求本机先跑nextest；免除为CI成功回执专建记账提交 | 用户（本线程“顺序是1 3 2”） | R-SP03-FINAL | 本机16GiB及两份env缺失仍为not-run；当前候选全量CI不预称通过。仅本次本仓库修复与PR交付；网站按DEFER-SP-DOCS-03延期，独立发布未授权、不执行 |
+
 ### SP-02 修复卡收口决策（EX-SP-02-CLOSE-01）
 
 2026-10-30 03:06:14 UTC，在本仓库实现、单元/集成/兼容守卫、EN/zh-CN 命令文档及 `fmt`/严格 `Clippy` 通过后，用户明确要求“首先设置任务完成，然后再提交、推送、创建 PR，版本不变”。本次按用户指令登记 `SP-02` 为 `done / complete`，保持 `Cargo.toml` 版本 `0.30.101` 不变；这是对模板 ER-04/ER-08 完整发布切片及推送后远端门顺序的本卡具名例外，不扩展至其它任务卡。
@@ -327,7 +336,7 @@ Phase 0 基线：SP-00；Phase 1 正确性与 stat：SP-01..03；Phase 2 核心�
 
 **Out of scope:** CE_VALID 永久不在本计划范围；其它行为轴按任务总览分别承接；pack 会话缓存/marker 合并/IPC 批处理登记为 DEFER-SP-01..03，未启用。
 
-**Current evidence:** src/command/restore.rs:673（worktree快照）、765（index处理）、931（条目认证）、1888（发布后内容复核）；src/utils/stat_diff.rs:17,43（零时间戳信任拒绝与racy判断）。最终源码manifest与矩阵结果见当前摘要；旧基线锚点不作为当前实现证据。
+**Current evidence:** src/command/restore.rs:684（restore_worktree_tracked）；src/command/restore.rs:776（restore_index_tracked）；src/command/restore.rs:942（restore_index_entry）；src/command/restore.rs:1899（stable_published_snapshot）；src/utils/stat_diff.rs:17,43。源码manifest与当前矩阵见下。
 
 **Acceptance criteria:**
 
@@ -348,6 +357,60 @@ Phase 0 基线：SP-00；Phase 1 正确性与 stat：SP-01..03；Phase 2 核心�
 - [ ] ER-06a：文档清单逐文件同步并验收（全局必需门，不计入特有 AC）。
 
 
+**合并集成后当前验收摘要（2026-10-31 02:23:54 UTC；本节取代下方原候选历史摘要）：**
+
+- PR #661首个head bb8e2c3与主线的唯一文本冲突为SRC_SERIAL_REGISTRY追加行；已完整保留双方登记，合入上游98aa6be6da28646effbc2879959805c0b326547c，继承其Storage/Tree Result传播，不回退上游错误处理。版本随主线0.30.118，SP-03没有额外bump。当前修复diff仍为同一stat信任/失效轴与原13个文件，非引入其它业务改动。
+- 合并后实测：stat_diff2/2、restore lib12/12、restore58/58、clone43/43、worktree65/65、isolation119/119、doctor13/13、checkpoint3/3、bridge VCS8/8、bridge checkpoint3/3、registry26/26；三个racy过滤各1/1，均0failed/0ignored。fmt、严格全特性Clippy、cargo check及候选/主线同profile nightly release均exit0。nightly Cargo的manual_readme/redundant_homepage两条主线清单提示保留；Clippy没有因而放宽-D warnings。
+- 新候选binary SHA256 `557625f321697abd9f98a085aedb25a1670b8afc8ed44c1c9359e19e4d408808`，主线父binary `c6561f91e1e4929ea8c72e3dcd8269720c07c8978896120610114aa2c07c160a`；Git `6210287b8021b25eea03b1866f8bbb775c02ac1185f0d69f2a70c01e73b1ab9c`。直接对照基线为98aa6be，而非旧bbfb4ef。生产源码manifest `8185f969254e2550eab24b1ec01015dbe8d9313f129e3803f256278c8fe2de58`，采样前后源码及三工具binary不变，独立核验时仍匹配当前源码。
+- 严格SP-00完整16格、fixture d0a5c28、2125路径，每边每格5预热+20正式；共1200次调用、960正式样本，ABC/CBA逐对交替、新CLI/热页面缓存。所有exit0、stderr空、各工具原始输出稳定、index SHA不变；跨工具/索引规范化记录一致，独立重算median及nearest-rank p95通过。
+- 默认索引8格倍率下降30.03%–51.86%；refreshed8格倍率下降范围-4.15%至1.56%，不将小幅波动包装成确定收益。clone成本仍不列验收阻断。完整结果如下。
+- 原始临时证据 `/tmp/libra-sp03-full-matrix-fvrq4x63`；result.json SHA256 `7437da264ecc103b35fad52fc0afc3f0c826d75ebaacac5625a38b04f2de4c91`，samples.jsonl `a46838f6c1f702ebb0626054b3e053b5bf22b4dacff2c33757d8d894327b82e6`，sampler `9d9795644de7cb438c762e61c929968eb0a76fcc40b282e0a578378353e6c6ef`。主线ZIP `c48df74e925ce3804e6f938594eb3dc3c8ebb7236e580607e7c400ab5e9c9d03`，校验/构建日志 `/tmp/libra-sp03-merged-final-7dovzozl`。关键计数、hash及完整表已入本计划，临时文件不承诺永久保存。
+- 本地nextest仍not-run（16GiB及两份env缺失）；本次同一最终PR head的base.yml全量与CodeQL尚待推送后观察，不能把上述定向验证记为CI成功。按用户1→3→2，所有记录进入必要的冲突解决提交；成功回执留PR/Actions与交付答复，按v2.14在下一次例行状态同步登记，不另推成功记账提交。网站与独立发布仍未执行。
+
+| 索引 | 未跟踪 | 重命名 | 输出 | Git median/p95 ms | 父版本 median/p95 ms | 候选 median/p95 ms | 父/Git | 候选/Git | 倍率下降 | 候选更快配对数 |
+|---|---|---|---|---:|---:|---:|---:|---:|---:|---:|
+| default | no | default | v1 | 11.297/12.512 | 650.894/664.990 | 369.545/381.692 | 57.615× | 32.711× | 43.23% | 20/20 |
+| default | no | default | v2 | 11.362/12.329 | 748.948/762.897 | 463.892/475.187 | 65.918× | 40.829× | 38.06% | 20/20 |
+| default | no | no-renames | v1 | 10.926/12.383 | 551.115/567.697 | 265.319/277.440 | 50.442× | 24.284× | 51.86% | 20/20 |
+| default | no | no-renames | v2 | 11.059/12.016 | 649.618/662.361 | 368.440/376.707 | 58.744× | 33.317× | 43.28% | 20/20 |
+| default | normal | default | v1 | 17.152/17.857 | 876.176/892.002 | 585.053/599.109 | 51.084× | 34.111× | 33.23% | 20/20 |
+| default | normal | default | v2 | 16.186/18.425 | 976.619/986.463 | 683.292/698.963 | 60.336× | 42.214× | 30.03% | 20/20 |
+| default | normal | no-renames | v1 | 16.073/17.347 | 777.079/784.921 | 487.279/504.275 | 48.348× | 30.317× | 37.29% | 20/20 |
+| default | normal | no-renames | v2 | 16.567/17.821 | 876.482/898.635 | 585.854/596.900 | 52.906× | 35.363× | 33.16% | 20/20 |
+| refreshed | no | default | v1 | 11.231/12.690 | 386.322/499.812 | 383.827/400.224 | 34.397× | 34.175× | 0.65% | 14/20 |
+| refreshed | no | default | v2 | 12.345/13.800 | 544.560/588.749 | 567.134/588.605 | 44.110× | 45.939× | -4.15% | 6/20 |
+| refreshed | no | no-renames | v1 | 12.729/14.525 | 350.730/373.490 | 346.665/365.395 | 27.553× | 27.233× | 1.16% | 11/20 |
+| refreshed | no | no-renames | v2 | 13.334/14.221 | 492.118/527.165 | 484.445/493.261 | 36.907× | 36.332× | 1.56% | 18/20 |
+| refreshed | normal | default | v1 | 20.319/30.404 | 783.379/848.559 | 784.063/1108.152 | 38.554× | 38.588× | -0.09% | 8/20 |
+| refreshed | normal | default | v2 | 22.071/29.787 | 947.019/1331.211 | 941.310/1374.843 | 42.908× | 42.650× | 0.60% | 11/20 |
+| refreshed | normal | no-renames | v1 | 21.175/27.448 | 688.210/734.506 | 690.657/775.251 | 32.500× | 32.616× | -0.36% | 9/20 |
+| refreshed | normal | no-renames | v2 | 23.152/51.988 | 926.091/1047.449 | 937.693/1175.663 | 40.001× | 40.502× | -1.25% | 7/20 |
+
+**完整16格复测（同一源码/二进制/原夹具，不重置index）：** 首轮后半段三工具的绝对耗时与p95同时升高，refreshed/no/default/v2中位数观察到慢4.15%、6/20配对更快，因此追加完整16格复测，而非只挑该格或只挑有利结果。原夹具的六份index SHA与首轮一致，HEAD仍为d0a5c28；每格重新5预热+20正式，完整1200调用/960正式样本。复测的源码、三二进制、全部输出记录与首轮一致，index仍未改变，两轮都独立重算median/p95通过。
+
+复测默认8格下降29.87%–51.74%，每格20/20更快；refreshed8格下降范围-0.48%至0.80%。首轮慢4.15%的同格复测为快0.08%、10/20配对更快，未稳定复现；不能据此证明任何环境下绝无回归。当前证据支持default收益稳定，refreshed没有可复现的一致收益/回归，保留不确定性。两轮分别报告，未筛除首轮，不把它们混为一轮n=20。
+
+复测临时证据 `/tmp/libra-sp03-matrix-replication-atk55x1v`：result.json SHA256 `760ef3f2b911ba30f664ac7468fb3b1e8d47d6f5a0aeb602e618f4509f026575`、samples.jsonl `20597e8573948259058c204fb8986a1b4d64dbee60be5d9e5c7839a3aa25171d`、replicator `049d094a226c810851817fcebd8583d971965bdd1099c776e181a84463e380ae`。合计2400调用/1920正式样本，每轮完整16格。
+
+| 索引 | 未跟踪 | 重命名 | 输出 | Git median/p95 ms | 父版本 median/p95 ms | 候选 median/p95 ms | 父/Git | 候选/Git | 倍率下降 | 候选更快配对数 |
+|---|---|---|---|---:|---:|---:|---:|---:|---:|---:|
+| default | no | default | v1 | 11.371/11.710 | 650.234/663.544 | 365.574/372.950 | 57.185× | 32.151× | 43.78% | 20/20 |
+| default | no | default | v2 | 10.881/11.515 | 743.553/758.481 | 460.026/474.177 | 68.337× | 42.279× | 38.13% | 20/20 |
+| default | no | no-renames | v1 | 10.683/11.497 | 549.422/567.875 | 265.141/275.076 | 51.429× | 24.819× | 51.74% | 20/20 |
+| default | no | no-renames | v2 | 10.746/11.728 | 645.425/649.342 | 364.882/371.789 | 60.061× | 33.955× | 43.47% | 20/20 |
+| default | normal | default | v1 | 16.411/17.536 | 869.398/891.529 | 580.111/594.469 | 52.975× | 35.348× | 33.27% | 20/20 |
+| default | normal | default | v2 | 16.177/16.952 | 963.610/974.307 | 675.824/685.283 | 59.565× | 41.776× | 29.87% | 20/20 |
+| default | normal | no-renames | v1 | 16.329/18.559 | 771.424/790.861 | 482.178/495.529 | 47.242× | 29.529× | 37.50% | 20/20 |
+| default | normal | no-renames | v2 | 16.268/18.578 | 865.629/882.641 | 577.733/590.409 | 53.211× | 35.514× | 33.26% | 20/20 |
+| refreshed | no | default | v1 | 10.982/12.146 | 365.711/380.775 | 366.988/395.135 | 33.302× | 33.419× | -0.35% | 8/20 |
+| refreshed | no | default | v2 | 10.900/11.608 | 461.520/469.972 | 461.160/477.557 | 42.341× | 42.308× | 0.08% | 10/20 |
+| refreshed | no | no-renames | v1 | 10.831/12.117 | 266.753/277.944 | 266.220/276.247 | 24.629× | 24.580× | 0.20% | 11/20 |
+| refreshed | no | no-renames | v2 | 11.450/12.969 | 364.197/376.219 | 364.444/375.310 | 31.808× | 31.829× | -0.07% | 9/20 |
+| refreshed | normal | default | v1 | 15.961/17.897 | 576.496/589.612 | 578.669/596.519 | 36.119× | 36.255× | -0.38% | 8/20 |
+| refreshed | normal | default | v2 | 15.805/16.131 | 672.646/685.118 | 672.934/688.708 | 42.560× | 42.578× | -0.04% | 12/20 |
+| refreshed | normal | no-renames | v1 | 15.894/18.271 | 479.152/492.352 | 481.458/501.678 | 30.147× | 30.292× | -0.48% | 8/20 |
+| refreshed | normal | no-renames | v2 | 16.016/18.002 | 578.983/603.962 | 574.359/592.854 | 36.149× | 35.861× | 0.80% | 12/20 |
+
 **Verification:**
 
 执行回执共19行已取得、1行全量未运行；其中racy一行含3条独立命令。G-03按下方逐项分类保守计为15个本卡指定验证门，超过implementation上限8；用户现按EX-SP-03-VER-01批准本卡数量例外。19/20不再用于粒度字段，也不通过合并命令隐藏独立门。
@@ -360,7 +423,7 @@ Phase 0 基线：SP-00；Phase 1 正确性与 stat：SP-01..03；Phase 2 核心�
 
 - [x] `cargo test --test command_test clone_test::` — 43 passed。
 
-- [x] `cargo test --test command_test restore_test::restore_stat_snapshot_ -- --nocapture` — 8 passed，非零命中。
+- [x] `restore_stat_snapshot_`八项 — 包含于合并后restore58项中，未额外重复运行该过滤命令。
 
 - [x] `cargo test --test command_test worktree_test::` — 65 passed。
 
@@ -420,7 +483,7 @@ Phase 0 基线：SP-00；Phase 1 正确性与 stat：SP-01..03；Phase 2 核心�
 
 **C/D coverage from:** self；本仓库定向、静态、release 构建与 SP-00 三边矩阵已验证；T-1 全量 nextest 未运行，网站门 DEFER-SP-DOCS-03 未执行；未提交/推送/发布，Lifecycle 保持 in-progress。
 
-**整改当前验收摘要（2026-10-30 20:08:44 UTC，以下为当前口径；随后逐次回执为历史过程）：**
+**原候选历史验收摘要（ee598 / bb8e2c3，合并前；当前以本卡合并集成后摘要为准）：**
 
 - 最终源码生产写集为 restore.rs 与 stat_diff.rs。发布后内容复核、最终stat复核、干净路径不误报 restored_files、无skip-worktree的clean→dirty、可信路径跳过fallback blob、旧API传递快照及每pass复用workdir均已实现并定向验证。
 - 非Unix缺少可靠ctime证据时保守smudge；任一零时间戳不能授权stat短路；LFS epoch路径保留实际32768字节而非pointer的130字节。后两项均有实际RED→GREEN。没有原生Windows执行环境，不能据此宣称Windows原生测试通过。未改变CE_VALID或生产签名默认。
@@ -527,16 +590,16 @@ Phase 0 基线：SP-00；Phase 1 正确性与 stat：SP-01..03；Phase 2 核心�
 
 **当前生效的用户决策与交付预登记（2026-10-31 01:12:32 UTC）：** 用户明确采用“1→3→2”，以避免CI通过后再专门提交卡片进度触发第二轮CI。先登记以下例外、本地整改结果和后置判据，再将当前候选统一提交/推送并创建PR。此前“未授权提交/推送”与“粒度待批准”仅为历史，不再代表当前授权。此次不合并PR、不发布tag/Release；独立版本发布及网站继续单独跟踪，不将其伪称完成。
 
-| ID | 豁免项/范围 | Approver | Review round | 证据与有效期 |
-|---|---|---|---|---|
-| EX-SP-03-VER-01 | 仅SP-03 Verification列允许15/8；全部15个验证门保留 | 用户（本线程“顺序是1 3 2”） | R-SP03-FINAL | 已核对三模型整改关闭证据、指定门计数和单一stat信任/失效轴；仅当前SP-03交付有效，不扩展到其它卡，不免除全量与静态门 |
-| EX-SP-03-CLOSE-01 | 当前修复交付先预登记本地完成/CI待验，再统一提交推送建PR；全量证据由同一最终PR head的CI取得，不要求本机先跑nextest；免除为CI成功回执专建记账提交 | 用户（本线程“顺序是1 3 2”） | R-SP03-FINAL | 本机16GiB及两份env缺失仍为not-run；当前候选全量CI不预称通过。仅本次本仓库修复与PR交付；网站按DEFER-SP-DOCS-03延期，独立发布未授权、不执行 |
+本卡具名例外白名单见全局执行约束下的“SP-03 验证数量与CI收口决策”；以下判据为该决策的执行预登记。
 
 **预登记的完成判据：** 本地整改及定向/静态/矩阵已通过。提交包含本卡全部当前源、测试、文档和进度；推送origin/codex/SP-03后创建libra-tools/libra的PR。只有同一最终PR head上的base.yml（Check, Build and Test，包含全量nextest）和codeql.yml全部适用检查成功，且无未关闭P0/P1时，本次修复交付才完成；此前保持remote-pending。失败时按实际错误前滚修复并在新head重跑，不复用旧head结果。没有任何CI成功预登记。
 
 **避免记账触发循环：** 本次CI的head SHA、run ID、计数、结论与UTC观察时间先留在PR/Actions与本次交付答复；按模板v2.14随下一次plan-status.md例行同步登记，不为本次成功回执单独新建提交。卡片的后置判据已在本提交中写明，CI全绿即可满足该条件，不需要再推一笔“设置完成”的提交。
 
 **R-SP03-FINAL / Codex自审：PASS（当前源码与上述用户例外；不冒充三模型再次运行review）。** 发布后hash+pre-read快照与最终stat复核闭环；两个竞态窗口及真实status回归已GREEN；clean CLI/JSON无误报、可信条目避免fallback blob、旧API快照复用、gitlink与flags保留、非Unix保守smudge、零stat拒绝信任、LFS实际size保持均有当前证据。共享调用方与serial守卫重验通过，源码manifest与最终16格矩阵一致。未发现当前未关闭P0/P1；Windows原生执行与全量测试留待PR CI，不用macOS定向结果替代。网站延期及CI待验保持显式。
+
+**合并后R-SP03-FINAL复核（2026-10-31 02:23:54 UTC）：PASS。** 复核SP-03相对98aa6be的实际diff、上游Result处理保留、双方serial登记、当前定向/静态与新16格矩阵证据；无新增未关闭P0/P1。不是对全部上游改动的重新评审，也不是未运行CI的通过证明。
+
 ### Task SP-04: 单次 status 复用同一 index 快照
 
 **Task type:** implementation
@@ -1109,3 +1172,5 @@ DEP-SP-DATA 按用户指定采用公开标准仓库 [`libra-tools/libra@d0a5c28`
 | 2026-10-30 20:08:44 UTC | 最终ee598候选：新源定向/静态及16格三边矩阵独立审计PASS，调用方已按最终共享stat helper重验；19/20 VER（含明确标识的历史计数证据）。 | T-1全量和网站门未完成；SP-03仍in-progress，Issue同步待回执，未提交/推送/发布 |
 
 | 2026-10-31 01:12:32 UTC | 用户采用1→3→2，批准SP-03验证数量例外并授权统一提交/推送建PR；本地整改与CI后置判据预登记。 | EX-SP-03-VER-01、EX-SP-03-CLOSE-01生效；本地完成/remote-pending，CI不预记通过，不专建成功记账提交；网站与独立发布保留延期/未执行 |
+
+| 2026-10-31 02:23:54 UTC | PR #661必要的主线集成：合并98aa6be，保留双方serial登记；最终定向/静态、两release、新16格三边矩阵独立核验通过。 | 更新同一PR；最终head CI仍待验，不另建成功记账提交；历史bb8/ee598证据保留且明确版本边界 |

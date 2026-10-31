@@ -7548,9 +7548,10 @@ mod tests {
 
         /// `libra agent doctor --repair`'s marker entry point.
         async fn doctor_repair_marker(&self) -> bool {
-            let storage = std::sync::Arc::new(crate::utils::client_storage::ClientStorage::init(
-                self.repo.join("objects"),
-            ));
+            let storage = std::sync::Arc::new(
+                crate::utils::client_storage::ClientStorage::try_init(self.repo.join("objects"))
+                    .expect("storage"),
+            );
             crate::internal::ai::history::HistoryManager::for_traces(
                 storage,
                 self.repo.clone(),

@@ -232,7 +232,7 @@ pub struct RevListArgs {
 
 /// Total on-disk size of the commits and their reachable trees/blobs.
 async fn disk_usage_bytes(commit_ids: &[String]) -> CliResult<u64> {
-    let storage = ClientStorage::init(path::objects());
+    let storage = ClientStorage::try_init(path::objects())?;
     let mut seen: HashSet<String> = HashSet::new();
     let mut total = 0u64;
     for id in commit_ids {

@@ -213,7 +213,7 @@ async fn seed_checkpoint_with_secret(repo: &Path) -> String {
     .expect("insert session");
 
     let repo_path = repo.join(".libra");
-    let storage = Arc::new(ClientStorage::init(repo_path.join("objects")));
+    let storage = Arc::new(ClientStorage::try_init(repo_path.join("objects")).expect("storage"));
     let history =
         HistoryManager::new_with_ref(storage, repo_path, Arc::new(conn.clone()), TRACES_BRANCH);
     let redactor = Redactor::new_default();
@@ -292,7 +292,7 @@ async fn seed_og13_legacy_checkpoint(repo: &Path, transcript: &[u8]) -> String {
     .expect("insert session");
 
     let repo_path = repo.join(".libra");
-    let storage = Arc::new(ClientStorage::init(repo_path.join("objects")));
+    let storage = Arc::new(ClientStorage::try_init(repo_path.join("objects")).expect("storage"));
     let history =
         HistoryManager::new_with_ref(storage, repo_path, Arc::new(conn.clone()), TRACES_BRANCH);
     let redactor = Redactor::new_default();
@@ -688,7 +688,7 @@ async fn seed_temporary_gc_checkpoint(repo: &Path) -> (String, ObjectHash) {
     let conn = connect_repo_db(repo).await;
     let storage = repo.join(".libra");
     let history = HistoryManager::new_with_ref(
-        Arc::new(ClientStorage::init(storage.join("objects"))),
+        Arc::new(ClientStorage::try_init(storage.join("objects")).expect("storage")),
         storage,
         Arc::new(conn.clone()),
         TRACES_BRANCH,

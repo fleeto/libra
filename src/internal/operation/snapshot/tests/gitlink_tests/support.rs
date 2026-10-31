@@ -108,7 +108,7 @@ pub(super) async fn fixture(linked: bool) -> Fixture {
             scope,
             WorkspaceStatePointer::new("fixture", blob_oid(b"seed"), 0),
         ),
-        storage: ClientStorage::init_local(storage_path.join("objects")),
+        storage: ClientStorage::try_init_local(storage_path.join("objects")).expect("storage"),
     }
 }
 

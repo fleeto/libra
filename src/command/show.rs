@@ -366,7 +366,7 @@ async fn show_target_uses_commit_display(args: &ShowArgs) -> CliResult<bool> {
     }
 
     if let Some(hash) = resolve_existing_object_hash(object_ref)? {
-        let storage = ClientStorage::init(path::objects());
+        let storage = ClientStorage::try_init(path::objects())?;
         let object_type = storage
             .get_object_type(&hash)
             .map_err(|error| show_object_load_error(hash, error))?;
@@ -377,7 +377,7 @@ async fn show_target_uses_commit_display(args: &ShowArgs) -> CliResult<bool> {
         let hash = util::resolve_object_spec_typed(object_ref)
             .await
             .map_err(|_| show_bad_revision_error(object_ref))?;
-        let storage = ClientStorage::init(path::objects());
+        let storage = ClientStorage::try_init(path::objects())?;
         let object_type = storage
             .get_object_type(&hash)
             .map_err(|error| show_object_load_error(hash, error))?;
@@ -517,7 +517,7 @@ fn show_object_by_hash<'a>(
     color_enabled: bool,
 ) -> std::pin::Pin<Box<dyn std::future::Future<Output = CliResult<String>> + 'a>> {
     Box::pin(async move {
-        let storage = ClientStorage::init(path::objects());
+        let storage = ClientStorage::try_init(path::objects())?;
 
         let obj_type = storage
             .get_object_type(hash)
@@ -538,7 +538,7 @@ fn validate_object_by_hash<'a>(
     args: &'a ShowArgs,
 ) -> std::pin::Pin<Box<dyn std::future::Future<Output = CliResult<()>> + 'a>> {
     Box::pin(async move {
-        let storage = ClientStorage::init(path::objects());
+        let storage = ClientStorage::try_init(path::objects())?;
 
         let obj_type = storage
             .get_object_type(hash)
@@ -726,7 +726,7 @@ async fn raw_diff_lines_for_commit(commit: &Commit, paths: &[PathBuf]) -> CliRes
 fn tree_entry_map(tree_id: &ObjectHash) -> CliResult<BTreeMap<PathBuf, (String, String)>> {
     let tree = load_object::<Tree>(tree_id).map_err(|e| show_object_load_error(tree_id, e))?;
     Ok(tree
-        .get_plain_items_with_mode()
+        .get_plain_items_with_mode()?
         .into_iter()
         .map(|(path, hash, mode)| {
             let mode_str = String::from_utf8_lossy(mode.to_bytes()).into_owned();
@@ -944,7 +944,7 @@ async fn show_commit_file(rev: &str, file_path: &str) -> CliResult<String> {
         .map_err(|e| show_object_load_error(commit.tree_id, e))?;
 
     // Find the target path inside the tree.
-    let items = tree.get_plain_items();
+    let items = tree.get_plain_items()?;
     let target_path = PathBuf::from(file_path);
 
     if let Some((_, blob_hash)) = items.iter().find(|(path, _)| path == &target_path) {
@@ -965,7 +965,7 @@ async fn validate_commit_file(rev: &str, file_path: &str) -> CliResult<()> {
     let tree = load_object::<Tree>(&commit.tree_id)
         .map_err(|e| show_object_load_error(commit.tree_id, e))?;
 
-    let items = tree.get_plain_items();
+    let items = tree.get_plain_items()?;
     let target_path = PathBuf::from(file_path);
 
     if let Some((_, blob_hash)) = items.iter().find(|(path, _)| path == &target_path) {
@@ -1209,7 +1209,7 @@ async fn collect_object_output(
     path_specs: Option<&PathspecSet>,
     args: &ShowArgs,
 ) -> CliResult<ShowOutput> {
-    let storage = ClientStorage::init(path::objects());
+    let storage = ClientStorage::try_init(path::objects())?;
     let obj_type = storage
         .get_object_type(hash)
         .map_err(|e| show_object_load_error(hash, e))?;
@@ -1227,7 +1227,7 @@ fn resolve_existing_object_hash(object_ref: &str) -> CliResult<Option<ObjectHash
     let Some(hash) = crate::internal::object_format::parse_repo_oid(object_ref).ok() else {
         return Ok(None);
     };
-    let storage = ClientStorage::init(path::objects());
+    let storage = ClientStorage::try_init(path::objects())?;
     match storage.exist_checked(&hash) {
         Ok(true) => Ok(Some(hash)),
         Ok(false) => Ok(None),
@@ -1296,7 +1296,7 @@ async fn collect_tag_output(
             // Validate the target object is accessible so that quiet / JSON
             // paths fail consistently with the human path, which dereferences
             // the tagged object via show_object_by_hash().
-            let storage = ClientStorage::init(path::objects());
+            let storage = ClientStorage::try_init(path::objects())?;
             let _ = storage
                 .get_object_type(&tag_obj.object_hash)
                 .map_err(|e| show_object_load_error(tag_obj.object_hash, e))?;
@@ -1357,7 +1357,7 @@ async fn collect_commit_file_output(rev: &str, file_path: &str) -> CliResult<Sho
         load_object::<Commit>(&commit_hash).map_err(|e| show_object_load_error(commit_hash, e))?;
     let tree = load_object::<Tree>(&commit.tree_id)
         .map_err(|e| show_object_load_error(commit.tree_id, e))?;
-    let items = tree.get_plain_items();
+    let items = tree.get_plain_items()?;
     let target_path = PathBuf::from(file_path);
 
     if let Some((_, blob_hash)) = items.iter().find(|(path, _)| path == &target_path) {

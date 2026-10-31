@@ -131,7 +131,7 @@ async fn seed_checkpoint_commit(
     created_at: i64,
 ) -> String {
     let repo_path = repo.join(".libra");
-    let storage = Arc::new(ClientStorage::init(repo_path.join("objects")));
+    let storage = Arc::new(ClientStorage::try_init(repo_path.join("objects")).expect("storage"));
     let history = HistoryManager::new_with_ref(
         storage,
         repo_path.clone(),
@@ -554,7 +554,7 @@ async fn checkpoint_prune_rewinds_conflicted_claim_and_removes_stale_challenger(
 
     let repo_path = repo.path().join(".libra");
     let manager = HistoryManager::new_with_ref(
-        Arc::new(ClientStorage::init(repo_path.join("objects"))),
+        Arc::new(ClientStorage::try_init(repo_path.join("objects")).expect("storage")),
         repo_path,
         Arc::new(conn.clone()),
         TRACES_BRANCH,
@@ -1131,7 +1131,7 @@ async fn checkpoint_prune_preserves_leased_import_identity_before_claim_registra
 
     let repo_path = repo.path().join(".libra");
     let manager = HistoryManager::new_with_ref(
-        Arc::new(ClientStorage::init(repo_path.join("objects"))),
+        Arc::new(ClientStorage::try_init(repo_path.join("objects")).expect("storage")),
         repo_path,
         Arc::new(conn.clone()),
         TRACES_BRANCH,

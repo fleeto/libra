@@ -325,7 +325,7 @@ async fn v2_engine_for_repo(repo_id: &str) -> CliResult<RestoreEngine> {
             "v2 operation state is unavailable in this repository",
         ));
     };
-    let storage = ClientStorage::init_local(scope.storage.join("objects"));
+    let storage = ClientStorage::try_init_local(scope.storage.join("objects"))?;
     let db = get_db_conn_instance().await;
     Ok(RestoreEngine::new(scope, repo_id, db, storage))
 }
@@ -396,7 +396,7 @@ async fn handle_op_reconcile(dry_run: bool, output: &OutputConfig) -> CliResult<
     let scope = RequestScope::try_resolve(util::cur_dir())
         .map_err(|error| CliError::fatal(format!("failed to resolve repository scope: {error}")))?
         .ok_or_else(|| CliError::fatal("v2 operation state is unavailable in this repository"))?;
-    let storage = ClientStorage::init_local(scope.storage.join("objects"));
+    let storage = ClientStorage::try_init_local(scope.storage.join("objects"))?;
     let database = get_db_conn_instance().await;
     let store = OperationStoreV2::new_for_repo(&repo_id, database, storage);
     let engine = ReconcileEngine::new(scope, &repo_id, store);
@@ -818,7 +818,7 @@ async fn print_v2_view_snapshot(repo_id: &str, op_id: &str) -> CliResult<()> {
             "v2 operation state is unavailable in this repository",
         ));
     };
-    let storage = ClientStorage::init_local(scope.storage.join("objects"));
+    let storage = ClientStorage::try_init_local(scope.storage.join("objects"))?;
     let db = get_db_conn_instance().await;
     let store = OperationStoreV2::new_for_repo(repo_id, db, storage);
     let operation = store
@@ -934,7 +934,7 @@ async fn handle_v2_restore(
             "v2 operation state is unavailable in this repository",
         ));
     };
-    let object_storage = ClientStorage::init_local(operation_scope.storage.join("objects"));
+    let object_storage = ClientStorage::try_init_local(operation_scope.storage.join("objects"))?;
     let store = OperationStoreV2::new_for_repo(repo_id, db.clone(), object_storage.clone());
     let operation = store
         .load_operation(op_id)

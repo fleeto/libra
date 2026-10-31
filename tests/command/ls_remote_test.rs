@@ -300,7 +300,7 @@ fn create_nested_annotated_tag(repo: &Path) -> (String, String, String) {
             ),
             "Outer release".to_string(),
         );
-        let storage = ClientStorage::init(storage_path.join("objects"));
+        let storage = ClientStorage::try_init(storage_path.join("objects")).expect("storage");
         save_object_to_storage(&storage, &outer_tag, &outer_tag.id)
             .expect("failed to save outer tag object");
         let outer_tag_hash = outer_tag.id.to_string();

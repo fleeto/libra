@@ -429,6 +429,12 @@ pub enum CommitError {
     DisplayConfig(#[from] config::CommitDisplayConfigError),
 }
 
+impl From<std::io::Error> for CommitError {
+    fn from(error: std::io::Error) -> Self {
+        CommitError::ObjectStorage(error.to_string())
+    }
+}
+
 impl From<CommitError> for CliError {
     fn from(error: CommitError) -> Self {
         match &error {
@@ -1181,7 +1187,7 @@ async fn run_commit_with_index(
         crate::internal::layer::reject_layer_owned_entries(&index, "to commit")
             .await
             .map_err(CommitError::IndexLoad)?;
-        let storage = ClientStorage::init(path::objects());
+        let storage = ClientStorage::try_init(path::objects())?;
         let tracked_entries = index.tracked_entries(0);
 
         // A real commit persists each auto-staged blob and validates the final
@@ -3528,7 +3534,7 @@ fn auto_stage_tracked_changes(
             blob_from_file(&abs, persist_objects, false)?
         };
         if persist_objects {
-            let storage = util::objects_storage();
+            let storage = util::objects_storage()?;
             save_object_to_storage(&storage, &blob, &blob.id).map_err(|error| {
                 CommitError::AutoStageWrite {
                     target: format!("blob object {} for '{}'", blob.id, abs.display()),
@@ -4652,7 +4658,7 @@ mod test {
         // 5. Keep fixture objects outside `.libra` so this tree-only test never
         // enqueues unrelated object-index repair work.
         let temp_objects_dir = temp_path.path().join("tree-fixture-objects");
-        let storage = ClientStorage::init(temp_objects_dir);
+        let storage = ClientStorage::try_init(temp_objects_dir).expect("storage");
 
         // 6. Call create_tree with an empty root (index paths are repo-root-relative)
         let tree = create_tree(&index, &storage, PathBuf::new()).await.unwrap();

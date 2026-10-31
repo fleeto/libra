@@ -2,6 +2,8 @@
 
 **Compatibility:** `intentionally-different` — Libra host-scoped HTTP auth extension, not a Git command.
 
+人读身份行对 `body.host` 走 `redact_url_credentials`。服务端字符串可以带 scheme；含 userinfo 时 userinfo 消失。`--json` 仍输出原始 `body.host`。
+
 ## Summary
 
 `libra whoami` reports the identity for a Libra host-scoped HTTP session

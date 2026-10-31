@@ -160,7 +160,7 @@ async fn assert_published(
     let store = OperationStoreV2::new_for_repo(
         repo_id.as_str(),
         connection,
-        ClientStorage::init_local(scope.storage.join("objects")),
+        ClientStorage::try_init_local(scope.storage.join("objects")).expect("storage"),
     );
     assert_eq!(
         store

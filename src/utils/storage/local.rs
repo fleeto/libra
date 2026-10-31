@@ -930,18 +930,21 @@ impl LocalStorage {
         Ok((results, issue))
     }
 
-    pub fn new(base_path: PathBuf) -> Self {
-        fs::create_dir_all(&base_path).unwrap_or_else(|err| {
-            panic!(
-                "LocalStorage::new({}): create_dir_all failed: {err}",
-                base_path.display()
+    pub fn try_new(base_path: PathBuf) -> io::Result<Self> {
+        fs::create_dir_all(&base_path).map_err(|err| {
+            io::Error::new(
+                err.kind(),
+                format!(
+                    "LocalStorage::try_new({}): create_dir_all failed: {err}",
+                    base_path.display()
+                ),
             )
-        });
-        Self {
+        })?;
+        Ok(Self {
             base_path,
             hash_kind: Some(git_internal::hash::get_hash_kind()),
             alternates: Vec::new(),
-        }
+        })
     }
 
     /// Open an existing object dir WITHOUT creating it (lore.md 2.3): an
@@ -957,14 +960,14 @@ impl LocalStorage {
     }
 
     /// Build a store whose read path also consults the repo's alternate chain
-    /// (`objects/info/alternates`, transitive). Used by `ClientStorage::init`.
-    pub fn new_with_alternates(base_path: PathBuf) -> Self {
-        let mut store = Self::new(base_path.clone());
+    /// (`objects/info/alternates`, transitive). Used by `ClientStorage::try_init`.
+    pub fn try_new_with_alternates(base_path: PathBuf) -> io::Result<Self> {
+        let mut store = Self::try_new(base_path.clone())?;
         store.alternates = crate::internal::alternates::resolve_chain(&base_path)
             .into_iter()
             .map(|dir| std::sync::Arc::new(Self::open_no_create(dir)))
             .collect();
-        store
+        Ok(store)
     }
 
     /// Like [`Self::new_with_alternates`], but never creates directories (WIO-03
@@ -2559,7 +2562,7 @@ mod tests {
     async fn search_dedupes_identical_loose_and_pack_candidates() {
         let _kind = git_internal::hash::set_hash_kind_for_test(HashKind::Sha1);
         let dir = tempfile::tempdir().expect("temporary object store");
-        let storage = LocalStorage::new(dir.path().to_path_buf());
+        let storage = LocalStorage::try_new(dir.path().to_path_buf()).expect("storage");
 
         // One object that exists both as a loose object and in a pack index
         // (the post-`repack` shape that used to be reported as ambiguous).
@@ -2598,7 +2601,7 @@ mod tests {
     async fn type_probe_reads_only_large_loose_blob_and_tree_headers() {
         let _kind = git_internal::hash::set_hash_kind_for_test(HashKind::Sha1);
         let dir = tempfile::tempdir().expect("temporary object store");
-        let storage = LocalStorage::new(dir.path().to_path_buf());
+        let storage = LocalStorage::try_new(dir.path().to_path_buf()).expect("storage");
         for (byte, kind) in [(0x31, ObjectType::Blob), (0x32, ObjectType::Tree)] {
             let hash = ObjectHash::Sha1([byte; 20]);
             let path = storage.get_obj_path(&hash);
@@ -2628,7 +2631,7 @@ mod tests {
     async fn type_probe_reads_only_large_packed_blob_and_tree_headers() {
         let _kind = git_internal::hash::set_hash_kind_for_test(HashKind::Sha1);
         let dir = tempfile::tempdir().expect("temporary pack directory");
-        let storage = LocalStorage::new(dir.path().to_path_buf());
+        let storage = LocalStorage::try_new(dir.path().to_path_buf()).expect("storage");
         for (number, kind) in [(3u8, ObjectType::Blob), (2u8, ObjectType::Tree)] {
             let pack = dir.path().join(format!("header-{number}.pack"));
             let mut bytes = vec![0; 12];
@@ -2697,7 +2700,7 @@ mod tests {
             index.to_str().expect("UTF-8 index path"),
         )
         .expect("index OFS delta fixture");
-        let storage = LocalStorage::new(dir.path().to_path_buf());
+        let storage = LocalStorage::try_new(dir.path().to_path_buf()).expect("storage");
         let ofs_delta = crate::internal::object_format::parse_repo_oid(
             "1b59abc09609574e73330d56815f04ebb4d9bd72",
         )
@@ -2762,7 +2765,7 @@ mod tests {
             &unrelated,
         )
         .expect("copy unindexed unrelated pack");
-        let storage = LocalStorage::new(dir.path().to_path_buf());
+        let storage = LocalStorage::try_new(dir.path().to_path_buf()).expect("storage");
         let base = crate::internal::object_format::parse_repo_oid(
             "b1a36d7748643b07e2bd006211e9e6a492f6bb8b",
         )
@@ -2829,7 +2832,7 @@ mod tests {
             fs::copy(&seed_index, pack.with_extension("idx")).expect("copy another index");
         }
 
-        let storage = LocalStorage::new(dir.path().to_path_buf());
+        let storage = LocalStorage::try_new(dir.path().to_path_buf()).expect("storage");
         let loose = ObjectHash::from_type_and_data(ObjectType::Tree, b"small tree");
         storage
             .put(&loose, b"small tree", ObjectType::Tree)
@@ -2881,7 +2884,7 @@ mod tests {
             pack_dir.join("pack-orphan.pack"),
         )
         .expect("copy orphan pack");
-        let storage = LocalStorage::new(dir.path().to_path_buf());
+        let storage = LocalStorage::try_new(dir.path().to_path_buf()).expect("storage");
         let healthy = crate::internal::object_format::parse_repo_oid(
             "1b59abc09609574e73330d56815f04ebb4d9bd72",
         )
@@ -2949,7 +2952,7 @@ mod tests {
             &second_pack,
         )
         .expect("publish second pack before its index");
-        let storage = LocalStorage::new(dir.path().to_path_buf());
+        let storage = LocalStorage::try_new(dir.path().to_path_buf()).expect("storage");
         let first = crate::internal::object_format::parse_repo_oid(
             "1b59abc09609574e73330d56815f04ebb4d9bd72",
         )
@@ -3020,8 +3023,8 @@ mod tests {
         let dir = tempfile::tempdir().expect("temporary stores");
         let primary_path = dir.path().join("primary");
         let alternate_path = dir.path().join("alternate");
-        let mut primary = LocalStorage::new(primary_path.clone());
-        let alternate = LocalStorage::new(alternate_path);
+        let mut primary = LocalStorage::try_new(primary_path.clone()).expect("storage");
+        let alternate = LocalStorage::try_new(alternate_path).expect("storage");
         let payload = b"alternate-only object";
         let hash = ObjectHash::from_type_and_data(ObjectType::Blob, payload);
         alternate
@@ -3073,7 +3076,7 @@ mod tests {
 
         let _kind = set_hash_kind_for_test(HashKind::Sha1);
         let dir = tempfile::tempdir().unwrap();
-        let storage = LocalStorage::new(dir.path().to_path_buf());
+        let storage = LocalStorage::try_new(dir.path().to_path_buf()).expect("storage");
         let data = b"atomic loose object".to_vec();
         let hash = ObjectHash::from_type_and_data(ObjectType::Blob, &data);
 
@@ -3105,7 +3108,7 @@ mod tests {
 
         let _kind = git_internal::hash::set_hash_kind_for_test(HashKind::Sha1);
         let dir = tempfile::tempdir().expect("create bounded-get fixture");
-        let storage = LocalStorage::new(dir.path().to_path_buf());
+        let storage = LocalStorage::try_new(dir.path().to_path_buf()).expect("storage");
         let hash = crate::internal::object_format::parse_repo_oid(
             "1111111111111111111111111111111111111111",
         )
@@ -3190,7 +3193,7 @@ mod tests {
         let fixture =
             Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/data/packs/ofs-delta-sha1.pack");
         std::fs::copy(&fixture, &pack).expect("copy fixture pack");
-        let storage = LocalStorage::new(dir.path().to_path_buf());
+        let storage = LocalStorage::try_new(dir.path().to_path_buf()).expect("storage");
         let object = crate::internal::object_format::parse_repo_oid(
             "1b59abc09609574e73330d56815f04ebb4d9bd72",
         )
@@ -3238,7 +3241,7 @@ mod tests {
         let unrelated_pack = pack_dir.join("unrelated.pack");
         let unrelated_idx = unrelated_pack.with_extension("idx");
         std::fs::copy(&fixture, &unrelated_pack).expect("copy unrelated pack fixture");
-        let storage = LocalStorage::new(dir.path().to_path_buf());
+        let storage = LocalStorage::try_new(dir.path().to_path_buf()).expect("storage");
         let object = crate::internal::object_format::parse_repo_oid(
             "1b59abc09609574e73330d56815f04ebb4d9bd72",
         )
@@ -3293,7 +3296,7 @@ mod tests {
             cache.remove(&base_key);
         }
 
-        let storage = LocalStorage::new(dir.path().to_path_buf());
+        let storage = LocalStorage::try_new(dir.path().to_path_buf()).expect("storage");
         let (payload, object_type) = storage
             .get_with_limit(&object, crate::utils::preview_object::MAX_OBJECT_BYTES)
             .await
@@ -3321,7 +3324,7 @@ mod tests {
     async fn checked_batch_reports_loose_pack_and_missing_objects() {
         let _kind = git_internal::hash::set_hash_kind_for_test(HashKind::Sha1);
         let dir = tempfile::tempdir().expect("create object directory");
-        let storage = LocalStorage::new(dir.path().to_path_buf());
+        let storage = LocalStorage::try_new(dir.path().to_path_buf()).expect("storage");
         let pack_dir = dir.path().join("pack");
         fs::create_dir(&pack_dir).expect("create pack directory");
         let pack = pack_dir.join("fixture.pack");
@@ -3364,7 +3367,7 @@ mod tests {
     async fn checked_batch_handles_many_packs_and_unresolved_hashes() {
         let _kind = git_internal::hash::set_hash_kind_for_test(HashKind::Sha1);
         let dir = tempfile::tempdir().expect("create object directory");
-        let storage = LocalStorage::new(dir.path().to_path_buf());
+        let storage = LocalStorage::try_new(dir.path().to_path_buf()).expect("storage");
         let pack_dir = dir.path().join("pack");
         fs::create_dir(&pack_dir).expect("create pack directory");
         let seed_pack = pack_dir.join("fixture-00.pack");
@@ -3505,7 +3508,7 @@ mod tests {
     async fn checked_batch_rejects_pack_without_index() {
         let _kind = git_internal::hash::set_hash_kind_for_test(HashKind::Sha1);
         let dir = tempfile::tempdir().expect("create object directory");
-        let storage = LocalStorage::new(dir.path().to_path_buf());
+        let storage = LocalStorage::try_new(dir.path().to_path_buf()).expect("storage");
         let pack_dir = dir.path().join("pack");
         fs::create_dir(&pack_dir).expect("create pack directory");
         let pack = pack_dir.join("unindexed.pack");
@@ -3532,14 +3535,14 @@ mod tests {
         let _kind = git_internal::hash::set_hash_kind_for_test(HashKind::Sha1);
         let primary_dir = tempfile::tempdir().expect("create primary object directory");
         let alternate_dir = tempfile::tempdir().expect("create alternate object directory");
-        let alternate = LocalStorage::new(alternate_dir.path().to_path_buf());
+        let alternate = LocalStorage::try_new(alternate_dir.path().to_path_buf()).expect("storage");
         let payload = b"verified borrowed payload";
         let object = ObjectHash::from_type_and_data(ObjectType::Blob, payload);
         alternate
             .put(&object, payload, ObjectType::Blob)
             .await
             .expect("store alternate object");
-        let mut primary = LocalStorage::new(primary_dir.path().to_path_buf());
+        let mut primary = LocalStorage::try_new(primary_dir.path().to_path_buf()).expect("storage");
         primary.alternates.push(Arc::new(alternate.clone()));
         let result = primary
             .exist_checked_batch(&[object])
@@ -3577,7 +3580,7 @@ mod tests {
         )
         .expect("build v1 index");
 
-        let alternate = LocalStorage::new(alternate_dir.path().to_path_buf());
+        let alternate = LocalStorage::try_new(alternate_dir.path().to_path_buf()).expect("storage");
         let borrowed_payload = b"borrowed from alternate store";
         let borrowed = ObjectHash::from_type_and_data(ObjectType::Blob, borrowed_payload);
         alternate
@@ -3585,7 +3588,7 @@ mod tests {
             .await
             .expect("store alternate blob");
 
-        let mut primary = LocalStorage::new(primary_dir.path().to_path_buf());
+        let mut primary = LocalStorage::try_new(primary_dir.path().to_path_buf()).expect("storage");
         primary.hash_kind = Some(HashKind::Sha1);
         primary.alternates.push(Arc::new(alternate));
 
@@ -3639,6 +3642,50 @@ mod tests {
         assert!(
             over_budget.to_string().contains("exceeds preview limit"),
             "{over_budget}"
+        );
+    }
+
+    #[test]
+    fn try_new_ok() {
+        let dir = tempfile::tempdir().expect("dir");
+        let objects = dir.path().join("objects");
+        let store = LocalStorage::try_new(objects.clone()).expect("try_new");
+        assert!(objects.is_dir(), "try_new creates the objects directory");
+        assert_eq!(store.base_path, objects);
+    }
+
+    #[test]
+    fn try_new_with_alternates_ok() {
+        let dir = tempfile::tempdir().expect("dir");
+        let objects = dir.path().join("objects");
+        let store = LocalStorage::try_new_with_alternates(objects.clone()).expect("alternates");
+        assert!(
+            objects.is_dir(),
+            "try_new_with_alternates creates the objects directory"
+        );
+        assert!(
+            store.alternates.is_empty(),
+            "a fresh directory has no alternate chain"
+        );
+        assert_eq!(store.base_path, objects);
+    }
+
+    #[test]
+    fn try_new_failure_returns_error() {
+        let file = tempfile::NamedTempFile::new().expect("file");
+        let blocked = file.path().join("objects");
+        let error = match LocalStorage::try_new(blocked.clone()) {
+            Ok(_) => panic!("mkdir through a file returned storage"),
+            Err(error) => error,
+        };
+        let rendered = error.to_string();
+        assert!(
+            rendered.contains(&blocked.display().to_string()),
+            "mkdir failure must name the path: {rendered}"
+        );
+        assert!(
+            rendered.contains("create_dir_all failed"),
+            "mkdir failure must name the operation: {rendered}"
         );
     }
 }

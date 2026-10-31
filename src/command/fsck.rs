@@ -851,9 +851,9 @@ async fn run_fsck(args: &FsckArgs) -> CliResult<FsckResult> {
     // (lore.md §0.4 / §2.5). Without `--heal`, keep the existing behavior where a
     // tiered repo's checks may read through to the durable tier.
     let storage = if args.heal {
-        ClientStorage::init_local(path::objects())
+        ClientStorage::try_init_local(path::objects())?
     } else {
-        ClientStorage::init(path::objects())
+        ClientStorage::try_init(path::objects())?
     };
 
     let mut result = if let Some(ref object_id) = args.object {
@@ -972,8 +972,8 @@ async fn run_heal_pass(explicit: Option<ObjectHash>) -> CliResult<HealReport> {
     // Discovery uses a strictly-local storage; the durable tier is touched ONLY
     // through the hook-gated `heal` calls below, so no discovery or verification
     // read can resurrect an obliterated object.
-    let local = ClientStorage::init_local(path::objects());
-    let tiered = ClientStorage::init(path::objects());
+    let local = ClientStorage::try_init_local(path::objects())?;
+    let tiered = ClientStorage::try_init(path::objects())?;
     let mut report = HealReport::default();
     let mut attempted: HashSet<ObjectHash> = HashSet::new();
     // An explicit `fsck --heal <OBJECT>` target is seeded as an extra root, so it
@@ -1960,7 +1960,7 @@ async fn collect_reachability_context(storage: &ClientStorage) -> CliResult<Reac
 ///
 /// Reads exclusively through the passed `storage` (never the global
 /// `load_object`, which resolves through the cached tiered
-/// `util::objects_storage()`). This keeps the walk honest about which backend it
+/// `util::objects_storage()?`). This keeps the walk honest about which backend it
 /// touches: under `libra fsck --heal` the caller passes a strictly-local
 /// storage, so discovery and verification cannot fetch — or, once §2.5 lands,
 /// resurrect an obliterated — object from the durable tier. It also skips

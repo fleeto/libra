@@ -299,12 +299,14 @@ mod tests {
             written: AtomicBool::new(false),
             artifact_writes: AtomicUsize::new(0),
         };
+        let frozen = freeze_agent_capture(&conn, None).await;
         let result = sync_agent_capture_tables_inner(
             &conn,
             &client,
             &remote,
             "rg05-fixture",
             &SilentCloudSyncProgress,
+            &frozen,
         )
         .await;
         if matches!(fault, ArtifactFault::None) {
@@ -704,12 +706,42 @@ fn cloud_error_text(error: CloudError) -> String {
     }
 }
 
-async fn load_claude_legacy_revision_rows(
+/// The legacy Claude reasoning revisions, read whole for
+/// [`validated_claude_legacy_reasoning_mirror_refs`]. Their key is the
+/// revision table's primary key — with `coverage_schema_version` fixed and
+/// `logical_turn_key` following from `checkpoint_id`, the (session,
+/// checkpoint, revision) order. The unary `+` keeps the fixed version from
+/// counting as an index equality, which would make SQLite sort the last key
+/// term instead of walking the index. The freeze reads them through
+/// [`claude_legacy_page_sql`] instead.
+pub(super) const CLAUDE_LEGACY_REVISION_QUERY: CatalogQuery = CatalogQuery {
+    label: "Claude legacy reasoning revision",
+    select: "SELECT r.checkpoint_id, r.session_id, r.coverage_digest, c.tree_oid,
+        CASE WHEN t.agent_kind IS NULL THEN 0 ELSE 1 END AS tombstoned,
+        r.logical_turn_key, r.coverage_schema_version, r.revision
+ FROM agent_coverage_revision r
+ JOIN agent_session s ON s.session_id = r.session_id
+ LEFT JOIN agent_checkpoint c
+   ON c.checkpoint_id = r.checkpoint_id AND c.session_id = r.session_id
+ LEFT JOIN agent_import_tombstone t
+   ON t.agent_kind = s.agent_kind
+  AND t.provider_session_id = s.provider_session_id",
+    filter: "r.logical_turn_key = 'claude-legacy:' || r.checkpoint_id
+   AND +r.coverage_schema_version = 2",
+    key: &[
+        KeyColumn::Text("r.session_id"),
+        KeyColumn::Text("r.logical_turn_key"),
+        KeyColumn::Integer("r.coverage_schema_version"),
+        KeyColumn::Integer("r.revision"),
+    ],
+};
+
+async fn claude_legacy_revisions_present(
     db_conn: &impl sea_orm::ConnectionTrait,
-) -> CloudResult<Vec<ClaudeLegacyRevisionMirrorRow>> {
+) -> CloudResult<bool> {
     use sea_orm::Statement;
 
-    let present = db_conn
+    Ok(db_conn
         .query_one_raw(Statement::from_string(
             db_conn.get_database_backend(),
             "SELECT 1 AS present FROM sqlite_master
@@ -719,31 +751,150 @@ async fn load_claude_legacy_revision_rows(
         .await
         .map_err(|error| {
             local_agent_capture_failure("probe Claude legacy reasoning revision schema", error)
-        })?;
-    if present.is_none() {
+        })?
+        .is_some())
+}
+
+async fn load_claude_legacy_revision_rows(
+    db_conn: &impl sea_orm::ConnectionTrait,
+) -> CloudResult<Vec<ClaudeLegacyRevisionMirrorRow>> {
+    use sea_orm::Statement;
+
+    if !claude_legacy_revisions_present(db_conn).await? {
         return Ok(Vec::new());
     }
     let rows = db_conn
         .query_all_raw(Statement::from_string(
             db_conn.get_database_backend(),
-            "SELECT r.checkpoint_id, r.session_id, r.coverage_digest, c.tree_oid,
-                    CASE WHEN t.agent_kind IS NULL THEN 0 ELSE 1 END AS tombstoned
-             FROM agent_coverage_revision r
-             JOIN agent_session s ON s.session_id = r.session_id
-             LEFT JOIN agent_checkpoint c
-               ON c.checkpoint_id = r.checkpoint_id AND c.session_id = r.session_id
-             LEFT JOIN agent_import_tombstone t
-               ON t.agent_kind = s.agent_kind
-              AND t.provider_session_id = s.provider_session_id
-             WHERE r.logical_turn_key = 'claude-legacy:' || r.checkpoint_id
-               AND r.coverage_schema_version = 2
-             ORDER BY r.session_id, r.checkpoint_id, r.revision"
-                .to_string(),
+            catalog_query_sql(&CLAUDE_LEGACY_REVISION_QUERY, false, false),
         ))
         .await
         .map_err(|error| {
             local_agent_capture_failure("read Claude legacy reasoning revisions", error)
         })?;
+    decode_claude_legacy_revision_rows(rows)
+}
+
+/// One page of the coverage revision table in primary-key order — at most
+/// `LIMIT ?` rows, after a key (`?` per key column) when `after` is set — each
+/// row flagged `legacy` when it is a legacy Claude reasoning revision of an
+/// existing session, with the facts the mirror needs. Rows are filtered after
+/// the page is read, so every statement reads one page of the index however
+/// few legacy rows the table holds.
+pub(super) fn claude_legacy_page_sql(after: bool) -> String {
+    let keyset = if after {
+        " WHERE (session_id, logical_turn_key, coverage_schema_version, revision) > (?, ?, ?, ?)"
+    } else {
+        ""
+    };
+    format!(
+        "SELECT r.session_id, r.logical_turn_key, r.coverage_schema_version, r.revision,
+        r.checkpoint_id, r.coverage_digest, c.tree_oid,
+        CASE WHEN t.agent_kind IS NULL THEN 0 ELSE 1 END AS tombstoned,
+        CASE WHEN s.session_id IS NOT NULL
+              AND r.logical_turn_key = 'claude-legacy:' || r.checkpoint_id
+              AND r.coverage_schema_version = 2
+             THEN 1 ELSE 0 END AS legacy
+ FROM (SELECT session_id, logical_turn_key, coverage_schema_version, revision,
+              checkpoint_id, coverage_digest
+       FROM agent_coverage_revision{keyset}
+       ORDER BY session_id, logical_turn_key, coverage_schema_version, revision
+       LIMIT ?) r
+ LEFT JOIN agent_session s ON s.session_id = r.session_id
+ LEFT JOIN agent_checkpoint c
+   ON c.checkpoint_id = r.checkpoint_id AND c.session_id = r.session_id
+ LEFT JOIN agent_import_tombstone t
+   ON t.agent_kind = s.agent_kind
+  AND t.provider_session_id = s.provider_session_id"
+    )
+}
+
+/// The legacy Claude reasoning revisions, one [`claude_legacy_page_sql`]
+/// page of the revision table per statement (no transaction), in key order,
+/// charging the shared restore row budget and calling `after_page` after each
+/// page.
+async fn load_claude_legacy_revision_pages<C: ConnectionTrait>(
+    conn: &C,
+    remaining_rows: &mut usize,
+    after_page: Option<&CatalogPageHook>,
+) -> CloudResult<Vec<ClaudeLegacyRevisionMirrorRow>> {
+    type RevisionKey = (String, String, i64, i64);
+    let decode_failure =
+        |error| local_agent_capture_failure("decode Claude legacy reasoning revisions", error);
+    let mut rows = Vec::new();
+    let mut after: Option<RevisionKey> = None;
+    loop {
+        let mut values: Vec<sea_orm::Value> = Vec::new();
+        if let Some((session_id, turn_key, version, revision)) = &after {
+            values.extend([
+                session_id.clone().into(),
+                turn_key.clone().into(),
+                (*version).into(),
+                (*revision).into(),
+            ]);
+        }
+        values.push(
+            i64::try_from(AGENT_CAPTURE_LOCAL_PAGE_SIZE)
+                .map_err(|error| {
+                    local_agent_capture_failure("encode local catalog page size", error)
+                })?
+                .into(),
+        );
+        let page = conn
+            .query_all_raw(sea_orm::Statement::from_sql_and_values(
+                conn.get_database_backend(),
+                claude_legacy_page_sql(after.is_some()),
+                values,
+            ))
+            .await
+            .map_err(|error| {
+                local_agent_capture_failure("read Claude legacy reasoning revisions", error)
+            })?;
+        let page_len = page.len();
+        let mut keyed = page
+            .into_iter()
+            .map(|row| {
+                let key: RevisionKey = (
+                    row.try_get_by("session_id")?,
+                    row.try_get_by("logical_turn_key")?,
+                    row.try_get_by("coverage_schema_version")?,
+                    row.try_get_by("revision")?,
+                );
+                Ok((key, row))
+            })
+            .collect::<Result<Vec<_>, sea_orm::DbErr>>()
+            .map_err(decode_failure)?;
+        keyed.sort_by(|left, right| left.0.cmp(&right.0));
+        if let Some((key, _)) = keyed.last() {
+            after = Some(key.clone());
+        }
+        let mut legacy = Vec::new();
+        for (_, row) in keyed {
+            if row.try_get_by::<i64, _>("legacy").map_err(decode_failure)? != 0 {
+                legacy.push(row);
+            }
+        }
+        if legacy.len() > *remaining_rows {
+            return Err(CloudError::PartialTransfer(format!(
+                "local agent-capture catalog exceeds the aggregate {}-row restore safety bound while reading Claude legacy reasoning revision",
+                AGENT_CAPTURE_RESTORE_MAX_ROWS
+            )));
+        }
+        *remaining_rows -= legacy.len();
+        rows.extend(decode_claude_legacy_revision_rows(legacy)?);
+        if let Some(after_page) = after_page {
+            after_page().await;
+        }
+        if page_len < AGENT_CAPTURE_LOCAL_PAGE_SIZE {
+            break;
+        }
+    }
+    Ok(rows)
+}
+
+fn decode_claude_legacy_revision_rows(
+    rows: Vec<sea_orm::QueryResult>,
+) -> CloudResult<Vec<ClaudeLegacyRevisionMirrorRow>> {
     rows.into_iter()
         .map(|row| {
             Ok(ClaudeLegacyRevisionMirrorRow {
@@ -787,7 +938,8 @@ fn validate_claude_legacy_revision_mirror(
     Ok(refs)
 }
 
-struct ClaudeLegacyRevisionMirrorRow {
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub(super) struct ClaudeLegacyRevisionMirrorRow {
     checkpoint_id: String,
     session_id: String,
     content_digest: String,
@@ -955,53 +1107,229 @@ pub(super) fn validate_checkpoint_object_index_roots(
     Ok(())
 }
 
-pub(super) async fn load_local_capture_pages<C: ConnectionTrait>(
+/// Runs after each page of a frozen catalog read (tests drive concurrent
+/// writers through it; PI-26).
+pub(super) type CatalogPageHook =
+    std::sync::Arc<dyn Fn() -> futures::future::BoxFuture<'static, ()> + Send + Sync>;
+
+/// One column of a catalog key: its SQL expression, read back from the
+/// result column of the same name (the part after any table alias).
+#[derive(Debug, Clone, Copy)]
+pub(super) enum KeyColumn {
+    Text(&'static str),
+    Integer(&'static str),
+}
+
+impl KeyColumn {
+    fn expression(self) -> &'static str {
+        match self {
+            KeyColumn::Text(expression) | KeyColumn::Integer(expression) => expression,
+        }
+    }
+
+    fn value_in(self, row: &sea_orm::QueryResult) -> Result<sea_orm::Value, sea_orm::DbErr> {
+        let expression = self.expression();
+        let column = expression.rsplit('.').next().unwrap_or(expression);
+        match self {
+            KeyColumn::Text(_) => row.try_get_by::<String, _>(column).map(Into::into),
+            KeyColumn::Integer(_) => row.try_get_by::<i64, _>(column).map(Into::into),
+        }
+    }
+}
+
+/// A local catalog table read a keyset page at a time (PI-26): its columns,
+/// an optional filter, and a unique key whose order an index provides, so
+/// every page is one short indexed statement wherever it starts.
+#[derive(Debug)]
+pub(super) struct CatalogQuery {
+    pub(super) label: &'static str,
+    pub(super) select: &'static str,
+    pub(super) filter: &'static str,
+    pub(super) key: &'static [KeyColumn],
+}
+
+/// `query` in key order: optionally only the rows after a key (`?` per key
+/// column), optionally one page (`LIMIT ?`).
+pub(super) fn catalog_query_sql(query: &CatalogQuery, after: bool, page: bool) -> String {
+    let columns = query
+        .key
+        .iter()
+        .map(|column| column.expression())
+        .collect::<Vec<_>>()
+        .join(", ");
+    let mut conditions = Vec::new();
+    if !query.filter.is_empty() {
+        conditions.push(query.filter.to_string());
+    }
+    if after {
+        let placeholders = vec!["?"; query.key.len()].join(", ");
+        conditions.push(format!("({columns}) > ({placeholders})"));
+    }
+    let filter = if conditions.is_empty() {
+        String::new()
+    } else {
+        format!(" WHERE {}", conditions.join(" AND "))
+    };
+    let limit = if page { " LIMIT ?" } else { "" };
+    format!("{}{filter} ORDER BY {columns}{limit}", query.select)
+}
+
+pub(super) const AGENT_SESSION_QUERY: CatalogQuery = CatalogQuery {
+    label: "agent session",
+    select: "SELECT session_id, agent_kind, provider_session_id, state, working_dir,
+                worktree_id, parent_commit, parent_session_id, metadata_json,
+                redaction_report, started_at, last_event_at, stopped_at, schema_version,
+                sync_revision
+         FROM agent_session",
+    filter: "",
+    key: &[KeyColumn::Text("session_id")],
+};
+
+/// Read in key order; [`read_agent_capture_catalog`] restores the
+/// (`created_at`, `checkpoint_id`) order no index provides.
+pub(super) const AGENT_CHECKPOINT_QUERY: CatalogQuery = CatalogQuery {
+    label: "agent checkpoint",
+    select: "SELECT checkpoint_id, session_id, parent_checkpoint_id, scope, parent_commit,
+                tree_oid, metadata_blob_oid, traces_commit, tool_use_id,
+                subagent_session_id, description, created_at, sync_revision
+         FROM agent_checkpoint",
+    filter: "",
+    key: &[KeyColumn::Text("checkpoint_id")],
+};
+
+pub(super) const PRUNE_TOMBSTONE_QUERY: CatalogQuery = CatalogQuery {
+    label: "checkpoint prune tombstone",
+    select: "SELECT checkpoint_id, session_id, pruned_at FROM agent_checkpoint_prune_tombstone",
+    filter: "",
+    key: &[KeyColumn::Text("checkpoint_id")],
+};
+
+pub(super) const IMPORT_TOMBSTONE_QUERY: CatalogQuery = CatalogQuery {
+    label: "agent import tombstone",
+    select: "SELECT agent_kind, provider_session_id, erased_session_id, erased_at
+             FROM agent_import_tombstone",
+    filter: "",
+    key: &[
+        KeyColumn::Text("agent_kind"),
+        KeyColumn::Text("provider_session_id"),
+    ],
+};
+
+pub(super) const SUBAGENT_CLAIM_QUERY: CatalogQuery = CatalogQuery {
+    label: "subagent content claim",
+    select: "SELECT parent_session_id, provider_kind, source_key,
+                    content_schema_version, revision_cursor, sync_revision, current_revision,
+                    current_checkpoint_id, current_digest, fence_token, created_at, updated_at
+             FROM agent_subagent_content_claim",
+    filter: "",
+    key: &[
+        KeyColumn::Text("parent_session_id"),
+        KeyColumn::Text("provider_kind"),
+        KeyColumn::Text("source_key"),
+        KeyColumn::Integer("content_schema_version"),
+    ],
+};
+
+pub(super) const SUBAGENT_REVISION_QUERY: CatalogQuery = CatalogQuery {
+    label: "subagent content revision",
+    select: "SELECT parent_session_id, provider_kind, source_key,
+                    content_schema_version, revision, checkpoint_id, content_digest,
+                    source_channel, partial, created_at
+             FROM agent_subagent_content_revision",
+    filter: "",
+    key: &[
+        KeyColumn::Text("parent_session_id"),
+        KeyColumn::Text("provider_kind"),
+        KeyColumn::Text("source_key"),
+        KeyColumn::Integer("content_schema_version"),
+        KeyColumn::Integer("revision"),
+    ],
+};
+
+/// Read in key order; [`read_agent_capture_catalog`] restores the
+/// (`created_at`, `content_checkpoint_id`) order no index provides.
+pub(super) const SUBAGENT_LINK_QUERY: CatalogQuery = CatalogQuery {
+    label: "subagent association link",
+    select: "SELECT content_checkpoint_id, parent_session_id, link_state,
+                    boundary_checkpoint_id, stable_subagent_id, sync_revision,
+                    created_at, updated_at
+             FROM agent_subagent_link",
+    filter: "",
+    key: &[KeyColumn::Text("content_checkpoint_id")],
+};
+
+/// Every catalog query the freeze pages through with
+/// [`load_local_capture_keyset_pages`] (the legacy Claude rows go through
+/// [`claude_legacy_page_sql`]).
+#[cfg(test)]
+pub(super) const CATALOG_QUERIES: [&CatalogQuery; 7] = [
+    &AGENT_SESSION_QUERY,
+    &AGENT_CHECKPOINT_QUERY,
+    &PRUNE_TOMBSTONE_QUERY,
+    &IMPORT_TOMBSTONE_QUERY,
+    &SUBAGENT_CLAIM_QUERY,
+    &SUBAGENT_REVISION_QUERY,
+    &SUBAGENT_LINK_QUERY,
+];
+
+/// The rows of `query` a keyset page at a time, each page its own short
+/// indexed statement (no transaction), charging the shared restore row
+/// budget and calling `after_page` after each page.
+pub(super) async fn load_local_capture_keyset_pages<C: ConnectionTrait>(
     conn: &C,
-    sql: &str,
-    values: Vec<sea_orm::Value>,
-    label: &str,
+    query: &CatalogQuery,
     remaining_rows: &mut usize,
+    after_page: Option<&CatalogPageHook>,
 ) -> CloudResult<Vec<sea_orm::QueryResult>> {
     let mut rows = Vec::new();
-    let mut offset = 0_usize;
+    let mut after: Option<Vec<sea_orm::Value>> = None;
     loop {
         // Read one sentinel row beyond the shared remaining budget so an
         // aggregate overflow fails before the generation can be advertised.
         let page_limit = AGENT_CAPTURE_LOCAL_PAGE_SIZE.min(remaining_rows.saturating_add(1));
-        let mut page_values = values.clone();
-        page_values.extend([
+        let mut values = after.clone().unwrap_or_default();
+        values.push(
             i64::try_from(page_limit)
                 .map_err(|error| {
                     local_agent_capture_failure("encode local catalog page size", error)
                 })?
                 .into(),
-            i64::try_from(offset)
-                .map_err(|error| {
-                    local_agent_capture_failure("encode local catalog page offset", error)
-                })?
-                .into(),
-        ]);
+        );
         let page = conn
             .query_all_raw(sea_orm::Statement::from_sql_and_values(
                 conn.get_database_backend(),
-                format!("{sql} LIMIT ? OFFSET ?"),
-                page_values,
+                catalog_query_sql(query, after.is_some(), true),
+                values,
             ))
             .await
             .map_err(|error| local_agent_capture_failure("read local catalog page", error))?;
         let page_len = page.len();
         if page_len > *remaining_rows {
             return Err(CloudError::PartialTransfer(format!(
-                "local agent-capture catalog exceeds the aggregate {}-row restore safety bound while reading {label}",
-                AGENT_CAPTURE_RESTORE_MAX_ROWS
+                "local agent-capture catalog exceeds the aggregate {}-row restore safety bound while reading {}",
+                AGENT_CAPTURE_RESTORE_MAX_ROWS, query.label
             )));
         }
         *remaining_rows -= page_len;
+        if let Some(last) = page.last() {
+            after = Some(
+                query
+                    .key
+                    .iter()
+                    .map(|column| column.value_in(last))
+                    .collect::<Result<_, _>>()
+                    .map_err(|error| {
+                        local_agent_capture_failure("decode local catalog page key", error)
+                    })?,
+            );
+        }
         rows.extend(page);
+        if let Some(after_page) = after_page {
+            after_page().await;
+        }
         if page_len < page_limit {
             break;
         }
-        offset = offset.saturating_add(page_len);
     }
     Ok(rows)
 }
@@ -1075,47 +1403,103 @@ async fn load_required_local_object_indexes(
     Ok(rows)
 }
 
-async fn load_agent_capture_catalog_snapshot(
-    db_conn: &sea_orm::DatabaseConnection,
-    repo_id: &str,
-    subagent_content_present: bool,
-) -> CloudResult<AgentCaptureSnapshot> {
+/// The agent-capture catalog as frozen with a sync's snapshot (PI-26): the
+/// raw local rows, read with short statements inside the freeze window and
+/// validated, fenced and checked against the current catalog only when
+/// published.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub(super) enum FrozenAgentCapture {
+    /// The repository predates the agent-capture tables.
+    LegacySchema,
+    /// The catalog could not be read; the mirror phase reports why.
+    Unreadable { reason: String },
+    /// The frozen rows.
+    Catalog(Box<FrozenAgentCaptureCatalog>),
+}
+
+/// Raw local agent-capture rows of one consistent view (PI-26).
+#[derive(Debug, Clone, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub(super) struct FrozenAgentCaptureCatalog {
+    pub(super) subagent_content_present: bool,
+    pub(super) sessions: Vec<AgentSessionV2Row>,
+    pub(super) checkpoints: Vec<AgentCheckpointV2Row>,
+    pub(super) prune_tombstones: Vec<AgentCheckpointPruneTombstoneRow>,
+    pub(super) import_tombstones: Vec<AgentImportTombstoneRow>,
+    pub(super) traces_head: Option<String>,
+    pub(super) claims: Vec<AgentSubagentContentClaimRow>,
+    pub(super) revisions: Vec<AgentSubagentContentRevisionRow>,
+    pub(super) links: Vec<AgentSubagentLinkRow>,
+    pub(super) claude_legacy_rows: Vec<ClaudeLegacyRevisionMirrorRow>,
+}
+
+/// Freeze the local agent-capture catalog on `conn` (PI-26): each page is
+/// its own short statement, so no lock is held across the read; the
+/// caller's `data_version` check proves the pages form one view. Read
+/// failures are kept for the mirror phase to report, as before, rather than
+/// failing the whole sync.
+pub(super) async fn freeze_agent_capture<C: ConnectionTrait>(
+    conn: &C,
+    after_page: Option<&CatalogPageHook>,
+) -> FrozenAgentCapture {
+    match probe_agent_capture_schema(conn).await {
+        Ok((false, _)) => FrozenAgentCapture::LegacySchema,
+        Ok((true, subagent)) => {
+            match read_agent_capture_catalog(conn, subagent, after_page).await {
+                Ok(catalog) => FrozenAgentCapture::Catalog(Box::new(catalog)),
+                Err(error) => FrozenAgentCapture::Unreadable {
+                    reason: error.to_string(),
+                },
+            }
+        }
+        Err(error) => FrozenAgentCapture::Unreadable {
+            reason: error.to_string(),
+        },
+    }
+}
+
+/// Whether the agent-session and the subagent-content tables exist.
+async fn probe_agent_capture_schema<C: ConnectionTrait>(conn: &C) -> CloudResult<(bool, bool)> {
     use sea_orm::Statement;
 
-    let txn = db_conn
-        .begin()
-        .await
-        .map_err(|error| local_agent_capture_failure("begin local catalog snapshot", error))?;
-    let backend = txn.get_database_backend();
-    let unsynced = txn
-        .query_one_raw(Statement::from_sql_and_values(
-            backend,
-            "SELECT COUNT(*) AS n FROM object_index
-             WHERE repo_id = ? AND COALESCE(is_synced, 0) = 0",
-            [repo_id.into()],
+    let present = |table: &'static str| {
+        conn.query_one_raw(Statement::from_sql_and_values(
+            conn.get_database_backend(),
+            "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = ? LIMIT 1",
+            [table.into()],
         ))
+    };
+    let session = present("agent_session")
         .await
-        .map_err(|error| local_agent_capture_failure("verify local object generation", error))?
-        .ok_or_else(|| CloudError::Generic("object generation count returned no row".into()))?
-        .try_get_by::<i64, _>("n")
-        .map_err(|error| local_agent_capture_failure("decode unsynced object count", error))?;
-    if unsynced != 0 {
-        return Err(CloudError::PartialTransfer(format!(
-            "agent capture snapshot found {unsynced} object(s) outside the completed object upload generation; retry `libra cloud sync`"
-        )));
-    }
+        .map_err(|error| local_agent_capture_failure("probe local session schema", error))?
+        .is_some();
+    let subagent = present("agent_subagent_content_claim")
+        .await
+        .map_err(|error| local_agent_capture_failure("probe local subagent schema", error))?
+        .is_some();
+    Ok((session, subagent))
+}
+
+/// Read the local agent-capture catalog projection on `conn`: the rows, one
+/// short statement per page (no transaction), with sessions projected for
+/// the cloud so no field the cloud never receives is frozen. Shared by the
+/// freeze and by the publication-time stability check, so both describe the
+/// catalog the same way.
+pub(super) async fn read_agent_capture_catalog<C: ConnectionTrait>(
+    conn: &C,
+    subagent_content_present: bool,
+    after_page: Option<&CatalogPageHook>,
+) -> CloudResult<FrozenAgentCaptureCatalog> {
+    use sea_orm::Statement;
+
+    let txn = conn;
+    let backend = txn.get_database_backend();
     let mut remaining_restore_rows = AGENT_CAPTURE_RESTORE_MAX_ROWS;
 
-    let session_rows = load_local_capture_pages(
-        &txn,
-        "SELECT session_id, agent_kind, provider_session_id, state, working_dir,
-                worktree_id, parent_commit, parent_session_id, metadata_json,
-                redaction_report, started_at, last_event_at, stopped_at, schema_version,
-                sync_revision
-         FROM agent_session ORDER BY session_id",
-        Vec::new(),
-        "agent session",
+    let session_rows = load_local_capture_keyset_pages(
+        txn,
+        &AGENT_SESSION_QUERY,
         &mut remaining_restore_rows,
+        after_page,
     )
     .await?;
     let sessions: Vec<AgentSessionV2Row> = session_rows
@@ -1144,15 +1528,11 @@ async fn load_agent_capture_catalog_snapshot(
             local_agent_capture_failure("decode local agent-session snapshot", error)
         })?;
 
-    let checkpoint_rows = load_local_capture_pages(
-        &txn,
-        "SELECT checkpoint_id, session_id, parent_checkpoint_id, scope, parent_commit,
-                tree_oid, metadata_blob_oid, traces_commit, tool_use_id,
-                subagent_session_id, description, created_at, sync_revision
-         FROM agent_checkpoint ORDER BY created_at, checkpoint_id",
-        Vec::new(),
-        "agent checkpoint",
+    let checkpoint_rows = load_local_capture_keyset_pages(
+        txn,
+        &AGENT_CHECKPOINT_QUERY,
         &mut remaining_restore_rows,
+        after_page,
     )
     .await?;
     let checkpoints: Vec<AgentCheckpointV2Row> = checkpoint_rows
@@ -1176,15 +1556,17 @@ async fn load_agent_capture_catalog_snapshot(
         })
         .collect::<Result<_, sea_orm::DbErr>>()
         .map_err(|error| local_agent_capture_failure("decode local checkpoint snapshot", error))?;
+    let mut checkpoints = checkpoints;
+    checkpoints.sort_by(|left, right| {
+        (left.created_at, &left.checkpoint_id).cmp(&(right.created_at, &right.checkpoint_id))
+    });
 
     let prune_tombstones = if subagent_content_present {
-        let tombstone_rows = load_local_capture_pages(
-            &txn,
-            "SELECT checkpoint_id, session_id, pruned_at
-             FROM agent_checkpoint_prune_tombstone ORDER BY checkpoint_id",
-            Vec::new(),
-            "checkpoint prune tombstone",
+        let tombstone_rows = load_local_capture_keyset_pages(
+            txn,
+            &PRUNE_TOMBSTONE_QUERY,
             &mut remaining_restore_rows,
+            after_page,
         )
         .await?;
         tombstone_rows
@@ -1228,13 +1610,11 @@ async fn load_agent_capture_catalog_snapshot(
         .map_err(|error| local_agent_capture_failure("probe local import-tombstone schema", error))?
         .is_some();
     let import_tombstones = if import_tombstone_present {
-        let tombstone_rows = load_local_capture_pages(
-            &txn,
-            "SELECT agent_kind, provider_session_id, erased_session_id, erased_at
-             FROM agent_import_tombstone ORDER BY agent_kind, provider_session_id",
-            Vec::new(),
-            "agent import tombstone",
+        let tombstone_rows = load_local_capture_keyset_pages(
+            txn,
+            &IMPORT_TOMBSTONE_QUERY,
             &mut remaining_restore_rows,
+            after_page,
         )
         .await?;
         tombstone_rows
@@ -1255,28 +1635,24 @@ async fn load_agent_capture_catalog_snapshot(
     } else {
         Vec::new()
     };
-    let mut snapshot = AgentCaptureSnapshot {
+    let mut catalog = FrozenAgentCaptureCatalog {
+        subagent_content_present,
         sessions,
         checkpoints,
         prune_tombstones,
         import_tombstones,
         traces_head,
-        ..AgentCaptureSnapshot::default()
+        ..FrozenAgentCaptureCatalog::default()
     };
     if subagent_content_present {
-        let claim_rows = load_local_capture_pages(
-            &txn,
-            "SELECT parent_session_id, provider_kind, source_key,
-                    content_schema_version, revision_cursor, sync_revision, current_revision,
-                    current_checkpoint_id, current_digest, fence_token, created_at, updated_at
-             FROM agent_subagent_content_claim
-             ORDER BY parent_session_id, provider_kind, source_key, content_schema_version",
-            Vec::new(),
-            "subagent content claim",
+        let claim_rows = load_local_capture_keyset_pages(
+            txn,
+            &SUBAGENT_CLAIM_QUERY,
             &mut remaining_restore_rows,
+            after_page,
         )
         .await?;
-        snapshot.claims = claim_rows
+        catalog.claims = claim_rows
             .into_iter()
             .map(|row| {
                 Ok(AgentSubagentContentClaimRow {
@@ -1298,20 +1674,14 @@ async fn load_agent_capture_catalog_snapshot(
             .map_err(|error| {
                 local_agent_capture_failure("decode local subagent-claim snapshot", error)
             })?;
-        let revision_rows = load_local_capture_pages(
-            &txn,
-            "SELECT parent_session_id, provider_kind, source_key,
-                    content_schema_version, revision, checkpoint_id, content_digest,
-                    source_channel, partial, created_at
-             FROM agent_subagent_content_revision
-             ORDER BY parent_session_id, provider_kind, source_key,
-                      content_schema_version, revision",
-            Vec::new(),
-            "subagent content revision",
+        let revision_rows = load_local_capture_keyset_pages(
+            txn,
+            &SUBAGENT_REVISION_QUERY,
             &mut remaining_restore_rows,
+            after_page,
         )
         .await?;
-        snapshot.revisions = revision_rows
+        catalog.revisions = revision_rows
             .into_iter()
             .map(|row| {
                 Ok(AgentSubagentContentRevisionRow {
@@ -1331,18 +1701,14 @@ async fn load_agent_capture_catalog_snapshot(
             .map_err(|error| {
                 local_agent_capture_failure("decode local subagent-revision snapshot", error)
             })?;
-        let link_rows = load_local_capture_pages(
-            &txn,
-            "SELECT content_checkpoint_id, parent_session_id, link_state,
-                    boundary_checkpoint_id, stable_subagent_id, sync_revision,
-                    created_at, updated_at
-             FROM agent_subagent_link ORDER BY created_at, content_checkpoint_id",
-            Vec::new(),
-            "subagent association link",
+        let link_rows = load_local_capture_keyset_pages(
+            txn,
+            &SUBAGENT_LINK_QUERY,
             &mut remaining_restore_rows,
+            after_page,
         )
         .await?;
-        snapshot.links = link_rows
+        catalog.links = link_rows
             .into_iter()
             .map(|row| {
                 Ok(AgentSubagentLinkRow {
@@ -1360,11 +1726,39 @@ async fn load_agent_capture_catalog_snapshot(
             .map_err(|error| {
                 local_agent_capture_failure("decode local subagent-link snapshot", error)
             })?;
+        catalog.links.sort_by(|left, right| {
+            (left.created_at, &left.content_checkpoint_id)
+                .cmp(&(right.created_at, &right.content_checkpoint_id))
+        });
     }
 
-    for session in &mut snapshot.sessions {
+    if claude_legacy_revisions_present(txn).await? {
+        catalog.claude_legacy_rows =
+            load_claude_legacy_revision_pages(txn, &mut remaining_restore_rows, after_page).await?;
+    }
+    for session in &mut catalog.sessions {
         *session = project_agent_session_for_cloud(session, "local")?;
     }
+    Ok(catalog)
+}
+
+/// The publishable snapshot of a frozen catalog projection: companions,
+/// session dependencies and the legacy Claude reasoning references
+/// validated.
+pub(super) fn agent_capture_snapshot_from_catalog(
+    catalog: &FrozenAgentCaptureCatalog,
+) -> CloudResult<AgentCaptureSnapshot> {
+    let mut snapshot = AgentCaptureSnapshot {
+        sessions: catalog.sessions.clone(),
+        checkpoints: catalog.checkpoints.clone(),
+        claims: catalog.claims.clone(),
+        revisions: catalog.revisions.clone(),
+        links: catalog.links.clone(),
+        prune_tombstones: catalog.prune_tombstones.clone(),
+        import_tombstones: catalog.import_tombstones.clone(),
+        traces_head: catalog.traces_head.clone(),
+        ..AgentCaptureSnapshot::default()
+    };
     validate_agent_capture_companions(
         &snapshot.checkpoints,
         &snapshot.claims,
@@ -1379,12 +1773,21 @@ async fn load_agent_capture_catalog_snapshot(
         &snapshot.claims,
         "local",
     )?;
-    let legacy_rows = load_claude_legacy_revision_rows(&txn).await?;
-    snapshot.claude_legacy_revisions = validate_claude_legacy_revision_mirror(&legacy_rows)?;
-    txn.commit()
-        .await
-        .map_err(|error| local_agent_capture_failure("commit local catalog snapshot", error))?;
+    snapshot.claude_legacy_revisions =
+        validate_claude_legacy_revision_mirror(&catalog.claude_legacy_rows)?;
     Ok(snapshot)
+}
+
+/// [`read_agent_capture_catalog`] followed by
+/// [`agent_capture_snapshot_from_catalog`] on the live catalog (tests).
+#[cfg(test)]
+async fn load_agent_capture_catalog_snapshot(
+    db_conn: &sea_orm::DatabaseConnection,
+    _repo_id: &str,
+    subagent_content_present: bool,
+) -> CloudResult<AgentCaptureSnapshot> {
+    let catalog = read_agent_capture_catalog(db_conn, subagent_content_present, None).await?;
+    agent_capture_snapshot_from_catalog(&catalog)
 }
 
 pub(super) fn validate_agent_capture_traces_shape(
@@ -1403,16 +1806,61 @@ pub(super) fn validate_agent_capture_traces_shape(
     }
 }
 
+/// Freeze the live catalog and verify it at once, as one sync would (tests).
+#[cfg(test)]
 pub(super) async fn load_agent_capture_snapshot(
     db_conn: &sea_orm::DatabaseConnection,
     repo_id: &str,
     subagent_content_present: bool,
 ) -> CloudResult<AgentCaptureSnapshot> {
-    // Keep the rollback-journal read transaction limited to SQLite paging.
-    // Object decoding can take up to 110 seconds and must not hold a SHARED
-    // lock that makes hook/import commits exhaust their busy timeout.
-    let mut snapshot =
-        load_agent_capture_catalog_snapshot(db_conn, repo_id, subagent_content_present).await?;
+    let catalog = read_agent_capture_catalog(db_conn, subagent_content_present, None).await?;
+    let snapshot = verify_frozen_agent_capture(&catalog, db_conn, repo_id).await?;
+    recheck_frozen_agent_capture(&catalog, db_conn, repo_id, None).await?;
+    Ok(snapshot)
+}
+
+/// The repository-wide object generation gate: no object anywhere in the
+/// repository may still be waiting for upload.
+async fn ensure_no_unsynced_objects(
+    db_conn: &sea_orm::DatabaseConnection,
+    repo_id: &str,
+) -> CloudResult<()> {
+    use sea_orm::Statement;
+
+    let unsynced = db_conn
+        .query_one_raw(Statement::from_sql_and_values(
+            db_conn.get_database_backend(),
+            "SELECT COUNT(*) AS n FROM object_index
+             WHERE repo_id = ? AND COALESCE(is_synced, 0) = 0",
+            [repo_id.into()],
+        ))
+        .await
+        .map_err(|error| local_agent_capture_failure("verify local object generation", error))?
+        .ok_or_else(|| CloudError::Generic("object generation count returned no row".into()))?
+        .try_get_by::<i64, _>("n")
+        .map_err(|error| local_agent_capture_failure("decode unsynced object count", error))?;
+    if unsynced != 0 {
+        return Err(CloudError::PartialTransfer(format!(
+            "agent capture snapshot found {unsynced} object(s) outside the completed object upload generation; retry `libra cloud sync`"
+        )));
+    }
+    Ok(())
+}
+
+/// The local publication checks on a frozen catalog (PI-26), against the
+/// current database after the object upload: the repository-wide object
+/// generation gate, the companion validation, the traces shape, checkpoint
+/// reachability and durability, required objects in the completed upload
+/// generation and the restore row budget. Any failure refuses publication;
+/// [`recheck_frozen_agent_capture`] runs the stability check last, right
+/// before the first remote catalog mutation.
+pub(super) async fn verify_frozen_agent_capture(
+    catalog: &FrozenAgentCaptureCatalog,
+    db_conn: &sea_orm::DatabaseConnection,
+    repo_id: &str,
+) -> CloudResult<AgentCaptureSnapshot> {
+    ensure_no_unsynced_objects(db_conn, repo_id).await?;
+    let mut snapshot = agent_capture_snapshot_from_catalog(catalog)?;
     validate_agent_capture_traces_shape(
         &snapshot.checkpoints,
         snapshot.traces_head.as_deref(),
@@ -1478,16 +1926,47 @@ pub(super) async fn load_agent_capture_snapshot(
     }
     validate_agent_capture_restore_row_budget(&snapshot, required_oids.len())?;
 
-    let rechecked =
-        load_agent_capture_catalog_snapshot(db_conn, repo_id, subagent_content_present).await?;
-    if snapshot != rechecked {
-        return Err(CloudError::PartialTransfer(
-            "local agent-capture catalog changed during durability verification; retry cloud sync"
-                .to_string(),
-        ));
-    }
     snapshot.required_oids = required_oids;
     Ok(snapshot)
+}
+
+/// The stability check on a frozen catalog (PI-26), right before the first
+/// remote catalog mutation: the current catalog projection, re-read in one
+/// unchanged-database window, must still equal the frozen one, and the
+/// repository-wide generation gate must still hold. An erasure, tombstone,
+/// rewrite or unsynced object since the freeze — also one committed during
+/// the upload, the durability verification or the remote object checks — is
+/// therefore never published from the snapshot.
+pub(super) async fn recheck_frozen_agent_capture(
+    catalog: &FrozenAgentCaptureCatalog,
+    db_conn: &sea_orm::DatabaseConnection,
+    repo_id: &str,
+    after_page: Option<&CatalogPageHook>,
+) -> CloudResult<()> {
+    let changed = || {
+        CloudError::PartialTransfer(
+            "local agent-capture catalog changed during durability verification (since this sync's snapshot); retry cloud sync"
+                .to_string(),
+        )
+    };
+    // The schema probe and the re-read share one window; a schema that no
+    // longer matches the frozen one is a change.
+    let current = super::snapshot::read_in_one_window(db_conn, || async move {
+        let (session_present, subagent_present) = probe_agent_capture_schema(db_conn).await?;
+        if !session_present || subagent_present != catalog.subagent_content_present {
+            return Ok(None);
+        }
+        read_agent_capture_catalog(db_conn, subagent_present, after_page)
+            .await
+            .map(Some)
+    })
+    .await?
+    .flatten()
+    .ok_or_else(changed)?;
+    if &current != catalog {
+        return Err(changed());
+    }
+    ensure_no_unsynced_objects(db_conn, repo_id).await
 }
 
 async fn ensure_agent_capture_objects_remote(
@@ -1549,9 +2028,10 @@ async fn ensure_agent_capture_objects_remote(
     // verified; an empty checkpoint projection needs no local storage.
     if !required.is_empty() {
         let local_storage =
-            LocalStorage::new(path::try_objects().map_err(|error| {
+            LocalStorage::try_new(path::try_objects().map_err(|error| {
                 local_agent_capture_failure("resolve local object store", error)
-            })?);
+            })?)
+            .map_err(|error| local_agent_capture_failure("open local object store", error))?;
         let verification_rows = required.iter().zip(&hashes).collect::<Vec<_>>();
         for page in agent_capture_object_verification_batches(&verification_rows) {
             // Full content verification remains mandatory, but a fixed-size page
@@ -2520,11 +3000,8 @@ fn checkpoint_catalog_matches(
         .all(|row| right_map.get(row.checkpoint_id.as_str()).copied() == Some(row))
 }
 
-/// Mirror one coherent local agent-capture/object generation to D1. Remote
-/// state is paged and used as an incremental high-water mark; only missing or
-/// strictly newer rows are sent, in bounded multi-row requests. Immutable
-/// conflicts fail before publication. Dependencies publish first and claims
-/// publish last.
+/// Freeze the live catalog and publish it (tests).
+#[cfg(test)]
 pub(super) async fn sync_agent_capture_tables(
     db_conn: &sea_orm::DatabaseConnection,
     d1_client: &D1Client,
@@ -2532,9 +3009,28 @@ pub(super) async fn sync_agent_capture_tables(
     repo_id: &str,
     progress: &dyn CloudSyncProgress,
 ) -> CloudResult<AgentCaptureSyncOutcome> {
+    let frozen = freeze_agent_capture(db_conn, None).await;
+    sync_frozen_agent_capture_tables(db_conn, d1_client, r2_storage, repo_id, progress, &frozen)
+        .await
+}
+
+/// Mirror one coherent local agent-capture/object generation to D1: the
+/// catalog frozen with this sync's snapshot (PI-26), once every publication
+/// check has passed on the current database. Remote state is paged and used
+/// as an incremental high-water mark; only missing or strictly newer rows
+/// are sent, in bounded multi-row requests. Immutable conflicts fail before
+/// publication. Dependencies publish first and claims publish last.
+pub(super) async fn sync_frozen_agent_capture_tables(
+    db_conn: &sea_orm::DatabaseConnection,
+    d1_client: &D1Client,
+    r2_storage: &RemoteStorage,
+    repo_id: &str,
+    progress: &dyn CloudSyncProgress,
+    frozen: &FrozenAgentCapture,
+) -> CloudResult<AgentCaptureSyncOutcome> {
     tokio::time::timeout(
         AGENT_CAPTURE_CLOUD_DEADLINE,
-        sync_agent_capture_tables_inner(db_conn, d1_client, r2_storage, repo_id, progress),
+        sync_agent_capture_tables_inner(db_conn, d1_client, r2_storage, repo_id, progress, frozen),
     )
     .await
     .map_err(|_| {
@@ -2551,39 +3047,27 @@ async fn sync_agent_capture_tables_inner(
     r2_storage: &dyn Storage,
     repo_id: &str,
     progress: &dyn CloudSyncProgress,
+    frozen: &FrozenAgentCapture,
 ) -> CloudResult<AgentCaptureSyncOutcome> {
-    use sea_orm::Statement;
-
     let lifecycle_deadline = std::time::Instant::now()
         .checked_add(AGENT_CAPTURE_CLOUD_DEADLINE)
         .ok_or_else(artifact_integrity_failure)?;
 
-    let backend = db_conn.get_database_backend();
-    let session_present = db_conn
-        .query_one_raw(Statement::from_sql_and_values(
-            backend,
-            "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'agent_session' LIMIT 1",
-            [],
-        ))
-        .await
-        .map_err(|error| local_agent_capture_failure("probe local session schema", error))?
-        .is_some();
-    if !session_present {
+    if matches!(frozen, FrozenAgentCapture::LegacySchema) {
         return Ok(AgentCaptureSyncOutcome::SkippedLegacySchema);
     }
-    let subagent_content_present = db_conn
-        .query_one_raw(Statement::from_sql_and_values(
-            backend,
-            "SELECT 1 FROM sqlite_master
-             WHERE type = 'table' AND name = 'agent_subagent_content_claim' LIMIT 1",
-            [],
-        ))
-        .await
-        .map_err(|error| local_agent_capture_failure("probe local subagent schema", error))?
-        .is_some();
-
     progress.on_agent_capture_starting();
-    let snapshot = load_agent_capture_snapshot(db_conn, repo_id, subagent_content_present).await?;
+    let catalog = match frozen {
+        FrozenAgentCapture::Catalog(catalog) => catalog,
+        FrozenAgentCapture::Unreadable { reason } => {
+            return Err(CloudError::PartialTransfer(reason.clone()));
+        }
+        FrozenAgentCapture::LegacySchema => {
+            return Ok(AgentCaptureSyncOutcome::SkippedLegacySchema);
+        }
+    };
+    let subagent_content_present = catalog.subagent_content_present;
+    let snapshot = verify_frozen_agent_capture(catalog, db_conn, repo_id).await?;
 
     d1_client
         .ensure_agent_session_table()
@@ -2868,6 +3352,10 @@ async fn sync_agent_capture_tables_inner(
         links: pending_links,
         pre_prune_links,
     } = pending_subagent;
+
+    // The catalog is still the frozen one and nothing unsynced appeared,
+    // checked once more right before the first remote catalog mutation.
+    recheck_frozen_agent_capture(catalog, db_conn, repo_id, None).await?;
 
     // All remote conflict and object-durability checks happen before this
     // transition. A transient preflight failure therefore leaves the last

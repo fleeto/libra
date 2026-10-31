@@ -705,7 +705,8 @@ fn test_fsck_rejects_tag_object_missing_tagger() {
         tag_data.as_bytes(),
     );
     let storage =
-        libra::utils::client_storage::ClientStorage::init(repo.path().join(".libra/objects"));
+        libra::utils::client_storage::ClientStorage::try_init(repo.path().join(".libra/objects"))
+            .expect("storage");
     storage
         .put(
             &tag_hash,
@@ -959,7 +960,7 @@ fn strict_signature(email: &str, tz: &str, ty: SignatureType) -> Signature {
 /// silent and only the caller-chosen signature defect is reported.
 fn store_strict_commit(repo: &std::path::Path, email: &str, tz: &str) -> String {
     let _kind = set_hash_kind_for_test(HashKind::Sha1);
-    let storage = ClientStorage::init(repo.join(".libra/objects"));
+    let storage = ClientStorage::try_init(repo.join(".libra/objects")).expect("storage");
     let blob = Blob::from_content("strict fixture blob");
     storage
         .put(
@@ -1087,7 +1088,7 @@ fn test_strict_tree_unsorted() {
 
     let id = {
         let _kind = set_hash_kind_for_test(HashKind::Sha1);
-        let storage = ClientStorage::init(repo.path().join(".libra/objects"));
+        let storage = ClientStorage::try_init(repo.path().join(".libra/objects")).expect("storage");
         // Deliberately out of order: "b" precedes "a".
         let items = vec![
             TreeItem {
@@ -1139,7 +1140,7 @@ fn store_zero_padded_tree(repo: &std::path::Path) -> String {
     let mut payload = header.into_bytes();
     payload.extend_from_slice(&body);
     let id = digest(HashKind::Sha1, &payload);
-    let storage = ClientStorage::init(repo.join(".libra/objects"));
+    let storage = ClientStorage::try_init(repo.join(".libra/objects")).expect("storage");
     storage
         .put(&id, &body, ObjectType::Tree)
         .expect("store zero-padded tree");
@@ -1509,7 +1510,8 @@ fn test_fsck_reports_broken_links_matrix_missing_tree_or_blob() {
         .to_string();
 
     let _hash_guard = set_hash_kind_for_test(HashKind::Sha1);
-    let storage = ClientStorage::init(repo.path().join(".libra").join("objects"));
+    let storage =
+        ClientStorage::try_init(repo.path().join(".libra").join("objects")).expect("storage");
     let commit_hash = ObjectHash::from_str(&commit_hex).expect("commit hash");
     let data = storage.get(&commit_hash).expect("load commit");
     let commit = Commit::from_bytes(&data, commit_hash).expect("parse commit");
@@ -1538,7 +1540,8 @@ fn test_fsck_reports_broken_links_matrix_missing_tree_or_blob() {
         .trim()
         .to_string();
     let _hash_guard = set_hash_kind_for_test(HashKind::Sha1);
-    let storage = ClientStorage::init(repo.path().join(".libra").join("objects"));
+    let storage =
+        ClientStorage::try_init(repo.path().join(".libra").join("objects")).expect("storage");
     let commit_hash = ObjectHash::from_str(&commit_hex).expect("commit hash");
     let data = storage.get(&commit_hash).expect("load commit");
     let commit = Commit::from_bytes(&data, commit_hash).expect("parse commit");

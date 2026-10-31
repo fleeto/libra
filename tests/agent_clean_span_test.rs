@@ -87,7 +87,7 @@ async fn seed_temporary_checkpoint(
     .await
     .expect("insert agent_session");
 
-    let storage = Arc::new(ClientStorage::init(repo_path.join("objects")));
+    let storage = Arc::new(ClientStorage::try_init(repo_path.join("objects")).expect("storage"));
     let history = HistoryManager::new_with_ref(
         storage,
         repo_path.to_path_buf(),
@@ -176,7 +176,8 @@ fn clean_prune_span_carries_required_fields_without_raw_paths() {
 
     let captured = capture_spans(|| {
         rt.block_on(async {
-            let storage = Arc::new(ClientStorage::init(repo_path.join("objects")));
+            let storage =
+                Arc::new(ClientStorage::try_init(repo_path.join("objects")).expect("storage"));
             let history = HistoryManager::new_with_ref(
                 storage,
                 repo_path.clone(),

@@ -1458,6 +1458,23 @@ impl std::error::Error for StorageConfigFailure {
     }
 }
 
+enum StorageOpenError {
+    Config(StorageConfigFailure),
+    Io(io::Error),
+}
+
+impl From<StorageConfigFailure> for StorageOpenError {
+    fn from(failure: StorageConfigFailure) -> Self {
+        Self::Config(failure)
+    }
+}
+
+impl From<io::Error> for StorageOpenError {
+    fn from(error: io::Error) -> Self {
+        Self::Io(error)
+    }
+}
+
 fn require_storage_setting(name: &'static str) -> Result<Option<String>, StorageConfigFailure> {
     match resolve_env_sync_typed(name) {
         Ok(value) => Ok(value),
@@ -1666,10 +1683,13 @@ impl ClientStorage {
     ///   setting. An unreadable repository database does not construct
     ///   `LocalStorage`. An unreadable global store still uses the historical
     ///   local backend. A failed decryption of a stored type stays fail-closed.
-    pub fn init(base_path: PathBuf) -> ClientStorage {
-        match Self::open_init_storage(base_path.clone()) {
-            Ok(storage) => storage,
-            Err(failure) => Self::rejected(base_path, failure.variable()),
+    pub fn try_init(base_path: PathBuf) -> io::Result<ClientStorage> {
+        match Self::open_init_storage_inner(base_path.clone()) {
+            Ok(storage) => Ok(storage),
+            Err(StorageOpenError::Config(failure)) => {
+                Ok(Self::rejected(base_path, failure.variable()))
+            }
+            Err(StorageOpenError::Io(error)) => Err(error),
         }
     }
 
@@ -1680,9 +1700,9 @@ impl ClientStorage {
     /// repository's `objects` directory): the tiered backend would otherwise
     /// fall back to the configured remote on a miss and could write fetched
     /// objects back into that foreign directory using cloud credentials.
-    pub fn init_local(base_path: PathBuf) -> ClientStorage {
-        let storage = Arc::new(LocalStorage::new(base_path.clone()));
-        Self::ready(storage, base_path)
+    pub fn try_init_local(base_path: PathBuf) -> io::Result<ClientStorage> {
+        let storage = Arc::new(LocalStorage::try_new(base_path.clone())?);
+        Ok(Self::ready(storage, base_path))
     }
 
     /// Construct a local backend without touching the filesystem.
@@ -1725,19 +1745,27 @@ impl ClientStorage {
         base_path: &Path,
         name: &str,
         error: &StorageConfigResolutionError,
-    ) -> Arc<dyn Storage> {
+    ) -> io::Result<Arc<dyn Storage>> {
         if let StorageConfigResolutionError::GlobalSchemaFuture(future) = error {
             emit_global_config_schema_future_warning(
                 future,
                 "ignoring global storage config and falling back to local storage",
             );
-            return Arc::new(LocalStorage::new_with_alternates(base_path.to_path_buf()));
+            return Ok(Arc::new(LocalStorage::try_new_with_alternates(
+                base_path.to_path_buf(),
+            )?));
         }
         emit_storage_degrade_warning(format!(
             "failed to resolve {}: {}. Falling back to local storage.",
             name, error
         ));
-        Arc::new(LocalStorage::new_with_alternates(base_path.to_path_buf()))
+        Ok(Arc::new(LocalStorage::try_new_with_alternates(
+            base_path.to_path_buf(),
+        )?))
+    }
+
+    fn create_storage_backend(base_path: PathBuf) -> io::Result<Arc<dyn Storage>> {
+        Ok(Arc::new(LocalStorage::try_new_with_alternates(base_path)?))
     }
 
     /// Open object storage from the current configuration.
@@ -1750,7 +1778,13 @@ impl ClientStorage {
     pub fn resolve_configured_storage(
         base_path: PathBuf,
     ) -> Result<ClientStorage, StorageConfigFailure> {
-        Self::open_after_type_read(base_path, read_storage_type())
+        match Self::open_after_type_read(base_path, read_storage_type()) {
+            Ok(storage) => Ok(storage),
+            Err(StorageOpenError::Config(failure)) => Err(failure),
+            Err(StorageOpenError::Io(_)) => Err(StorageConfigFailure {
+                variable: "objects",
+            }),
+        }
     }
 
     /// Open storage for `init` and the legacy `Arc<dyn Storage>` callers.
@@ -1759,11 +1793,21 @@ impl ClientStorage {
     /// local backend. An unread type other than a future global schema, and
     /// every other confirmed failure, is [`StorageConfigFailure`].
     pub fn open_init_storage(base_path: PathBuf) -> Result<ClientStorage, StorageConfigFailure> {
+        match Self::open_init_storage_inner(base_path) {
+            Ok(storage) => Ok(storage),
+            Err(StorageOpenError::Config(failure)) => Err(failure),
+            Err(StorageOpenError::Io(_)) => Err(StorageConfigFailure {
+                variable: "objects",
+            }),
+        }
+    }
+
+    fn open_init_storage_inner(base_path: PathBuf) -> Result<ClientStorage, StorageOpenError> {
         let type_read = read_storage_type();
         if let Ok(Some(value)) = &type_read
             && value == "local"
         {
-            return Ok(Self::historical_local_word(base_path));
+            return Self::historical_local_word(base_path).map_err(StorageOpenError::Io);
         }
         Self::open_after_type_read(base_path, type_read)
     }
@@ -1771,10 +1815,12 @@ impl ClientStorage {
     fn open_after_type_read(
         base_path: PathBuf,
         type_read: Result<Option<String>, StorageConfigResolutionError>,
-    ) -> Result<ClientStorage, StorageConfigFailure> {
+    ) -> Result<ClientStorage, StorageOpenError> {
         let storage_type = match type_read {
             Ok(Some(storage_type)) => storage_type,
-            Ok(None) => return Ok(Self::local_configured_client(base_path)),
+            Ok(None) => {
+                return Self::local_configured_client(base_path).map_err(StorageOpenError::Io);
+            }
             Err(error) => {
                 if matches!(
                     error,
@@ -1785,29 +1831,29 @@ impl ClientStorage {
                         &base_path,
                         "LIBRA_STORAGE_TYPE",
                         &error,
-                    );
+                    )?;
                     return Ok(Self::ready(storage, base_path));
                 }
                 // A repository database that cannot be read, or a resolver that
                 // does not return, cannot tell local from remote. Do not build a
                 // writable backend or keep the underlying error text.
-                return Err(StorageConfigFailure {
+                return Err(StorageOpenError::Config(StorageConfigFailure {
                     variable: "LIBRA_STORAGE_TYPE",
-                });
+                }));
             }
         };
         if storage_type != "s3" && storage_type != "r2" {
-            return Err(StorageConfigFailure {
+            return Err(StorageOpenError::Config(StorageConfigFailure {
                 variable: "LIBRA_STORAGE_TYPE",
-            });
+            }));
         }
 
         let bucket = match require_storage_setting("LIBRA_STORAGE_BUCKET")? {
             Some(bucket) if !bucket.is_empty() => bucket,
             Some(_) => {
-                return Err(StorageConfigFailure {
+                return Err(StorageOpenError::Config(StorageConfigFailure {
                     variable: "LIBRA_STORAGE_BUCKET",
-                });
+                }));
             }
             None => "libra".to_string(),
         };
@@ -1815,26 +1861,26 @@ impl ClientStorage {
         if let Some(endpoint) = endpoint.as_deref()
             && url::Url::parse(endpoint).is_err()
         {
-            return Err(StorageConfigFailure {
+            return Err(StorageOpenError::Config(StorageConfigFailure {
                 variable: "LIBRA_STORAGE_ENDPOINT",
-            });
+            }));
         }
         let region = require_storage_setting("LIBRA_STORAGE_REGION")?;
         let key = require_storage_setting("LIBRA_STORAGE_ACCESS_KEY")?;
         if let Some(key) = key.as_deref()
             && key.is_empty()
         {
-            return Err(StorageConfigFailure {
+            return Err(StorageOpenError::Config(StorageConfigFailure {
                 variable: "LIBRA_STORAGE_ACCESS_KEY",
-            });
+            }));
         }
         let secret = require_storage_setting("LIBRA_STORAGE_SECRET_KEY")?;
         if let Some(secret) = secret.as_deref()
             && secret.is_empty()
         {
-            return Err(StorageConfigFailure {
+            return Err(StorageOpenError::Config(StorageConfigFailure {
                 variable: "LIBRA_STORAGE_SECRET_KEY",
-            });
+            }));
         }
         let allow_http = require_storage_setting("LIBRA_STORAGE_ALLOW_HTTP")?;
         let threshold = match require_storage_setting("LIBRA_STORAGE_THRESHOLD")? {
@@ -1874,9 +1920,9 @@ impl ClientStorage {
         let object_store: Arc<dyn object_store::ObjectStore> = match builder.build() {
             Ok(store) => Arc::new(store),
             Err(_) => {
-                return Err(StorageConfigFailure {
+                return Err(StorageOpenError::Config(StorageConfigFailure {
                     variable: "LIBRA_STORAGE_TYPE",
-                });
+                }));
             }
         };
         let prefix = repo_id_prefix_for_configured_remote()?;
@@ -1884,7 +1930,7 @@ impl ClientStorage {
             Some(repo_id) => RemoteStorage::new_with_prefix(object_store, repo_id),
             None => RemoteStorage::new(object_store),
         };
-        let local = LocalStorage::new_with_alternates(base_path.clone());
+        let local = LocalStorage::try_new_with_alternates(base_path.clone())?;
         Ok(Self::ready(
             Arc::new(TieredStorage::new(
                 local,
@@ -1898,7 +1944,7 @@ impl ClientStorage {
 
     /// `LIBRA_STORAGE_TYPE=local` follows the historical bucket check, then
     /// the unsupported-type warning. The word `local` is not a secret.
-    fn historical_local_word(base_path: PathBuf) -> ClientStorage {
+    fn historical_local_word(base_path: PathBuf) -> io::Result<ClientStorage> {
         let bucket = match resolve_env_sync_typed("LIBRA_STORAGE_BUCKET") {
             Ok(Some(bucket)) => bucket,
             Ok(None) => "libra".to_string(),
@@ -1907,8 +1953,8 @@ impl ClientStorage {
                     &base_path,
                     "LIBRA_STORAGE_BUCKET",
                     &error,
-                );
-                return Self::ready(storage, base_path);
+                )?;
+                return Ok(Self::ready(storage, base_path));
             }
         };
         if bucket.is_empty() {
@@ -1923,9 +1969,9 @@ impl ClientStorage {
         Self::local_configured_client(base_path)
     }
 
-    fn local_configured_client(base_path: PathBuf) -> ClientStorage {
-        let storage = Arc::new(LocalStorage::new_with_alternates(base_path.clone()));
-        Self::ready(storage, base_path)
+    fn local_configured_client(base_path: PathBuf) -> io::Result<ClientStorage> {
+        let storage = Self::create_storage_backend(base_path.clone())?;
+        Ok(Self::ready(storage, base_path))
     }
 
     /// Helper to execute async task on dedicated runtime and block waiting for result.
@@ -4657,7 +4703,7 @@ mod tests {
     #[test]
     fn commit_parent_batch_reads_raw_commits_and_reports_missing_oid() {
         let dir = tempdir().expect("temporary object directory");
-        let client = ClientStorage::init_local(dir.path().join("objects"));
+        let client = ClientStorage::try_init_local(dir.path().join("objects")).expect("storage");
         let tree = ObjectHash::new_for_kind(git_internal::hash::get_hash_kind(), &[3; 20]);
         let root = Commit::from_tree_id(tree, vec![], "root");
         let tip = Commit::from_tree_id(tree, vec![root.id], "tip");
@@ -4688,7 +4734,7 @@ mod tests {
     #[test]
     fn commit_parent_batch_rejects_wrong_type_and_oversized_payload() {
         let dir = tempdir().expect("temporary object directory");
-        let client = ClientStorage::init_local(dir.path().join("objects"));
+        let client = ClientStorage::try_init_local(dir.path().join("objects")).expect("storage");
         let tree = ObjectHash::new_for_kind(git_internal::hash::get_hash_kind(), &[5; 20]);
         let wrong_type = Commit::from_tree_id(tree, vec![], "content shaped like a commit");
         let wrong_type_data = wrong_type.to_data().expect("serialize fixture");
@@ -4725,7 +4771,7 @@ mod tests {
     fn commit_parent_batch_rejects_mismatched_local_oid() {
         let _kind = set_hash_kind_for_test(HashKind::Sha1);
         let dir = tempdir().expect("temporary object directory");
-        let client = ClientStorage::init_local(dir.path().join("objects"));
+        let client = ClientStorage::try_init_local(dir.path().join("objects")).expect("storage");
         let tree = ObjectHash::new_for_kind(git_internal::hash::get_hash_kind(), &[5; 20]);
         let actual = Commit::from_tree_id(tree, vec![], "actual contents");
         let requested = Commit::from_tree_id(tree, vec![], "requested contents");
@@ -4748,7 +4794,7 @@ mod tests {
     fn commit_parent_batch_reserves_in_flight_byte_budget() {
         let _kind = set_hash_kind_for_test(HashKind::Sha1);
         let dir = tempdir().expect("temporary object directory");
-        let client = ClientStorage::init_local(dir.path().join("objects"));
+        let client = ClientStorage::try_init_local(dir.path().join("objects")).expect("storage");
         let tree = ObjectHash::new_for_kind(git_internal::hash::get_hash_kind(), &[6; 20]);
         let mut hashes = Vec::new();
         let mut commit_bytes = 0u64;
@@ -4786,7 +4832,7 @@ mod tests {
     #[test]
     fn commit_parent_batch_caps_total_parents() {
         let dir = tempdir().expect("temporary object directory");
-        let client = ClientStorage::init_local(dir.path().join("objects"));
+        let client = ClientStorage::try_init_local(dir.path().join("objects")).expect("storage");
         let tree = ObjectHash::new_for_kind(git_internal::hash::get_hash_kind(), &[6; 20]);
         let parent = ObjectHash::new_for_kind(git_internal::hash::get_hash_kind(), &[7; 20]);
         let mut commits = Vec::new();
@@ -4927,7 +4973,7 @@ mod tests {
     fn typed_bounded_read_preserves_type_and_enforces_limit() {
         let _kind = set_hash_kind_for_test(HashKind::Sha1);
         let dir = tempfile::tempdir().expect("create object directory");
-        let storage = ClientStorage::init_local(dir.path().join("objects"));
+        let storage = ClientStorage::try_init_local(dir.path().join("objects")).expect("storage");
         let blob = Blob::from_content("bounded typed read");
         storage
             .put(&blob.id, &blob.data, ObjectType::Blob)
@@ -5316,7 +5362,7 @@ mod tests {
             .expect("set repo id");
         let objects = storage.path().join("objects");
         fs::create_dir_all(&objects).expect("create object directory");
-        let client = ClientStorage::init_local(objects);
+        let client = ClientStorage::try_init_local(objects).expect("storage");
 
         let before = super::BATCHED_MARKER_PUBLICATIONS.load(super::Ordering::Relaxed);
         client.begin_object_index_batch();
@@ -5401,7 +5447,7 @@ mod tests {
             .expect("set repo id");
         let objects = storage.path().join("objects");
         fs::create_dir_all(&objects).expect("create object directory");
-        let client = ClientStorage::init_local(objects);
+        let client = ClientStorage::try_init_local(objects).expect("storage");
 
         client.begin_object_index_batch();
         for index in 0..300 {
@@ -5531,7 +5577,7 @@ mod tests {
         let pack_bytes = build_pack_bytes(vec![Entry::from(blob.clone())])?;
         let (_tmp, objects_dir, _) = write_pack_to_objects(&pack_bytes, "sha1")?;
 
-        let storage = ClientStorage::init(objects_dir);
+        let storage = ClientStorage::try_init(objects_dir)?;
         let data = storage.get(&blob.id)?;
         assert_eq!(data, blob.data);
         Ok(())
@@ -5546,7 +5592,7 @@ mod tests {
     fn classify_read_failure_pins_storage_messages() -> Result<(), GitError> {
         let _guard = set_hash_kind_for_test(HashKind::Sha1);
         let tmp = tempfile::tempdir().expect("tempdir");
-        let storage = ClientStorage::init_local(tmp.path().join("objects"));
+        let storage = ClientStorage::try_init_local(tmp.path().join("objects"))?;
 
         // Missing: never-written object.
         let ghost = Blob::from_content("classify-missing-object");
@@ -5615,7 +5661,7 @@ mod tests {
         let pack_bytes = build_pack_bytes(vec![Entry::from(blob.clone())])?;
         let (_tmp, objects_dir, _) = write_pack_to_objects(&pack_bytes, "sha256")?;
 
-        let storage = ClientStorage::init(objects_dir);
+        let storage = ClientStorage::try_init(objects_dir)?;
         let data = storage.get(&blob.id)?;
         assert_eq!(data, blob.data);
         Ok(())
@@ -5633,7 +5679,7 @@ mod tests {
         let _tmp = tempdir().unwrap();
         let source = _tmp.path().join("objects");
 
-        let client_storage = ClientStorage::init(source.clone());
+        let client_storage = ClientStorage::try_init(source.clone()).expect("storage");
         assert!(
             client_storage
                 .put(&blob.id, &blob.data, blob.get_type())
@@ -5656,7 +5702,7 @@ mod tests {
         let _tmp = tempdir().unwrap();
         let source = _tmp.path().join("objects");
 
-        let client_storage = ClientStorage::init(source.clone());
+        let client_storage = ClientStorage::try_init(source.clone()).expect("storage");
         assert!(
             client_storage
                 .put(&blob.id, &blob.data, blob.get_type())
@@ -5691,7 +5737,7 @@ mod tests {
         .await
         .unwrap();
 
-        let storage = ClientStorage::init(crate::utils::path::objects());
+        let storage = ClientStorage::try_init(crate::utils::path::objects()).expect("storage");
         let error = storage
             .search_result("main~1")
             .await
@@ -5715,7 +5761,7 @@ mod tests {
         setup_with_new_libra_in(repo.path()).await;
         let _guard = ChangeDirGuard::new(repo.path());
 
-        let storage = ClientStorage::init(crate::utils::path::objects());
+        let storage = ClientStorage::try_init(crate::utils::path::objects()).expect("storage");
         assert!(
             storage
                 .search_result("~1")
@@ -5864,7 +5910,7 @@ mod tests {
         let _guard = ChangeDirGuard::new(workspace.path());
 
         let blob = Blob::from_content("index from explicit storage db");
-        let storage = ClientStorage::init(objects_dir);
+        let storage = ClientStorage::try_init(objects_dir).expect("storage");
         storage.put(&blob.id, &blob.data, blob.get_type()).unwrap();
         ClientStorage::wait_for_background_tasks();
 
@@ -6389,7 +6435,7 @@ mod tests {
             .expect("set repo id");
         let objects = storage.path().join("objects");
         fs::create_dir_all(&objects).expect("create object directory");
-        let client = ClientStorage::init_local(objects);
+        let client = ClientStorage::try_init_local(objects).expect("storage");
         let blob = Blob::from_content("retirement warning");
         let failures_before = ClientStorage::background_index_failure_count();
         {
@@ -6437,7 +6483,7 @@ mod tests {
             .expect("set repo id");
         let objects = storage.path().join("objects");
         fs::create_dir_all(&objects).expect("create object directory");
-        let client = ClientStorage::init_local(objects);
+        let client = ClientStorage::try_init_local(objects).expect("storage");
 
         let _faults = super::install_test_object_index_faults(
             &db_path,
@@ -6491,7 +6537,7 @@ mod tests {
             .expect("set repo id");
         let objects = storage.path().join("objects");
         fs::create_dir_all(&objects).expect("create object directory");
-        let client = ClientStorage::init_local(objects);
+        let client = ClientStorage::try_init_local(objects).expect("storage");
 
         // Model another parallel test publishing a marker for a different
         // temporary repository. That acquisition must not affect this
@@ -6561,7 +6607,7 @@ mod tests {
             .expect("set repo id");
         let objects = storage.path().join("objects");
         fs::create_dir_all(&objects).expect("create object directory");
-        let client = ClientStorage::init_local(objects);
+        let client = ClientStorage::try_init_local(objects).expect("storage");
 
         let _faults = super::install_test_object_index_faults(
             &db_path,
@@ -6620,7 +6666,7 @@ mod tests {
             .expect("set repo id");
         let objects = storage.path().join("objects");
         fs::create_dir_all(&objects).expect("create object directory");
-        let client = ClientStorage::init_local(objects);
+        let client = ClientStorage::try_init_local(objects).expect("storage");
 
         let _faults = super::install_test_object_index_faults(
             &db_path,
@@ -6672,7 +6718,7 @@ mod tests {
             .expect("set repo id");
         let objects = storage.path().join("objects");
         fs::create_dir_all(&objects).expect("create object directory");
-        let client = ClientStorage::init_local(objects);
+        let client = ClientStorage::try_init_local(objects).expect("storage");
 
         let _faults = super::install_test_object_index_faults(
             &db_path,
@@ -6728,7 +6774,7 @@ mod tests {
             .expect("set repo id");
         let objects = storage.path().join("objects");
         fs::create_dir_all(&objects).expect("create object directory");
-        let client = ClientStorage::init_local(objects);
+        let client = ClientStorage::try_init_local(objects).expect("storage");
         let blob = Blob::from_content("delayed writer must not resurrect a pruned row");
 
         let _faults = super::install_test_object_index_faults(
@@ -6927,7 +6973,7 @@ mod tests {
 
         let objects = storage.path().join("objects");
         fs::create_dir_all(&objects).expect("create object directory");
-        let client = ClientStorage::init_local(objects);
+        let client = ClientStorage::try_init_local(objects).expect("storage");
         let blob = Blob::from_content("database path must remain durable");
         let marker_path = super::index_repair_marker_path(&db_path, &blob.id.to_string(), "blob")
             .expect("derive marker path");
@@ -7490,7 +7536,7 @@ mod tests {
         let _cwd = ChangeDirGuard::new(root.path());
         let _type = ScopedEnvVar::set("LIBRA_STORAGE_TYPE", "gcs-canary");
         let _hash = set_hash_kind_for_test(HashKind::Sha1);
-        let cached = crate::utils::util::objects_storage();
+        let cached = crate::utils::util::objects_storage().expect("storage");
         assert_eq!(cached.configuration_variable(), Some("LIBRA_STORAGE_TYPE"));
         let blob = Blob::from_content("cached");
         let put_error = cached
@@ -7595,7 +7641,7 @@ mod tests {
         let _type = ScopedEnvVar::set("LIBRA_STORAGE_TYPE", "gcs-canary");
         let root = tempdir().expect("temp");
         let objects = root.path().join("objects");
-        let storage = ClientStorage::init(objects.clone());
+        let storage = ClientStorage::try_init(objects.clone()).expect("storage");
         assert!(!objects.exists(), "rejected init must not create storage");
         assert_eq!(storage.configuration_variable(), Some("LIBRA_STORAGE_TYPE"));
         (root, storage)
@@ -7921,7 +7967,7 @@ mod tests {
     fn storage_config_hold_probe() {
         if std::env::var("STORAGE_CONFIG_HOLD_PROBE").ok().as_deref() == Some("unresolved_put") {
             let _hash = set_hash_kind_for_test(HashKind::Sha1);
-            let storage = crate::utils::util::objects_storage();
+            let storage = crate::utils::util::objects_storage().expect("storage");
             let blob = Blob::from_content("unresolved");
             let error = storage
                 .put(&blob.id, &blob.data, blob.get_type())
@@ -7934,7 +7980,7 @@ mod tests {
         }
         let _hash = set_hash_kind_for_test(HashKind::Sha1);
         let root = tempdir().expect("temp");
-        let storage = ClientStorage::init(root.path().join("objects"));
+        let storage = ClientStorage::try_init(root.path().join("objects")).expect("storage");
         let hash = Blob::from_content("probe").id;
         match std::env::var("STORAGE_CONFIG_HOLD_PROBE")
             .expect("probe mode")
@@ -8161,13 +8207,13 @@ mod tests {
         setup_with_new_libra_in(repo.path()).await;
         let _cwd = ChangeDirGuard::new(repo.path());
         let _type = ScopedEnvVar::set("LIBRA_STORAGE_TYPE", "gcs-canary");
-        let cached = crate::utils::util::objects_storage();
+        let cached = crate::utils::util::objects_storage().expect("storage");
         assert_eq!(cached.configuration_variable(), Some("LIBRA_STORAGE_TYPE"));
         assert!(!crate::utils::util::objects_storage_cache_contains(
             &crate::utils::path::objects()
         ));
         drop(_type);
-        let restored = crate::utils::util::objects_storage();
+        let restored = crate::utils::util::objects_storage().expect("storage");
         assert!(restored.configuration_variable().is_none());
         let blob = Blob::from_content("recovered");
         restored
@@ -8194,7 +8240,7 @@ mod tests {
             repo.path().join("missing-global.db"),
         );
         super::STORAGE_TYPE_READS.with(|reads| reads.set(0));
-        let first = crate::utils::util::objects_storage();
+        let first = crate::utils::util::objects_storage().expect("storage");
         assert_eq!(super::STORAGE_TYPE_READS.with(|reads| reads.get()), 1);
         assert_eq!(first.configuration_variable(), Some("LIBRA_STORAGE_TYPE"));
         assert!(!crate::utils::util::objects_storage_cache_contains(
@@ -8226,7 +8272,7 @@ mod tests {
 
         fs::remove_dir_all(&database).expect("remove broken database");
         fs::write(&database, saved).expect("restore repository database");
-        let restored = crate::utils::util::objects_storage();
+        let restored = crate::utils::util::objects_storage().expect("storage");
         assert!(restored.configuration_variable().is_none());
         assert!(crate::utils::util::objects_storage_cache_contains(
             &crate::utils::path::objects()
@@ -8248,7 +8294,7 @@ mod tests {
         fs::write(&global, b"not a sqlite database").expect("write broken global");
         let _cwd = ChangeDirGuard::new(repo.path());
         let _global = ScopedEnvVar::set("LIBRA_CONFIG_GLOBAL_DB", &global);
-        let storage = crate::utils::util::objects_storage();
+        let storage = crate::utils::util::objects_storage().expect("storage");
         assert!(storage.configuration_variable().is_none());
         assert!(crate::utils::util::objects_storage_cache_contains(
             &crate::utils::path::objects()
@@ -8396,7 +8442,7 @@ mod tests {
                 );
 
                 let again = Instant::now();
-                let spent = crate::utils::util::objects_storage();
+                let spent = crate::utils::util::objects_storage().expect("storage");
                 let waited = again.elapsed();
                 assert_eq!(spent.configuration_variable(), Some("LIBRA_STORAGE_TYPE"));
                 assert!(!crate::utils::util::objects_storage_cache_contains(
@@ -8414,7 +8460,7 @@ mod tests {
                     assert!(Instant::now() < deadline, "the locker never released");
                     std::thread::sleep(Duration::from_millis(10));
                 }
-                let restored = crate::utils::util::objects_storage();
+                let restored = crate::utils::util::objects_storage().expect("storage");
                 assert!(restored.configuration_variable().is_none());
                 let blob = Blob::from_content("busy-restored");
                 restored
@@ -8589,7 +8635,7 @@ mod tests {
             "LIBRA_CONFIG_GLOBAL_DB",
             repo.path().join("missing-global.db"),
         );
-        let first = crate::utils::util::objects_storage();
+        let first = crate::utils::util::objects_storage().expect("storage");
         assert!(first.configuration_variable().is_none());
         assert!(crate::utils::util::objects_storage_cache_contains(
             &crate::utils::path::objects()
@@ -8599,7 +8645,7 @@ mod tests {
             .put(&blob.id, &blob.data, blob.get_type())
             .expect("a readable unset type stays writable");
         let _type = ScopedEnvVar::set("LIBRA_STORAGE_TYPE", "gcs-canary");
-        let second = crate::utils::util::objects_storage();
+        let second = crate::utils::util::objects_storage().expect("storage");
         assert!(second.configuration_variable().is_none());
         let next = Blob::from_content("unset-still-cached");
         second
@@ -8620,7 +8666,7 @@ mod tests {
             repo.path().join("missing-global.db"),
         );
         let _type = ScopedEnvVar::set("LIBRA_STORAGE_TYPE", "local");
-        let storage = crate::utils::util::objects_storage();
+        let storage = crate::utils::util::objects_storage().expect("storage");
         assert!(storage.configuration_variable().is_none());
         assert!(crate::utils::util::objects_storage_cache_contains(
             &crate::utils::path::objects()
@@ -8642,10 +8688,78 @@ mod tests {
         write_future_global_db(&global).await;
         let _cwd = ChangeDirGuard::new(repo.path());
         let _global = ScopedEnvVar::set("LIBRA_CONFIG_GLOBAL_DB", &global);
-        let storage = crate::utils::util::objects_storage();
+        let storage = crate::utils::util::objects_storage().expect("storage");
         assert!(storage.configuration_variable().is_none());
         assert!(crate::utils::util::objects_storage_cache_contains(
             &crate::utils::path::objects()
         ));
+    }
+
+    #[test]
+    #[serial(cwd, env)]
+    fn try_init_ok() {
+        let repo = tempdir().expect("temp");
+        let _cwd = ChangeDirGuard::new(repo.path());
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("runtime");
+        runtime.block_on(setup_with_new_libra_in(repo.path()));
+        let objects = repo.path().join(".libra/objects");
+        let client = ClientStorage::try_init(objects.clone()).expect("try_init");
+        assert!(
+            client.configuration_variable().is_none(),
+            "a fresh repository uses a ready local backend"
+        );
+        assert_eq!(client.base_path(), &objects);
+        assert!(objects.is_dir());
+    }
+
+    #[test]
+    fn try_init_local_ok() {
+        let dir = tempdir().expect("temp");
+        let objects = dir.path().join("objects");
+        let client = ClientStorage::try_init_local(objects.clone()).expect("try_init_local");
+        assert!(
+            objects.is_dir(),
+            "try_init_local creates the objects directory"
+        );
+        assert_eq!(client.base_path(), &objects);
+        assert!(client.configuration_variable().is_none());
+    }
+
+    #[test]
+    fn create_storage_backend_mkdir_err() {
+        let file = tempfile::NamedTempFile::new().expect("file");
+        let blocked = file.path().join("objects");
+        let error = match ClientStorage::create_storage_backend(blocked.clone()) {
+            Ok(_) => panic!("mkdir through a file returned storage"),
+            Err(error) => error,
+        };
+        let rendered = error.to_string();
+        assert!(
+            rendered.contains(&blocked.display().to_string()),
+            "mkdir failure must name the path: {rendered}"
+        );
+    }
+
+    #[test]
+    fn fallback_mkdir_err() {
+        let file = tempfile::NamedTempFile::new().expect("file");
+        let blocked = file.path().join("objects");
+        let reason = super::StorageConfigResolutionError::Other("test mkdir failure".to_string());
+        let error = match ClientStorage::storage_config_resolution_fallback(
+            &blocked,
+            "LIBRA_STORAGE_TYPE",
+            &reason,
+        ) {
+            Ok(_) => panic!("mkdir through a file returned storage"),
+            Err(error) => error,
+        };
+        let rendered = error.to_string();
+        assert!(
+            rendered.contains(&blocked.display().to_string()),
+            "mkdir failure must name the path: {rendered}"
+        );
     }
 }

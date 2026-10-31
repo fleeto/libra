@@ -95,6 +95,12 @@ pub enum NotesError {
     MergeRaced { object: String },
 }
 
+impl From<std::io::Error> for NotesError {
+    fn from(error: std::io::Error) -> Self {
+        NotesError::StoreBlobFailed(error)
+    }
+}
+
 /// Conflict-resolution strategy for `notes merge`. `Manual` (Git's default)
 /// aborts on a conflicting note since Libra has no NOTES_MERGE worktree; the
 /// others resolve automatically per object.
@@ -192,7 +198,8 @@ pub async fn add(
 
     // Create and store the blob
     let blob = git_internal::internal::object::blob::Blob::from_content(message);
-    let storage = crate::utils::client_storage::ClientStorage::init(crate::utils::path::objects());
+    let storage =
+        crate::utils::client_storage::ClientStorage::try_init(crate::utils::path::objects())?;
     storage
         .put(&blob.id, &blob.data, blob.get_type())
         .map_err(NotesError::StoreBlobFailed)?;
@@ -312,7 +319,8 @@ pub async fn show(
     // Load the blob to get the text
     let blob_hash_parsed = crate::internal::object_format::parse_repo_oid(&blob_hash)
         .map_err(|e| NotesError::InvalidObject(blob_hash.clone(), e.to_string()))?;
-    let storage = crate::utils::client_storage::ClientStorage::init(crate::utils::path::objects());
+    let storage =
+        crate::utils::client_storage::ClientStorage::try_init(crate::utils::path::objects())?;
     let data = storage.get(&blob_hash_parsed).map_err(|e| {
         NotesError::InvalidObject(blob_hash.clone(), format!("failed to read blob: {e}"))
     })?;
@@ -396,7 +404,7 @@ pub async fn remove(
 pub async fn prune(notes_ref: &str, dry_run: bool) -> Result<Vec<String>, NotesError> {
     validate_notes_ref(notes_ref)?;
 
-    let storage = util::objects_storage();
+    let storage = util::objects_storage()?;
     // Each stale row carries its blob hash so the delete can compare-and-swap on
     // it (like `remove`): if the note was rewritten between classification and
     // deletion — e.g. its object was restored and re-annotated — the blob no
@@ -609,7 +617,8 @@ pub async fn merge(
 fn load_blob_text(blob_hash: &str) -> Result<String, NotesError> {
     let parsed = crate::internal::object_format::parse_repo_oid(blob_hash)
         .map_err(|e| NotesError::InvalidObject(blob_hash.to_string(), e.to_string()))?;
-    let storage = crate::utils::client_storage::ClientStorage::init(crate::utils::path::objects());
+    let storage =
+        crate::utils::client_storage::ClientStorage::try_init(crate::utils::path::objects())?;
     let data = storage.get(&parsed).map_err(|e| {
         NotesError::InvalidObject(blob_hash.to_string(), format!("failed to read blob: {e}"))
     })?;
@@ -620,7 +629,8 @@ fn load_blob_text(blob_hash: &str) -> Result<String, NotesError> {
 /// new merged note).
 fn store_blob_text(text: &str) -> Result<String, NotesError> {
     let blob = git_internal::internal::object::blob::Blob::from_content(text);
-    let storage = crate::utils::client_storage::ClientStorage::init(crate::utils::path::objects());
+    let storage =
+        crate::utils::client_storage::ClientStorage::try_init(crate::utils::path::objects())?;
     storage
         .put(&blob.id, &blob.data, blob.get_type())
         .map_err(NotesError::StoreBlobFailed)?;

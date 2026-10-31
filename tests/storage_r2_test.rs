@@ -56,7 +56,7 @@ async fn test_mock_tiered_storage_logic() {
     let remote = RemoteStorage::new_with_prefix(memory_store, "repo-tiered".to_string());
 
     let dir = tempdir().unwrap();
-    let local = LocalStorage::new(dir.path().to_path_buf());
+    let local = LocalStorage::try_new(dir.path().to_path_buf()).expect("storage");
 
     // Threshold = 10 bytes.
     let threshold = 10;

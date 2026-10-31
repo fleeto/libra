@@ -229,6 +229,27 @@ fn map_store(error: anyhow::Error) -> CliError {
         .with_stable_code(StableErrorCode::IoWriteFailed)
 }
 
+/// Human `auth status` username. URL userinfo is stripped first. A value
+/// whose longest credential prefix is `github_pat_`, `ghp_`, or `sk-` is
+/// replaced entirely, because `auth login` accepts a bare token as the
+/// username and the URL helper leaves that shape unchanged.
+fn display_auth_username(raw: &str) -> String {
+    let via = crate::utils::redact::redact_url_credentials(raw);
+    let via = if via
+        .strip_suffix('/')
+        .is_some_and(|stripped| stripped == raw)
+    {
+        raw.to_string()
+    } else {
+        via
+    };
+    const PREFIXES: &[&str] = &["github_pat_", "ghp_", "sk-"];
+    if PREFIXES.iter().any(|prefix| via.starts_with(prefix)) {
+        return "[REDACTED]".to_string();
+    }
+    via
+}
+
 pub async fn execute(args: AuthArgs) {
     if let Err(err) = execute_safe(args, &OutputConfig::default()).await {
         err.print_stderr();
@@ -290,7 +311,12 @@ pub async fn execute_safe(args: AuthArgs, output: &OutputConfig) -> CliResult<()
                 } else if !output.quiet {
                     match hit {
                         Some(row) => {
-                            println!("{}: {} ({})", row.host_display(), row.state, row.username)
+                            println!(
+                                "{}: {} ({})",
+                                crate::command::account::display_host(&row.host_display()),
+                                row.state,
+                                display_auth_username(&row.username)
+                            )
                         }
                         None => println!("no token stored for {}", scope.display()),
                     }
@@ -323,9 +349,9 @@ pub async fn execute_safe(args: AuthArgs, output: &OutputConfig) -> CliResult<()
                     };
                     println!(
                         "{}: {} ({}){expiry}",
-                        row.host_display(),
+                        crate::command::account::display_host(&row.host_display()),
                         row.state,
-                        row.username
+                        display_auth_username(&row.username)
                     );
                 }
             }

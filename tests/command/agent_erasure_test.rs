@@ -90,7 +90,7 @@ async fn erase_legacy_generation_zero_session_advances_to_fresh_incarnation() {
 
     let libra_dir = repo.path().join(".libra");
     let history = HistoryManager::new_with_ref(
-        Arc::new(ClientStorage::init(libra_dir.join("objects"))),
+        Arc::new(ClientStorage::try_init(libra_dir.join("objects")).expect("storage")),
         libra_dir,
         Arc::new(conn.clone()),
         TRACES_BRANCH,
@@ -149,7 +149,7 @@ async fn erase_session_local_removes_rows_and_preserves_audit_log() {
     }
 
     let repo_path = repo.path().join(".libra");
-    let storage = Arc::new(ClientStorage::init(repo_path.join("objects")));
+    let storage = Arc::new(ClientStorage::try_init(repo_path.join("objects")).expect("storage"));
     let history =
         HistoryManager::new_with_ref(storage, repo_path, Arc::new(conn.clone()), TRACES_BRANCH);
 
@@ -271,7 +271,7 @@ async fn agent_erasure_local_tombstone() {
     .expect("seed audit");
 
     let repo_path = repo.path().join(".libra");
-    let storage = Arc::new(ClientStorage::init(repo_path.join("objects")));
+    let storage = Arc::new(ClientStorage::try_init(repo_path.join("objects")).expect("storage"));
     let history =
         HistoryManager::new_with_ref(storage, repo_path, Arc::new(conn.clone()), TRACES_BRANCH);
 

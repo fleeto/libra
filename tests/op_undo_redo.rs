@@ -98,7 +98,7 @@ async fn revert_parent_lineage_is_persisted_with_the_operation() {
     let database = db::create_database(directory.path().join("repo.db").to_str().unwrap())
         .await
         .expect("database");
-    let storage = ClientStorage::init_local(directory.path().join("objects"));
+    let storage = ClientStorage::try_init_local(directory.path().join("objects")).expect("storage");
     let refs = oid(b"refs");
     storage
         .put(&refs, b"refs", ObjectType::Blob)
@@ -157,7 +157,7 @@ async fn undo_refuses_a_non_current_head_without_touching_state() {
     let database = db::create_database(directory.path().join("repo.db").to_str().unwrap())
         .await
         .expect("database");
-    let storage = ClientStorage::init_local(directory.path().join("objects"));
+    let storage = ClientStorage::try_init_local(directory.path().join("objects")).expect("storage");
     let refs = oid(b"refs");
     storage.put(&refs, b"refs", ObjectType::Blob).expect("refs");
     let store = OperationStoreV2::new_for_repo("repo", database.clone(), storage.clone());
@@ -215,7 +215,7 @@ async fn doctor_reports_missing_object_and_unfinished_journal_read_only() {
     let database = db::create_database(directory.path().join("repo.db").to_str().unwrap())
         .await
         .expect("database");
-    let storage = ClientStorage::init_local(directory.path().join("objects"));
+    let storage = ClientStorage::try_init_local(directory.path().join("objects")).expect("storage");
     let store = OperationStoreV2::new_for_repo("repo", database, storage);
     let view_oid = oid(b"missing-view");
     // The operation points at a missing view object, exercising doctor’s
@@ -297,7 +297,7 @@ async fn doctor_recovers_a_running_publish_journal_once() {
         .expect("repo id")
         .expect("repo id entry")
         .value;
-    let storage = ClientStorage::init_local(pinned.storage.join("objects"));
+    let storage = ClientStorage::try_init_local(pinned.storage.join("objects")).expect("storage");
     let store = OperationStoreV2::new_for_repo(&repo_id, database, storage);
     let scope_key = pinned.scope.storage_key();
     let baseline_heads = store
@@ -563,7 +563,7 @@ async fn doctor_recovery_linked_cwd_child() {
         .expect("repo id query")
         .expect("repo id")
         .value;
-    let storage = ClientStorage::init_local(pinned.storage.join("objects"));
+    let storage = ClientStorage::try_init_local(pinned.storage.join("objects")).expect("storage");
     let store = OperationStoreV2::new_for_repo(&repo_id, database, storage);
     let scope_key = pinned.scope.storage_key();
     let baseline_heads = store
@@ -737,7 +737,7 @@ async fn real_cli_operation_can_undo_and_redo_without_rewriting_the_target() {
         .expect("repo id")
         .expect("repo id entry")
         .value;
-    let storage = ClientStorage::init_local(pinned.storage.join("objects"));
+    let storage = ClientStorage::try_init_local(pinned.storage.join("objects")).expect("storage");
     let store = OperationStoreV2::new_for_repo(&repo_id, database.clone(), storage.clone());
     let operations = store.list_operations().await.expect("operations");
     let target = operations
@@ -850,7 +850,7 @@ async fn undo_crash_matrix_recovers_each_journal_phase() {
         .expect("repo id")
         .expect("repo id entry")
         .value;
-    let storage = ClientStorage::init_local(pinned.storage.join("objects"));
+    let storage = ClientStorage::try_init_local(pinned.storage.join("objects")).expect("storage");
     let store = OperationStoreV2::new_for_repo(&repo_id, database.clone(), storage.clone());
     let expected_heads = store
         .read_heads(&repo_id, pinned.scope.storage_key())
@@ -972,7 +972,7 @@ async fn doctor_dry_run_does_not_repair_and_fix_rebuilds_a_missing_pointer() {
         .expect("repo id")
         .expect("repo id entry")
         .value;
-    let storage = ClientStorage::init_local(pinned.storage.join("objects"));
+    let storage = ClientStorage::try_init_local(pinned.storage.join("objects")).expect("storage");
     let store = OperationStoreV2::new_for_repo(&repo_id, database, storage);
     let baseline_id = store
         .read_heads(&repo_id, pinned.scope.storage_key())
@@ -1085,7 +1085,7 @@ async fn doctor_recovers_crash_between_head_cas_and_pointer_save() {
         .expect("repo id")
         .expect("repo id entry")
         .value;
-    let storage = ClientStorage::init_local(pinned.storage.join("objects"));
+    let storage = ClientStorage::try_init_local(pinned.storage.join("objects")).expect("storage");
     let store = OperationStoreV2::new_for_repo(&repo_id, database.clone(), storage.clone());
     let baseline_id = store
         .read_heads(&repo_id, pinned.scope.storage_key())
@@ -1237,7 +1237,7 @@ async fn doctor_fails_orphaned_running_command_but_not_foreign_scope_head() {
         .expect("repo id")
         .expect("repo id entry")
         .value;
-    let storage = ClientStorage::init_local(pinned.storage.join("objects"));
+    let storage = ClientStorage::try_init_local(pinned.storage.join("objects")).expect("storage");
     let store = OperationStoreV2::new_for_repo(&repo_id, database.clone(), storage.clone());
     let baseline_id = store
         .read_heads(&repo_id, pinned.scope.storage_key())
@@ -1380,7 +1380,7 @@ async fn undo_restores_symbolic_head_branch_tip_to_exact_commit() {
         .expect("repo id")
         .expect("repo id entry")
         .value;
-    let storage = ClientStorage::init_local(pinned.storage.join("objects"));
+    let storage = ClientStorage::try_init_local(pinned.storage.join("objects")).expect("storage");
     let store = OperationStoreV2::new_for_repo(&repo_id, database.clone(), storage.clone());
 
     let operations = store.list_operations().await.expect("operations");

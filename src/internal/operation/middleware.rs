@@ -201,6 +201,12 @@ pub enum OperationError {
     Cli(#[from] CliError),
 }
 
+impl From<std::io::Error> for OperationError {
+    fn from(error: std::io::Error) -> Self {
+        OperationError::Storage(error.to_string())
+    }
+}
+
 /// Mutable context passed to the business closure.  It carries the stable
 /// operation id and provides the explicit proof bit used by external shell
 /// and Git calls.  Internal workers never receive a recording context.
@@ -408,7 +414,7 @@ where
     } else {
         Some(ScopeLease::acquire_with_permissions(scope, &repo_id, lease_permissions).await?)
     };
-    let storage = ClientStorage::init_local(scope.storage.join("objects"));
+    let storage = ClientStorage::try_init_local(scope.storage.join("objects"))?;
     let store = OperationStoreV2::new_for_repo(&repo_id, db.clone(), storage.clone());
     let scope_key = scope.scope.storage_key().to_string();
     let mut heads = store

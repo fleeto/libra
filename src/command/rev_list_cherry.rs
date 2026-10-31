@@ -124,7 +124,7 @@ fn commit_patch_signature(commit: &Commit) -> CliResult<String> {
 fn commit_tree_blobs(commit: &Commit) -> CliResult<Vec<(PathBuf, ObjectHash)>> {
     let tree = load_object::<Tree>(&commit.tree_id)
         .map_err(|error| rev_list_corrupt_error(format!("failed to load tree object: {error}")))?;
-    Ok(tree.get_plain_items())
+    Ok(tree.get_plain_items()?)
 }
 
 fn build_diff_items(

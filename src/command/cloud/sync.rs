@@ -381,8 +381,15 @@ async fn sync_from_spool(
         // CEX-EntireIO §10.2: even when there are no new git objects to
         // ship, the agent_session/agent_checkpoint catalog may have new
         // rows from local hook ingestion. Mirror them on every sync.
-        let agent_capture =
-            mirror_agent_capture(db_conn, &d1_client, &r2_storage, &repo_id, progress).await;
+        let agent_capture = mirror_frozen_agent_capture(
+            db_conn,
+            &d1_client,
+            &r2_storage,
+            &repo_id,
+            progress,
+            &frozen_agent_capture(spool),
+        )
+        .await;
         return Ok(CloudSyncReport {
             repo_id,
             project_name,
@@ -399,7 +406,7 @@ async fn sync_from_spool(
 
     // Initialize local storage for reading objects.
     let objects_path = path::objects();
-    let local_storage = LocalStorage::new(objects_path);
+    let local_storage = LocalStorage::try_new(objects_path)?;
 
     let mut synced_count = 0usize;
     let mut failed_count = 0usize;
@@ -490,8 +497,15 @@ async fn sync_from_spool(
     // tail of the sync flow per the plan. The report retains the detailed
     // phase outcome; `execute_sync` turns a failed mirror into a non-zero,
     // actionable partial-transfer result after rendering progress.
-    let agent_capture =
-        mirror_agent_capture(db_conn, &d1_client, &r2_storage, &repo_id, progress).await;
+    let agent_capture = mirror_frozen_agent_capture(
+        db_conn,
+        &d1_client,
+        &r2_storage,
+        &repo_id,
+        progress,
+        &frozen_agent_capture(spool),
+    )
+    .await;
 
     Ok(CloudSyncReport {
         repo_id,
@@ -505,9 +519,24 @@ async fn sync_from_spool(
     })
 }
 
-/// Run the agent-capture mirror phase. This is the single place a phase
-/// failure is reported: exactly one fixed `agent_capture` warning carrying the
-/// content-free reason that the report (and the final error) also carries.
+/// The agent-capture catalog frozen in `spool` (PI-26); a spool that cannot
+/// be read back fails the mirror phase like an unreadable catalog, with a
+/// fixed reason (the detail, which names the run directory, is logged).
+fn frozen_agent_capture(spool: &SnapshotSpool) -> super::agent_capture::FrozenAgentCapture {
+    spool.agent_capture().unwrap_or_else(|error| {
+        tracing::warn!(error = %error, "could not read the frozen agent-capture catalog");
+        super::agent_capture::FrozenAgentCapture::Unreadable {
+            reason: FROZEN_CATALOG_UNREADABLE.to_string(),
+        }
+    })
+}
+
+/// Reason reported when the frozen agent-capture catalog cannot be read
+/// back from this sync's spool.
+pub(super) const FROZEN_CATALOG_UNREADABLE: &str = "the agent-capture catalog frozen in this sync's snapshot spool could not be read back; retry `libra cloud sync`";
+
+/// Freeze the live catalog and run the mirror phase on it (tests).
+#[cfg(test)]
 pub(super) async fn mirror_agent_capture(
     db_conn: &sea_orm::DatabaseConnection,
     d1_client: &D1Client,
@@ -515,7 +544,26 @@ pub(super) async fn mirror_agent_capture(
     repo_id: &str,
     progress: &dyn CloudSyncProgress,
 ) -> AgentCaptureSyncOutcome {
-    match sync_agent_capture_tables(db_conn, d1_client, r2_storage, repo_id, progress).await {
+    let frozen = super::agent_capture::freeze_agent_capture(db_conn, None).await;
+    mirror_frozen_agent_capture(db_conn, d1_client, r2_storage, repo_id, progress, &frozen).await
+}
+
+/// Run the agent-capture mirror phase. This is the single place a phase
+/// failure is reported: exactly one fixed `agent_capture` warning carrying the
+/// content-free reason that the report (and the final error) also carries.
+pub(super) async fn mirror_frozen_agent_capture(
+    db_conn: &sea_orm::DatabaseConnection,
+    d1_client: &D1Client,
+    r2_storage: &RemoteStorage,
+    repo_id: &str,
+    progress: &dyn CloudSyncProgress,
+    frozen: &super::agent_capture::FrozenAgentCapture,
+) -> AgentCaptureSyncOutcome {
+    match super::agent_capture::sync_frozen_agent_capture_tables(
+        db_conn, d1_client, r2_storage, repo_id, progress, frozen,
+    )
+    .await
+    {
         Ok(outcome) => outcome,
         Err(error) => {
             let reason = agent_capture_sync_failure_reason(&error);

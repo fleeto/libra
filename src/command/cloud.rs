@@ -14,9 +14,11 @@ use std::{
 
 use clap::{Parser, Subcommand};
 use git_internal::hash::ObjectHash;
+#[cfg(test)]
+use sea_orm::TransactionTrait;
 use sea_orm::{
     ActiveModelTrait, ColumnTrait, ConnectionTrait, EntityTrait, QueryFilter, Schema, Set,
-    TransactionTrait, sea_query::Expr,
+    sea_query::Expr,
 };
 use serde::Serialize;
 use sha2::{Digest, Sha256};
@@ -801,6 +803,12 @@ pub(crate) enum CloudError {
     LocalCaptureKindRefused(String),
     /// Anything else — kept as the original detail string.
     Generic(String),
+}
+
+impl From<std::io::Error> for CloudError {
+    fn from(error: std::io::Error) -> Self {
+        CloudError::Generic(error.to_string())
+    }
 }
 
 /// Recovery for [`CloudError::RemoteCaptureKindRefused`]. Default sync only
@@ -1660,7 +1668,7 @@ async fn ensure_repo_id() -> String {
 /// CEX-EntireIO §10.2 / §14.3: restore the local agent-session/checkpoint
 /// catalog and applicable M5 subagent companion relations from D1.
 ///
-/// Mirrors [`sync_agent_capture_tables`] in reverse: lists D1 rows for the
+/// Mirrors [`sync_frozen_agent_capture_tables`] in reverse: lists D1 rows for the
 /// repo and inserts them into the local SQLite catalog.
 ///
 /// Behaviour, refined per Codex Phase-3.5b review:
@@ -3261,7 +3269,8 @@ mod tests {
 
         let repo_id = ensure_repo_id().await;
         let hash = ObjectHash::from_type_and_data(ObjectType::Blob, data);
-        LocalStorage::new(path::objects())
+        LocalStorage::try_new(path::objects())
+            .expect("storage")
             .put(&hash, data, ObjectType::Blob)
             .await
             .expect("write local object");
@@ -3521,7 +3530,7 @@ mod tests {
 
         let _repo = enter_isolated_libra_repo().await;
         let repo_id = ensure_repo_id().await;
-        let local = LocalStorage::new(path::objects());
+        let local = LocalStorage::try_new(path::objects()).expect("storage");
         let conn = db::get_db_conn_instance().await;
         let mut expected = Vec::new();
         for data in [
@@ -3840,6 +3849,7 @@ mod tests {
         assert_eq!(
             modes,
             vec![
+                ("catalog.json".to_string(), 0o600),
                 ("objects.jsonl".to_string(), 0o600),
                 ("owner.json".to_string(), 0o600),
                 ("refs.json".to_string(), 0o600),
@@ -3970,6 +3980,7 @@ mod tests {
                         "objects.jsonl",
                         "refs.json",
                         "repository.json",
+                        "catalog.json",
                     ] {
                         let output = std::process::Command::new("icacls")
                             .arg(dir.join(name))
@@ -4012,7 +4023,7 @@ mod tests {
         // `icacls <file>` lists one principal per line after the path line;
         // only the current user and SYSTEM may appear.
         let files = file_acls.lock().unwrap().clone();
-        assert_eq!(files.len(), 4, "{files:?}");
+        assert_eq!(files.len(), 5, "{files:?}");
         let user = env::var("USERNAME").expect("USERNAME").to_lowercase();
         for (name, acl) in files {
             let acl = acl.to_lowercase();
@@ -6002,7 +6013,16 @@ mod tests {
         // The CLI error keeps its code and shows the note.
         let cli = cloud_cli_error_typed("sync", error);
         assert_eq!(cli.stable_code(), StableErrorCode::AuthMissingCredentials);
-        assert!(cli.render_json().contains(&path), "{}", cli.render_json());
+        // Parsed, since the envelope escapes a Windows path's backslashes.
+        let envelope: serde_json::Value =
+            serde_json::from_str(&cli.render_json()).expect("error envelope");
+        let hints = envelope["hints"].as_array().expect("hints");
+        assert!(
+            hints
+                .iter()
+                .any(|hint| hint.as_str().is_some_and(|hint| hint.contains(&path))),
+            "{envelope}"
+        );
         assert!(kept.exists());
 
         let mock = crate::utils::d1_client::test_support::MockD1::spawn().await;
@@ -7370,6 +7390,1327 @@ mod tests {
         assert!(spool_runs().is_empty());
     }
 
+    // ---- PI-26: the agent-capture catalog in the frozen snapshot -----------
+
+    const PI26_SESSION: &str = "pi26-session";
+    /// What a note about a kept run directory says about its catalog file.
+    const PI26_CATALOG_LISTING: &str = "catalog.json (agent-capture catalog: sessions, checkpoints, prune and import tombstones, the traces head, subagent claims, revisions and links, legacy Claude mirror rows)";
+
+    /// Every loose object id under the repository's `objects` directory.
+    fn loose_object_ids() -> std::collections::BTreeSet<String> {
+        let mut ids = std::collections::BTreeSet::new();
+        let objects = util::storage_path().join("objects");
+        for prefix in fs::read_dir(objects).into_iter().flatten().flatten() {
+            let name = prefix.file_name().to_string_lossy().into_owned();
+            if name.len() != 2 || !prefix.path().is_dir() {
+                continue;
+            }
+            for file in fs::read_dir(prefix.path()).into_iter().flatten().flatten() {
+                ids.insert(format!("{name}{}", file.file_name().to_string_lossy()));
+            }
+        }
+        ids
+    }
+
+    /// Write the traces commit of checkpoint `checkpoint_id` over `tree`.
+    fn write_traces_commit(
+        tree: &str,
+        parent: Option<ObjectHash>,
+        checkpoint_id: &str,
+    ) -> ObjectHash {
+        use git_internal::internal::object::{
+            ObjectTrait,
+            commit::Commit,
+            signature::{Signature, SignatureType},
+        };
+
+        let signature = |kind| Signature::new(kind, "Libra".into(), "traces@libra".into());
+        let commit = Commit::new(
+            signature(SignatureType::Author),
+            signature(SignatureType::Committer),
+            tree.parse().expect("tree id"),
+            parent.into_iter().collect(),
+            &format!(
+                "traces: committed checkpoint {checkpoint_id}\n\nLibra-Session: {PI26_SESSION}\nLibra-Agent: claude_code\nLibra-Checkpoint-ID: {checkpoint_id}\nLibra-Scope: committed\n"
+            ),
+        );
+        crate::utils::object::write_git_object(
+            &util::storage_path(),
+            "commit",
+            &commit.to_data().expect("encode traces commit"),
+        )
+        .expect("write traces commit")
+    }
+
+    /// Index on `conn`, with `is_synced`, every loose object not in `before`.
+    async fn index_loose_objects_since<C: sea_orm::ConnectionTrait>(
+        conn: &C,
+        repo_id: &str,
+        before: &std::collections::BTreeSet<String>,
+        is_synced: i32,
+    ) -> Result<Vec<String>, sea_orm::DbErr> {
+        use sea_orm::Statement;
+
+        let storage = util::storage_path();
+        let mut indexed = Vec::new();
+        for oid in loose_object_ids().difference(before) {
+            let hash = crate::internal::object_format::parse_repo_oid(oid).expect("object id");
+            let (kind, bytes) = crate::utils::object::read_git_object_bounded_validated(
+                &storage,
+                &hash,
+                4 * 1024 * 1024,
+            )
+            .expect("read fixture object");
+            conn.execute_raw(Statement::from_sql_and_values(
+                conn.get_database_backend(),
+                "INSERT INTO object_index (o_id, o_type, o_size, repo_id, created_at, is_synced)
+                 VALUES (?, ?, ?, ?, 1, ?)",
+                [
+                    oid.clone().into(),
+                    kind.into(),
+                    (bytes.len() as i64).into(),
+                    repo_id.into(),
+                    is_synced.into(),
+                ],
+            ))
+            .await?;
+            indexed.push(oid.clone());
+        }
+        Ok(indexed)
+    }
+
+    /// One committed agent-capture checkpoint in the isolated repository
+    /// (PI-26): its session and checkpoint rows, the traces ref at its
+    /// commit, and every object it added indexed with `is_synced`. Returns
+    /// the traces commit, the root tree and the indexed objects.
+    async fn seed_agent_capture_checkpoint(is_synced: i32) -> (ObjectHash, String, Vec<String>) {
+        use sea_orm::Statement;
+
+        use crate::internal::ai::checkpoint_reader::{
+            read_tree_object, subtree, test_helpers::*, tree_entry,
+        };
+
+        let storage = util::storage_path();
+        let conn = db::get_db_conn_instance().await;
+        let repo_id = ensure_repo_id().await;
+        let before = loose_object_ids();
+        let (root, _artifact) = rg03_read_fixture(&storage, "valid", false);
+        let tree = read_tree_object(&storage, &root).expect("fixture root");
+        let checkpoint = subtree(&storage, &tree, "checkpoint").expect("checkpoint tree");
+        let prefix = subtree(&storage, &checkpoint, &RG03_CHECKPOINT_ID[..2]).expect("prefix");
+        let inner = subtree(&storage, &prefix, &RG03_CHECKPOINT_ID[2..]).expect("checkpoint");
+        let metadata = tree_entry(&inner, "metadata.json")
+            .expect("metadata entry")
+            .id;
+        let commit = write_traces_commit(&root, None, RG03_CHECKPOINT_ID);
+        insert_pi26_session(&conn, PI26_SESSION)
+            .await
+            .expect("insert the session");
+        for (sql, values) in [
+            (
+                "INSERT INTO agent_checkpoint (checkpoint_id, session_id, scope, tree_oid,
+                   metadata_blob_oid, traces_commit, created_at)
+                 VALUES (?, ?, 'committed', ?, ?, ?, 3)",
+                vec![
+                    RG03_CHECKPOINT_ID.into(),
+                    PI26_SESSION.into(),
+                    root.clone().into(),
+                    metadata.to_string().into(),
+                    commit.to_string().into(),
+                ],
+            ),
+            (
+                "UPDATE reference SET `commit` = ? WHERE name = ? AND remote IS NULL",
+                vec![
+                    commit.to_string().into(),
+                    crate::internal::branch::TRACES_BRANCH.into(),
+                ],
+            ),
+        ] {
+            let result = conn
+                .execute_raw(Statement::from_sql_and_values(
+                    conn.get_database_backend(),
+                    sql,
+                    values,
+                ))
+                .await
+                .expect("seed the checkpoint");
+            assert_eq!(result.rows_affected(), 1, "{sql}");
+        }
+        let indexed = index_loose_objects_since(&conn, &repo_id, &before, is_synced)
+            .await
+            .expect("index the checkpoint objects");
+        (commit, root, indexed)
+    }
+
+    async fn insert_pi26_session<C: sea_orm::ConnectionTrait>(
+        conn: &C,
+        session_id: &str,
+    ) -> Result<(), sea_orm::DbErr> {
+        use sea_orm::Statement;
+
+        conn.execute_raw(Statement::from_sql_and_values(
+            conn.get_database_backend(),
+            "INSERT INTO agent_session (session_id, agent_kind, provider_session_id, state,
+               working_dir, started_at, last_event_at, metadata_json, redaction_report)
+             VALUES (?, 'claude_code', ?, 'stopped', '/tmp/pi26-fixture', 1, 2, '{}', '{}')",
+            [session_id.into(), format!("{session_id}-provider").into()],
+        ))
+        .await
+        .map(|_| ())
+    }
+
+    /// Run `sql` on a second connection, as another process would.
+    async fn run_on_other_connection(sql: &str) {
+        use sea_orm::ConnectionTrait;
+
+        let other = other_connection().await;
+        other
+            .execute_unprepared(sql)
+            .await
+            .unwrap_or_else(|error| panic!("{sql}: {error}"));
+        let _ = other.close().await;
+    }
+
+    /// A second connection to the repository database with a 200 ms busy
+    /// timeout, as another process would open one.
+    async fn other_connection() -> sea_orm::DatabaseConnection {
+        let db_path = util::storage_path().join(util::DATABASE);
+        crate::internal::db::establish_connection_with_busy_timeout(
+            db_path.to_str().expect("utf-8 path"),
+            std::time::Duration::from_millis(200),
+        )
+        .await
+        .expect("open a second connection")
+    }
+
+    /// Hook that records the `catalog.json` each successful freeze wrote.
+    fn catalog_recorder(
+        seen: Arc<std::sync::Mutex<Vec<serde_json::Value>>>,
+        extra: impl Fn() -> futures::future::BoxFuture<'static, ()> + Send + Sync + 'static,
+    ) -> super::snapshot::AfterFreezeHook {
+        Arc::new(move |dir: PathBuf| {
+            let catalog: serde_json::Value =
+                serde_json::from_slice(&fs::read(dir.join("catalog.json")).expect("catalog.json"))
+                    .expect("catalog.json is JSON");
+            seen.lock().unwrap().push(catalog);
+            extra()
+        })
+    }
+
+    async fn remote_catalog(
+        mock: &crate::utils::d1_client::test_support::MockD1,
+        repo_id: &str,
+    ) -> (Vec<String>, Vec<String>) {
+        let rows = mock
+            .client()
+            .list_agent_capture_restore_catalog_rows(repo_id, true, 100)
+            .await
+            .expect("read the mirrored catalog");
+        let mut sessions: Vec<String> = rows
+            .sessions
+            .into_iter()
+            .map(|row| row.session_id)
+            .collect();
+        let mut checkpoints: Vec<String> = rows
+            .checkpoints
+            .into_iter()
+            .map(|row| row.checkpoint_id)
+            .collect();
+        sessions.sort();
+        checkpoints.sort();
+        (sessions, checkpoints)
+    }
+
+    /// No agent-capture catalog row, and no generation, reached D1 (its
+    /// tables may exist).
+    async fn assert_no_remote_catalog(
+        label: &str,
+        mock: &crate::utils::d1_client::test_support::MockD1,
+    ) {
+        #[derive(serde::Deserialize)]
+        struct Count {
+            n: i64,
+        }
+        for table in [
+            "agent_session",
+            "agent_checkpoint",
+            "agent_capture_generation",
+            "agent_checkpoint_prune_tombstone",
+            "agent_import_tombstone",
+            "agent_subagent_content_claim",
+            "agent_subagent_content_revision",
+            "agent_subagent_link",
+        ] {
+            if !remote_table_present(mock, table).await {
+                continue;
+            }
+            let rows: Vec<Count> = mock
+                .client()
+                .query(&format!("SELECT COUNT(*) AS n FROM {table}"), None)
+                .await
+                .expect("count remote rows");
+            assert_eq!(rows[0].n, 0, "{label}: rows reached D1 table {table}");
+        }
+    }
+
+    /// The live catalog as a sync would freeze it.
+    async fn frozen_catalog(
+        conn: &sea_orm::DatabaseConnection,
+    ) -> Box<super::agent_capture::FrozenAgentCaptureCatalog> {
+        match super::agent_capture::freeze_agent_capture(conn, None).await {
+            super::agent_capture::FrozenAgentCapture::Catalog(catalog) => catalog,
+            other => panic!("the seeded catalog freezes: {other:?}"),
+        }
+    }
+
+    fn refused_with(label: &str, report: &CloudSyncReport, expected: &str) {
+        match &report.agent_capture {
+            AgentCaptureSyncOutcome::Failed { error } => {
+                assert!(error.contains(expected), "{label}: {error}");
+                assert!(error.contains("retry"), "{label}: {error}");
+            }
+            other => panic!("{label}: publication was not refused: {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    #[serial(cwd, env)]
+    async fn capture_snapshot_catalog_is_frozen_in_the_same_view() {
+        let _repo = enter_isolated_libra_repo().await;
+        let repo_id = ensure_repo_id().await;
+        let (_, _, indexed) = seed_agent_capture_checkpoint(0).await;
+        let late_object = Arc::new(std::sync::Mutex::new(None));
+        let writes = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let catalogs = Arc::new(std::sync::Mutex::new(Vec::new()));
+        // While the first attempt reads the catalog, another connection
+        // commits a session after its first page and an object row after its
+        // second. The freeze retries, and the second attempt is one view
+        // holding both, with the objects the catalog needs still pending.
+        let (recorded, late) = (writes.clone(), late_object.clone());
+        let tuning = super::snapshot::SnapshotTuning {
+            between_catalog_pages: Some(Arc::new(move |attempt| {
+                let (recorded, late) = (recorded.clone(), late.clone());
+                Box::pin(async move {
+                    if attempt != 1 {
+                        return;
+                    }
+                    let n = recorded.lock().unwrap().len();
+                    match n {
+                        0 => {
+                            let other = other_connection().await;
+                            let result = insert_pi26_session(&other, "pi26-late-session").await;
+                            let _ = other.close().await;
+                            recorded
+                                .lock()
+                                .unwrap()
+                                .push(result.map_err(|e| e.to_string()));
+                        }
+                        1 => {
+                            let hash = index_local_object(b"pi-26 late object\n").await;
+                            *late.lock().unwrap() = Some(hash);
+                            recorded.lock().unwrap().push(Ok(()));
+                        }
+                        _ => {}
+                    }
+                })
+            })),
+            after_freeze: Some(catalog_recorder(catalogs.clone(), || Box::pin(async {}))),
+            ..Default::default()
+        };
+        let mock = crate::utils::d1_client::test_support::MockD1::spawn().await;
+        let report = sync_with_tuning(&mock, &Arc::new(InMemory::new()), &tuning)
+            .await
+            .expect("sync");
+        let writes = writes.lock().unwrap().clone();
+        assert_eq!(writes.len(), 2, "{writes:?}");
+        for write in &writes {
+            write.as_ref().expect("the concurrent write commits");
+        }
+        let catalogs = catalogs.lock().unwrap().clone();
+        assert_eq!(catalogs.len(), 1, "one freeze is adopted");
+        let frozen = catalogs[0].to_string();
+        assert!(frozen.contains("pi26-late-session"), "{frozen}");
+        assert_eq!(
+            report.total_unsynced,
+            indexed.len() + 1,
+            "the late object is frozen with the catalog"
+        );
+        assert_eq!(report.failed_count, 0);
+        assert_eq!(
+            report.agent_capture,
+            AgentCaptureSyncOutcome::Completed {
+                sessions_synced: 2,
+                sessions_failed: 0,
+                checkpoints_synced: 1,
+                checkpoints_failed: 0,
+            }
+        );
+        let (sessions, checkpoints) = remote_catalog(&mock, &repo_id).await;
+        assert_eq!(sessions, vec!["pi26-late-session", PI26_SESSION]);
+        assert_eq!(
+            checkpoints,
+            vec![crate::internal::ai::checkpoint_reader::test_helpers::RG03_CHECKPOINT_ID]
+        );
+        // Every object the frozen catalog needs, pending at the freeze, is in
+        // the remote object index.
+        let remote: std::collections::HashSet<String> = mock
+            .client()
+            .get_object_indexes(&repo_id)
+            .await
+            .expect("read the D1 object index")
+            .into_iter()
+            .map(|row| row.o_id)
+            .collect();
+        for oid in &indexed {
+            assert!(remote.contains(oid), "{oid} missing from the remote index");
+        }
+        assert!(
+            remote.contains(
+                &late_object
+                    .lock()
+                    .unwrap()
+                    .expect("late object")
+                    .to_string()
+            )
+        );
+
+        // A catalog that keeps changing stops the run before any remote write.
+        let churn = super::snapshot::SnapshotTuning {
+            between_catalog_pages: Some(Arc::new(|_attempt| {
+                Box::pin(async {
+                    let n = std::time::SystemTime::now()
+                        .duration_since(std::time::UNIX_EPOCH)
+                        .map(|elapsed| elapsed.as_nanos())
+                        .unwrap_or_default();
+                    let other = other_connection().await;
+                    insert_pi26_session(&other, &format!("pi26-churn-{n}"))
+                        .await
+                        .expect("insert a churn session");
+                    let _ = other.close().await;
+                })
+            })),
+            ..Default::default()
+        };
+        let mock = crate::utils::d1_client::test_support::MockD1::spawn().await;
+        let r2 = Arc::new(InMemory::new());
+        let error = sync_with_tuning(&mock, &r2, &churn)
+            .await
+            .expect_err("a catalog that keeps changing stops the run");
+        let detail = error.to_string();
+        assert!(detail.contains("kept changing"), "{detail}");
+        assert!(
+            detail.contains("nothing was written to D1 or R2"),
+            "{detail}"
+        );
+        assert!(!remote_table_present(&mock, "object_index").await);
+        assert_no_remote_catalog("churn", &mock).await;
+        assert_eq!(r2_object_count(&r2).await, 0);
+        assert!(spool_runs().is_empty());
+    }
+
+    #[tokio::test]
+    #[serial(cwd, env)]
+    async fn capture_snapshot_catalog_pages_do_not_block_other_writers() {
+        let _repo = enter_isolated_libra_repo().await;
+        seed_agent_capture_checkpoint(1).await;
+        let writes = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let catalogs = Arc::new(std::sync::Mutex::new(Vec::new()));
+        // After every catalog page of the first attempt another connection
+        // commits a session with a 200 ms busy timeout. The freeze holds no
+        // lock between its statements, so every write lands at once; the
+        // retried freeze is then one consistent catalog holding all of them.
+        let recorded = writes.clone();
+        let tuning = super::snapshot::SnapshotTuning {
+            between_catalog_pages: Some(Arc::new(move |attempt| {
+                let recorded = recorded.clone();
+                Box::pin(async move {
+                    if attempt != 1 {
+                        return;
+                    }
+                    let n = recorded.lock().unwrap().len();
+                    let other = other_connection().await;
+                    let result = insert_pi26_session(&other, &format!("pi26-writer-{n}"))
+                        .await
+                        .map_err(|error| error.to_string());
+                    let _ = other.close().await;
+                    recorded.lock().unwrap().push(result);
+                })
+            })),
+            after_freeze: Some(catalog_recorder(catalogs.clone(), || Box::pin(async {}))),
+            ..Default::default()
+        };
+        let mock = crate::utils::d1_client::test_support::MockD1::spawn().await;
+        let report = sync_with_tuning(&mock, &Arc::new(InMemory::new()), &tuning)
+            .await
+            .expect("sync");
+        let writes = writes.lock().unwrap().clone();
+        assert!(
+            writes.len() >= 3,
+            "the catalog is read as several pages: {writes:?}"
+        );
+        for write in &writes {
+            write
+                .as_ref()
+                .unwrap_or_else(|error| panic!("a concurrent writer was blocked: {error}"));
+        }
+        let catalogs = catalogs.lock().unwrap().clone();
+        let sessions = catalogs[0]["Catalog"]["sessions"]
+            .as_array()
+            .expect("frozen sessions")
+            .len();
+        assert_eq!(
+            sessions,
+            1 + writes.len(),
+            "the retried freeze holds every write"
+        );
+        assert_eq!(
+            report.agent_capture,
+            AgentCaptureSyncOutcome::Completed {
+                sessions_synced: 1 + writes.len(),
+                sessions_failed: 0,
+                checkpoints_synced: 1,
+                checkpoints_failed: 0,
+            }
+        );
+    }
+
+    #[tokio::test]
+    #[serial(cwd, env)]
+    async fn capture_snapshot_catalog_never_publishes_erased_or_changed_rows() {
+        use crate::internal::ai::checkpoint_reader::test_helpers::RG03_CHECKPOINT_ID;
+
+        // Each change lands after the freeze and before publication; the
+        // frozen rows are never published over it.
+        let erase = format!(
+            "DELETE FROM agent_checkpoint WHERE checkpoint_id = '{RG03_CHECKPOINT_ID}';
+             DELETE FROM agent_session WHERE session_id = '{PI26_SESSION}';
+             INSERT INTO agent_import_tombstone (tombstone_id, agent_kind, provider_session_id,
+               erased_session_id, erased_at)
+             VALUES ('pi26-erased', 'claude_code', '{PI26_SESSION}-provider', '{PI26_SESSION}', 5);"
+        );
+        let revoke = format!(
+            "INSERT INTO agent_checkpoint_prune_tombstone (checkpoint_id, session_id, pruned_at)
+             VALUES ('{RG03_CHECKPOINT_ID}', '{PI26_SESSION}', 5);"
+        );
+        let modify = format!(
+            "UPDATE agent_session SET last_event_at = 3 WHERE session_id = '{PI26_SESSION}';"
+        );
+        for (label, sql) in [
+            ("erased", erase),
+            ("tombstoned", revoke),
+            ("modified", modify),
+        ] {
+            let _repo = enter_isolated_libra_repo().await;
+            seed_agent_capture_checkpoint(0).await;
+            let tuning = super::snapshot::SnapshotTuning {
+                after_freeze: Some(Arc::new(move |_dir: PathBuf| {
+                    let sql = sql.clone();
+                    Box::pin(async move { run_on_other_connection(&sql).await })
+                })),
+                ..Default::default()
+            };
+            let mock = crate::utils::d1_client::test_support::MockD1::spawn().await;
+            let report = sync_with_tuning(&mock, &Arc::new(InMemory::new()), &tuning)
+                .await
+                .unwrap_or_else(|error| panic!("{label}: {error}"));
+            assert_eq!(report.failed_count, 0, "{label}");
+            refused_with(label, &report, "catalog changed");
+            assert_no_remote_catalog(label, &mock).await;
+        }
+    }
+
+    #[tokio::test]
+    #[serial(cwd, env)]
+    async fn capture_snapshot_catalog_excludes_uncommitted_trace_intents() {
+        use crate::internal::ai::checkpoint_reader::test_helpers::RG03_CHECKPOINT_ID;
+
+        const LATER: &str = "aabbccdd-eeff-0011-2233-445566778800";
+        let _repo = enter_isolated_libra_repo().await;
+        let repo_id = ensure_repo_id().await;
+        let (committed, root, _) = seed_agent_capture_checkpoint(0).await;
+        // A later checkpoint's writer wrote its traces commit, then holds its
+        // intent — the catalog row, the traces ref move and the object rows —
+        // in one open transaction while the freeze reads the catalog, and
+        // crashes before committing it.
+        let before = loose_object_ids();
+        let pending = write_traces_commit(&root, Some(committed), LATER);
+        let intent = format!(
+            "INSERT INTO agent_checkpoint (checkpoint_id, session_id, scope, tree_oid,
+               metadata_blob_oid, traces_commit, created_at)
+             SELECT '{LATER}', session_id, scope, tree_oid, metadata_blob_oid, '{pending}', 4
+             FROM agent_checkpoint WHERE checkpoint_id = '{RG03_CHECKPOINT_ID}';
+             UPDATE reference SET `commit` = '{pending}'
+             WHERE name = '{}' AND remote IS NULL;",
+            crate::internal::branch::TRACES_BRANCH
+        );
+        let writer: Arc<tokio::sync::Mutex<Option<sea_orm::DatabaseTransaction>>> =
+            Arc::new(tokio::sync::Mutex::new(None));
+        let opened = writer.clone();
+        let (repo, intent_sql) = (repo_id.clone(), intent.clone());
+        let catalogs = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let crashed = writer.clone();
+        let tuning = super::snapshot::SnapshotTuning {
+            between_catalog_pages: Some(Arc::new(move |attempt| {
+                let (opened, repo, intent_sql, before) = (
+                    opened.clone(),
+                    repo.clone(),
+                    intent_sql.clone(),
+                    before.clone(),
+                );
+                Box::pin(async move {
+                    use sea_orm::{ConnectionTrait, TransactionTrait};
+
+                    let mut slot = opened.lock().await;
+                    if attempt != 1 || slot.is_some() {
+                        return;
+                    }
+                    let txn = other_connection()
+                        .await
+                        .begin()
+                        .await
+                        .expect("begin the writer's transaction");
+                    txn.execute_unprepared(&intent_sql)
+                        .await
+                        .expect("stage the intent");
+                    index_loose_objects_since(&txn, &repo, &before, 0)
+                        .await
+                        .expect("stage the object rows");
+                    *slot = Some(txn);
+                })
+            })),
+            after_freeze: Some(catalog_recorder(catalogs.clone(), move || {
+                let crashed = crashed.clone();
+                Box::pin(async move {
+                    let txn = crashed
+                        .lock()
+                        .await
+                        .take()
+                        .expect("the writer staged its intent");
+                    txn.rollback().await.expect("the writer crashes");
+                })
+            })),
+            ..Default::default()
+        };
+        let mock = crate::utils::d1_client::test_support::MockD1::spawn().await;
+        let r2 = Arc::new(InMemory::new());
+        let report = sync_with_tuning(&mock, &r2, &tuning).await.expect("sync");
+        let frozen = catalogs.lock().unwrap()[0].to_string();
+        assert!(!frozen.contains(LATER), "{frozen}");
+        assert!(!frozen.contains(&pending.to_string()), "{frozen}");
+        assert!(frozen.contains(&committed.to_string()), "{frozen}");
+        assert_eq!(
+            report.agent_capture,
+            AgentCaptureSyncOutcome::Completed {
+                sessions_synced: 1,
+                sessions_failed: 0,
+                checkpoints_synced: 1,
+                checkpoints_failed: 0,
+            }
+        );
+        let (_, checkpoints) = remote_catalog(&mock, &repo_id).await;
+        assert_eq!(checkpoints, vec![RG03_CHECKPOINT_ID]);
+        let remote = mock
+            .client()
+            .get_object_indexes(&repo_id)
+            .await
+            .expect("read the D1 object index");
+        assert!(!remote.iter().any(|row| row.o_id == pending.to_string()));
+        assert!(!RemoteStorage::new(r2.clone()).exist(&pending).await);
+
+        // The same writer committing after the freeze instead: its intent is
+        // not in the snapshot, and the snapshot is not published over it.
+        let committed_writer = Arc::new(tokio::sync::Mutex::new(None));
+        let opened = committed_writer.clone();
+        let tuning = super::snapshot::SnapshotTuning {
+            between_catalog_pages: Some(Arc::new(move |attempt| {
+                let opened = opened.clone();
+                Box::pin(async move {
+                    use sea_orm::{ConnectionTrait, TransactionTrait};
+
+                    let mut slot = opened.lock().await;
+                    if attempt != 1 || slot.is_some() {
+                        return;
+                    }
+                    let txn = other_connection()
+                        .await
+                        .begin()
+                        .await
+                        .expect("begin the writer's transaction");
+                    txn.execute_unprepared(&format!(
+                        "UPDATE agent_session SET last_event_at = 7 WHERE session_id = '{PI26_SESSION}'"
+                    ))
+                    .await
+                    .expect("stage the write");
+                    *slot = Some(txn);
+                })
+            })),
+            after_freeze: Some({
+                let writer = committed_writer.clone();
+                Arc::new(move |_dir: PathBuf| {
+                    let writer = writer.clone();
+                    Box::pin(async move {
+                        let txn: sea_orm::DatabaseTransaction = writer
+                            .lock()
+                            .await
+                            .take()
+                            .expect("the writer staged its write");
+                        txn.commit().await.expect("the writer commits");
+                    })
+                })
+            }),
+            ..Default::default()
+        };
+        let mock = crate::utils::d1_client::test_support::MockD1::spawn().await;
+        let report = sync_with_tuning(&mock, &Arc::new(InMemory::new()), &tuning)
+            .await
+            .expect("sync");
+        refused_with("committed after the freeze", &report, "catalog changed");
+        assert_no_remote_catalog("committed after the freeze", &mock).await;
+    }
+
+    #[tokio::test]
+    #[serial(cwd, env)]
+    async fn capture_snapshot_catalog_publishes_only_after_every_check() {
+        // A required object whose upload fails: nothing of the catalog is
+        // published.
+        {
+            let _repo = enter_isolated_libra_repo().await;
+            seed_agent_capture_checkpoint(0).await;
+            let mock = crate::utils::d1_client::test_support::MockD1::spawn().await;
+            mock.fail_once_when_sql_contains(
+                "INSERT INTO object_index (o_id, o_type, o_size, repo_id, created_at, is_synced, object_format)",
+                "injected upload failure",
+            );
+            let report = sync_with_tuning(
+                &mock,
+                &Arc::new(InMemory::new()),
+                &super::snapshot::SnapshotTuning::default(),
+            )
+            .await
+            .expect("sync");
+            assert_eq!(report.failed_count, 1);
+            assert_eq!(report.agent_capture, AgentCaptureSyncOutcome::NotRun);
+            assert_no_remote_catalog("upload failed", &mock).await;
+        }
+        // An unrelated object indexed after the freeze and left unsynced: the
+        // repository-wide generation gate refuses.
+        {
+            let _repo = enter_isolated_libra_repo().await;
+            seed_agent_capture_checkpoint(0).await;
+            let tuning = super::snapshot::SnapshotTuning {
+                after_freeze: Some(Arc::new(|_dir: PathBuf| {
+                    Box::pin(async {
+                        index_local_object(b"pi-26 unrelated after the freeze\n").await;
+                    })
+                })),
+                ..Default::default()
+            };
+            let mock = crate::utils::d1_client::test_support::MockD1::spawn().await;
+            let report = sync_with_tuning(&mock, &Arc::new(InMemory::new()), &tuning)
+                .await
+                .expect("sync");
+            assert_eq!(report.failed_count, 0);
+            refused_with(
+                "unrelated unsynced object",
+                &report,
+                "outside the completed object upload generation",
+            );
+            assert_no_remote_catalog("unrelated unsynced object", &mock).await;
+        }
+        // A required object marked synced but missing locally: the
+        // reachability and durability check refuses.
+        {
+            let _repo = enter_isolated_libra_repo().await;
+            let (commit, _, _) = seed_agent_capture_checkpoint(1).await;
+            let id = commit.to_string();
+            fs::remove_file(
+                util::storage_path()
+                    .join("objects")
+                    .join(&id[..2])
+                    .join(&id[2..]),
+            )
+            .expect("lose the traces commit");
+            let mock = crate::utils::d1_client::test_support::MockD1::spawn().await;
+            let report = sync_with_tuning(
+                &mock,
+                &Arc::new(InMemory::new()),
+                &super::snapshot::SnapshotTuning::default(),
+            )
+            .await
+            .expect("sync");
+            refused_with("missing object", &report, "not fully reachable and durable");
+            assert_no_remote_catalog("missing object", &mock).await;
+        }
+    }
+
+    #[tokio::test]
+    #[serial(cwd, env)]
+    async fn capture_snapshot_catalog_kept_runs_list_their_catalog_file() {
+        // A run directory that stays on disk — this run's own, when it cannot
+        // be removed, or a leftover the next sync keeps — is reported with
+        // the catalog file it holds, in every output mode.
+        for (label, mode) in report_modes() {
+            let _repo = enter_isolated_libra_repo().await;
+            seed_agent_capture_checkpoint(0).await;
+            let live = plant_residue(
+                "run-live",
+                Some(&marker_bytes(&marker_for(std::process::id()))),
+            );
+            let mut file = super::snapshot::create_private_file(&live.join("catalog.json"))
+                .expect("create a leftover catalog");
+            std::io::Write::write_all(&mut file, b"{}").expect("write a leftover catalog");
+            drop(file);
+            let tuning = super::snapshot::SnapshotTuning {
+                fail_spool_release: true,
+                ..Default::default()
+            };
+            let mock = crate::utils::d1_client::test_support::MockD1::spawn().await;
+            let (concluded, _console, ndjson) =
+                drive_sync_in_mode(&mode, &mock, Arc::new(InMemory::new()), &tuning).await;
+            let structured = concluded
+                .unwrap_or_else(|error| panic!("{label}: the sync still succeeds: {error}"));
+            let own = spool_runs()
+                .into_iter()
+                .find(|run| run != &live)
+                .unwrap_or_else(|| panic!("{label}: this run's directory is kept"));
+            let pending = crate::utils::output::pending_warning_messages();
+            let events: Vec<String> = ndjson
+                .iter()
+                .filter_map(|line| serde_json::from_str::<serde_json::Value>(line).ok())
+                .filter(|event| event["event"] == "cloud_sync.spool.warning")
+                .filter_map(|event| event["message"].as_str().map(str::to_string))
+                .collect();
+            let notes: Vec<String> = [&live, &own]
+                .iter()
+                .map(|run| {
+                    let path = run.display().to_string();
+                    let found = match label {
+                        "human" | "quiet" => pending.iter().find(|note| note.contains(&path)),
+                        _ => events.iter().find(|note| note.contains(&path)),
+                    };
+                    found
+                        .unwrap_or_else(|| panic!("{label}: {path} not reported"))
+                        .clone()
+                })
+                .collect();
+            for note in &notes {
+                assert!(note.contains(PI26_CATALOG_LISTING), "{label}: {note}");
+            }
+            // Only the files a directory actually holds are listed: the
+            // leftover holds its marker and its catalog alone.
+            for absent in ["objects.jsonl", "refs.json", "repository.json"] {
+                assert!(!notes[0].contains(absent), "{label}: {}", notes[0]);
+                assert!(
+                    notes[1].contains(&format!("{absent} (")),
+                    "{label}: {}",
+                    notes[1]
+                );
+            }
+            if label == "json" {
+                let data = serde_json::to_value(structured.expect("--json data")).unwrap();
+                let warnings = data["warnings"].as_array().expect("data.warnings");
+                for note in &notes {
+                    assert!(
+                        warnings.iter().any(|w| w == note.as_str()),
+                        "{label}: {note}"
+                    );
+                }
+            }
+
+            // A failing sync adds the same notes to its error.
+            index_local_object(format!("pi-26 failing {label}\n").as_bytes()).await;
+            let mock = crate::utils::d1_client::test_support::MockD1::spawn().await;
+            mock.fail_once_when_sql_contains(
+                "INSERT INTO object_index (o_id, o_type, o_size, repo_id, created_at, is_synced, object_format)",
+                "injected upload failure",
+            );
+            let (concluded, _, _) =
+                drive_sync_in_mode(&mode, &mock, Arc::new(InMemory::new()), &tuning).await;
+            let detail = concluded.expect_err("the failing sync fails").to_string();
+            let runs = spool_runs();
+            assert_eq!(runs.len(), 3, "{label}: {runs:?}");
+            for run in &runs {
+                let path = run.display().to_string();
+                let at = detail
+                    .find(&path)
+                    .unwrap_or_else(|| panic!("{label}: the error names {path}: {detail}"));
+                // This run's note ends where a note naming another run
+                // directory begins.
+                let rest = &detail[at + path.len()..];
+                let end = runs
+                    .iter()
+                    .filter(|other| *other != run)
+                    .filter_map(|other| rest.find(&other.display().to_string()))
+                    .min()
+                    .unwrap_or(rest.len());
+                let note = &rest[..end];
+                assert!(note.contains(PI26_CATALOG_LISTING), "{label}: {note}");
+                for absent in ["objects.jsonl", "refs.json", "repository.json"] {
+                    assert_eq!(
+                        note.contains(absent),
+                        run != &live,
+                        "{label}: {path} lists {absent} exactly when it holds it: {note}"
+                    );
+                }
+            }
+        }
+    }
+
+    #[tokio::test]
+    #[serial(cwd, env)]
+    async fn capture_snapshot_catalog_rechecks_the_generation_before_publishing() {
+        let _repo = enter_isolated_libra_repo().await;
+        seed_agent_capture_checkpoint(0).await;
+        // A whole sync. The first object read from R2 is the agent-capture
+        // phase's remote object check: after its first generation gate, and
+        // before the recheck that precedes the first remote catalog
+        // mutation. Only an unrelated object is indexed there and left
+        // unsynced — no catalog row changes — so only the generation gate
+        // repeated before publication can refuse it.
+        let store = Arc::new(ObjectReadHookR2 {
+            inner: Arc::new(InMemory::new()),
+            hook: std::sync::Mutex::new(Some(Box::pin(async {
+                index_local_object(b"pi-26 unrelated during the remote object check\n").await;
+            }))),
+        });
+        let mock = crate::utils::d1_client::test_support::MockD1::spawn().await;
+        let report = super::sync::run_cloud_sync_from_snapshot(
+            CloudSyncContext {
+                batch_size: 2,
+                force: false,
+            },
+            &SilentCloudSyncProgress,
+            mock.client(),
+            Some(RemoteStorage::new(store.clone())),
+            &super::snapshot::SnapshotTuning::default(),
+        )
+        .await
+        .expect("sync");
+        assert!(
+            store.hook.lock().unwrap().is_none(),
+            "the remote object check read an object"
+        );
+        assert_eq!(report.failed_count, 0);
+        refused_with(
+            "unsynced object during the remote checks",
+            &report,
+            "outside the completed object upload generation",
+        );
+        assert_no_remote_catalog("unsynced object during the remote checks", &mock).await;
+    }
+
+    /// R2 that runs `hook` once, at the first object read that is neither a
+    /// HEAD nor the metadata JSON (PI-26).
+    struct ObjectReadHookR2 {
+        inner: Arc<InMemory>,
+        hook: std::sync::Mutex<Option<futures::future::BoxFuture<'static, ()>>>,
+    }
+
+    impl std::fmt::Debug for ObjectReadHookR2 {
+        fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+            f.write_str("ObjectReadHookR2")
+        }
+    }
+
+    impl std::fmt::Display for ObjectReadHookR2 {
+        fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+            f.write_str("ObjectReadHookR2")
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl object_store::ObjectStore for ObjectReadHookR2 {
+        async fn put_opts(
+            &self,
+            location: &object_store::path::Path,
+            payload: object_store::PutPayload,
+            opts: object_store::PutOptions,
+        ) -> object_store::Result<object_store::PutResult> {
+            self.inner.put_opts(location, payload, opts).await
+        }
+
+        async fn put_multipart_opts(
+            &self,
+            location: &object_store::path::Path,
+            opts: object_store::PutMultipartOptions,
+        ) -> object_store::Result<Box<dyn object_store::MultipartUpload>> {
+            self.inner.put_multipart_opts(location, opts).await
+        }
+
+        async fn get_opts(
+            &self,
+            location: &object_store::path::Path,
+            options: object_store::GetOptions,
+        ) -> object_store::Result<object_store::GetResult> {
+            let hook = if options.head || location.as_ref().ends_with("metadata.json") {
+                None
+            } else {
+                self.hook.lock().unwrap().take()
+            };
+            if let Some(hook) = hook {
+                hook.await;
+            }
+            self.inner.get_opts(location, options).await
+        }
+
+        fn list(
+            &self,
+            prefix: Option<&object_store::path::Path>,
+        ) -> futures::stream::BoxStream<'static, object_store::Result<object_store::ObjectMeta>>
+        {
+            self.inner.list(prefix)
+        }
+
+        async fn list_with_delimiter(
+            &self,
+            prefix: Option<&object_store::path::Path>,
+        ) -> object_store::Result<object_store::ListResult> {
+            self.inner.list_with_delimiter(prefix).await
+        }
+
+        async fn copy_opts(
+            &self,
+            from: &object_store::path::Path,
+            to: &object_store::path::Path,
+            options: object_store::CopyOptions,
+        ) -> object_store::Result<()> {
+            self.inner.copy_opts(from, to, options).await
+        }
+
+        fn delete_stream(
+            &self,
+            locations: futures::stream::BoxStream<
+                'static,
+                object_store::Result<object_store::path::Path>,
+            >,
+        ) -> futures::stream::BoxStream<'static, object_store::Result<object_store::path::Path>>
+        {
+            self.inner.delete_stream(locations)
+        }
+    }
+
+    #[tokio::test]
+    #[serial(cwd, env)]
+    async fn capture_snapshot_catalog_pages_every_table_by_key() {
+        use sea_orm::{ConnectionTrait, Statement};
+
+        let _repo = enter_isolated_libra_repo().await;
+        let conn = db::get_db_conn_instance().await;
+        let plan_of = |sql: String, values: Vec<sea_orm::Value>| {
+            let conn = conn.clone();
+            async move {
+                conn.query_all_raw(Statement::from_sql_and_values(
+                    conn.get_database_backend(),
+                    format!("EXPLAIN QUERY PLAN {sql}"),
+                    values,
+                ))
+                .await
+                .expect("explain a page query")
+                .iter()
+                .map(|row| row.try_get_by::<String, _>("detail").expect("plan detail"))
+                .collect::<Vec<String>>()
+            }
+        };
+
+        // Every page of every catalog table is one indexed keyset statement:
+        // the index provides the key order (no sort of the table), wherever
+        // the page starts (no OFFSET).
+        for query in super::agent_capture::CATALOG_QUERIES {
+            for after in [false, true] {
+                let mut values: Vec<sea_orm::Value> = Vec::new();
+                if after {
+                    for column in query.key {
+                        values.push(match column {
+                            super::agent_capture::KeyColumn::Text(_) => "key".into(),
+                            super::agent_capture::KeyColumn::Integer(_) => 1_i64.into(),
+                        });
+                    }
+                }
+                values.push(256_i64.into());
+                let plan = plan_of(
+                    super::agent_capture::catalog_query_sql(query, after, true),
+                    values,
+                )
+                .await;
+                assert!(
+                    !plan.iter().any(|step| step.contains("TEMP B-TREE")),
+                    "{} after={after}: {plan:?}",
+                    query.label
+                );
+                assert!(
+                    plan.first().is_some_and(|step| step.contains("INDEX")),
+                    "{} after={after}: {plan:?}",
+                    query.label
+                );
+            }
+        }
+        // The legacy Claude rows: one page of the revision table's primary
+        // key per statement, filtered after it is read.
+        for after in [false, true] {
+            let mut values: Vec<sea_orm::Value> = Vec::new();
+            if after {
+                values.extend(["key".into(), "key".into(), 2_i64.into(), 1_i64.into()]);
+            }
+            values.push(256_i64.into());
+            let plan = plan_of(super::agent_capture::claude_legacy_page_sql(after), values).await;
+            assert!(
+                !plan.iter().any(|step| step.contains("TEMP B-TREE")),
+                "legacy after={after}: {plan:?}"
+            );
+            assert!(
+                plan.iter()
+                    .any(|step| step.contains("agent_coverage_revision")
+                        && step.contains("INDEX sqlite_autoindex_agent_coverage_revision")),
+                "legacy after={after}: {plan:?}"
+            );
+        }
+
+        // A multi-page catalog: 600 sessions, 300 checkpoints whose creation
+        // order runs against their id order, and 600 legacy Claude revisions
+        // among 2,000 ordinary coverage revisions the legacy read skips.
+        conn.execute_unprepared(
+            "CREATE TABLE pi26_writer (n INTEGER NOT NULL);
+             WITH RECURSIVE n(i) AS (SELECT 0 UNION ALL SELECT i + 1 FROM n WHERE i < 599)
+             INSERT INTO agent_session (session_id, agent_kind, provider_session_id, state,
+               working_dir, started_at, last_event_at, metadata_json, redaction_report)
+             SELECT printf('pi26-s-%04d', i), 'claude_code', printf('pi26-p-%04d', i),
+               'stopped', '/tmp/pi26-fixture', 1, 2, '{}', '{}' FROM n;
+             WITH RECURSIVE n(i) AS (SELECT 0 UNION ALL SELECT i + 1 FROM n WHERE i < 299)
+             INSERT INTO agent_checkpoint (checkpoint_id, session_id, scope, tree_oid,
+               metadata_blob_oid, traces_commit, created_at)
+             SELECT printf('pi26-c-%04d', i), 'pi26-s-0000', 'committed', 'tree', 'meta',
+               printf('commit-%04d', i), 1000 - i FROM n;
+             WITH RECURSIVE n(i) AS (SELECT 0 UNION ALL SELECT i + 1 FROM n WHERE i < 1999)
+             INSERT INTO agent_coverage_revision (session_id, logical_turn_key,
+               coverage_schema_version, revision, checkpoint_id, coverage_digest,
+               completeness, source_channel, created_at)
+             SELECT 'pi26-s-0001', 'claude-legacy:' || printf('cp-%04d', i), 2, 1,
+               printf('cp-%04d', i), 'digest', 'complete', 'import', 1 FROM n WHERE i < 600
+             UNION ALL
+             SELECT 'pi26-s-0001', printf('turn-%04d', i), 2, 1,
+               printf('cp-%04d', i), 'digest', 'complete', 'import', 1 FROM n;",
+        )
+        .await
+        .expect("seed a multi-page catalog");
+
+        // Another connection commits after every catalog page with a 200 ms
+        // busy timeout; none of the writes waits on the read.
+        let freeze_with_writer = || async {
+            let writes = Arc::new(std::sync::Mutex::new(Vec::new()));
+            let recorded = writes.clone();
+            let hook: super::agent_capture::CatalogPageHook = Arc::new(move || {
+                let recorded = recorded.clone();
+                Box::pin(async move {
+                    let other = other_connection().await;
+                    let result = other
+                        .execute_unprepared("INSERT INTO pi26_writer (n) VALUES (1)")
+                        .await
+                        .map(|_| ())
+                        .map_err(|error| error.to_string());
+                    let _ = other.close().await;
+                    recorded.lock().unwrap().push(result);
+                })
+            });
+            let frozen = match super::agent_capture::freeze_agent_capture(&conn, Some(&hook)).await
+            {
+                super::agent_capture::FrozenAgentCapture::Catalog(catalog) => catalog,
+                other => panic!("the catalog freezes: {other:?}"),
+            };
+            let writes = writes.lock().unwrap().clone();
+            for write in &writes {
+                write
+                    .as_ref()
+                    .unwrap_or_else(|error| panic!("a concurrent writer was blocked: {error}"));
+            }
+            (frozen, writes.len())
+        };
+        let (frozen, writes) = freeze_with_writer().await;
+        // Sessions take three pages, checkpoints two, the 2,600 coverage
+        // revisions eleven, every other table one.
+        assert!(writes >= 3 + 2 + 11 + 4, "{writes} pages");
+        assert_eq!(frozen.sessions.len(), 600, "every session once");
+        let checkpoints: Vec<&str> = frozen
+            .checkpoints
+            .iter()
+            .map(|row| row.checkpoint_id.as_str())
+            .collect();
+        let expected: Vec<String> = (0..300).rev().map(|i| format!("pi26-c-{i:04}")).collect();
+        assert_eq!(checkpoints, expected, "checkpoints in creation order");
+        let rows = serde_json::to_value(&frozen.claude_legacy_rows).expect("serialize the rows");
+        let legacy: Vec<&str> = rows
+            .as_array()
+            .expect("rows")
+            .iter()
+            .map(|row| row["checkpoint_id"].as_str().expect("checkpoint id"))
+            .collect();
+        let expected: Vec<String> = (0..600).map(|i| format!("cp-{i:04}")).collect();
+        assert_eq!(legacy, expected, "every legacy row once, in key order");
+
+        // No legacy row at all among 2,000 ordinary ones: still one page of
+        // the revision table per statement, and writers still land.
+        conn.execute_unprepared(
+            "DELETE FROM agent_coverage_revision WHERE logical_turn_key LIKE 'claude-legacy:%'",
+        )
+        .await
+        .expect("drop the legacy rows");
+        let (frozen, writes) = freeze_with_writer().await;
+        assert!(writes >= 3 + 2 + 8 + 4, "{writes} pages");
+        assert!(frozen.claude_legacy_rows.is_empty());
+    }
+
+    #[tokio::test]
+    #[serial(cwd, env)]
+    async fn capture_snapshot_catalog_recheck_reads_one_consistent_view() {
+        use crate::internal::ai::checkpoint_reader::test_helpers::RG03_CHECKPOINT_ID;
+
+        // An erasure committed once the re-read has passed the session,
+        // checkpoint and tombstone pages: the pages read after it alone look
+        // unchanged, so only the read window catches it — whether the writer
+        // is another process (a second connection) or another task of this
+        // process committing through the shared connection, which `PRAGMA
+        // data_version` alone would not reveal.
+        let erase = format!(
+            "DELETE FROM agent_checkpoint WHERE checkpoint_id = '{RG03_CHECKPOINT_ID}';
+             DELETE FROM agent_session WHERE session_id = '{PI26_SESSION}';
+             INSERT INTO agent_import_tombstone (tombstone_id, agent_kind, provider_session_id,
+               erased_session_id, erased_at)
+             VALUES ('pi26-erased', 'claude_code', '{PI26_SESSION}-provider', '{PI26_SESSION}', 5);"
+        );
+        for shared in [false, true] {
+            let _repo = enter_isolated_libra_repo().await;
+            let repo_id = ensure_repo_id().await;
+            seed_agent_capture_checkpoint(1).await;
+            let conn = db::get_db_conn_instance().await;
+            let frozen = frozen_catalog(&conn).await;
+            super::agent_capture::recheck_frozen_agent_capture(&frozen, &conn, &repo_id, None)
+                .await
+                .expect("an unchanged catalog passes the recheck");
+            let pages = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+            let counted = pages.clone();
+            let erase = erase.clone();
+            let hook: super::agent_capture::CatalogPageHook = Arc::new(move || {
+                let (counted, erase) = (counted.clone(), erase.clone());
+                Box::pin(async move {
+                    if counted.fetch_add(1, std::sync::atomic::Ordering::SeqCst) + 1 != 4 {
+                        return;
+                    }
+                    if shared {
+                        use sea_orm::ConnectionTrait;
+
+                        db::get_db_conn_instance()
+                            .await
+                            .execute_unprepared(&erase)
+                            .await
+                            .expect("erase through the shared connection");
+                    } else {
+                        run_on_other_connection(&erase).await;
+                    }
+                })
+            });
+            let error = super::agent_capture::recheck_frozen_agent_capture(
+                &frozen,
+                &conn,
+                &repo_id,
+                Some(&hook),
+            )
+            .await
+            .expect_err("an erasure during the re-read refuses publication");
+            assert!(
+                error.to_string().contains("catalog changed"),
+                "shared={shared}: {error}"
+            );
+            assert!(
+                pages.load(std::sync::atomic::Ordering::SeqCst) > 4,
+                "shared={shared}: pages were read after the erasure"
+            );
+        }
+    }
+
+    #[tokio::test]
+    #[serial(cwd, env)]
+    async fn capture_snapshot_catalog_spools_only_the_cloud_projection() {
+        use sea_orm::{ConnectionTrait, Statement};
+
+        let _repo = enter_isolated_libra_repo().await;
+        let repo_id = ensure_repo_id().await;
+        let conn = db::get_db_conn_instance().await;
+        conn.execute_raw(Statement::from_sql_and_values(
+            conn.get_database_backend(),
+            "INSERT INTO agent_session (session_id, agent_kind, provider_session_id, state,
+               working_dir, started_at, last_event_at, metadata_json, redaction_report)
+             VALUES ('pi26-legacy', 'claude_code', 'pi26-legacy-provider', 'stopped',
+               '/tmp/pi26-fixture', 1, 2, ?, '{}')",
+            [legacy_import_ownership_metadata(Some(1)).into()],
+        ))
+        .await
+        .expect("insert a session with legacy ownership metadata");
+        index_local_object(b"pi-26 projection object\n").await;
+        let spooled = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let recorded = spooled.clone();
+        let tuning = super::snapshot::SnapshotTuning {
+            after_freeze: Some(Arc::new(move |dir: PathBuf| {
+                recorded
+                    .lock()
+                    .unwrap()
+                    .push(fs::read_to_string(dir.join("catalog.json")).expect("catalog.json"));
+                Box::pin(async {})
+            })),
+            ..Default::default()
+        };
+        let mock = crate::utils::d1_client::test_support::MockD1::spawn().await;
+        let report = sync_with_tuning(&mock, &Arc::new(InMemory::new()), &tuning)
+            .await
+            .expect("sync");
+        let spooled = spooled.lock().unwrap().clone();
+        assert!(spooled[0].contains("pi26-legacy"), "{}", spooled[0]);
+        for value in LEGACY_OWNERSHIP_VALUES {
+            assert!(
+                !spooled[0].contains(value),
+                "the spool holds only the cloud projection: {value}"
+            );
+        }
+        assert!(
+            matches!(
+                report.agent_capture,
+                AgentCaptureSyncOutcome::Completed {
+                    sessions_synced: 1,
+                    ..
+                }
+            ),
+            "{:?}",
+            report.agent_capture
+        );
+        let (sessions, _) = remote_catalog(&mock, &repo_id).await;
+        assert_eq!(sessions, vec!["pi26-legacy"]);
+
+        // A catalog file changed after the freeze is never used: the phase
+        // fails with a fixed reason and publishes nothing.
+        let tuning = super::snapshot::SnapshotTuning {
+            after_freeze: Some(Arc::new(|dir: PathBuf| {
+                let path = dir.join("catalog.json");
+                let mut bytes = fs::read(&path).expect("catalog.json");
+                let at = bytes.len() / 2;
+                bytes[at] ^= 1;
+                fs::write(&path, bytes).expect("change the frozen catalog");
+                Box::pin(async {})
+            })),
+            ..Default::default()
+        };
+        index_local_object(b"pi-26 tampered spool object\n").await;
+        let mock = crate::utils::d1_client::test_support::MockD1::spawn().await;
+        let report = sync_with_tuning(&mock, &Arc::new(InMemory::new()), &tuning)
+            .await
+            .expect("sync");
+        assert_eq!(
+            report.agent_capture,
+            AgentCaptureSyncOutcome::Failed {
+                error: super::sync::FROZEN_CATALOG_UNREADABLE.to_string()
+            }
+        );
+        assert_no_remote_catalog("changed spool", &mock).await;
+    }
+
     async fn enter_isolated_libra_repo() -> (
         tempfile::TempDir,
         tempfile::TempDir,
@@ -7948,7 +9289,7 @@ mod tests {
         let _repo = enter_isolated_libra_repo().await;
         let remote = RemoteStorage::new(Arc::new(InMemory::new()));
         let local_dir = tempdir().unwrap();
-        let local = LocalStorage::new(local_dir.path().to_path_buf());
+        let local = LocalStorage::try_new(local_dir.path().to_path_buf()).expect("storage");
         let data = b"hello\n";
         let hash = ObjectHash::from_type_and_data(ObjectType::Blob, data);
         let row = test_object_index_row(hash, data.len() as i64);
@@ -7995,7 +9336,7 @@ mod tests {
         let _repo = enter_isolated_libra_repo().await;
         let remote = RemoteStorage::new(Arc::new(InMemory::new()));
         let local_dir = tempdir().unwrap();
-        let local = LocalStorage::new(local_dir.path().to_path_buf());
+        let local = LocalStorage::try_new(local_dir.path().to_path_buf()).expect("storage");
         let expected_data = b"expected\n";
         let wrong_data = b"wrong\n";
         let expected_hash = ObjectHash::from_type_and_data(ObjectType::Blob, expected_data);
@@ -8034,7 +9375,7 @@ mod tests {
     async fn capture_publication_replaces_and_verifies_corrupt_existing_remote_object() {
         let remote = RemoteStorage::new(Arc::new(InMemory::new()));
         let local_dir = tempdir().expect("create local object directory");
-        let local = LocalStorage::new(local_dir.path().to_path_buf());
+        let local = LocalStorage::try_new(local_dir.path().to_path_buf()).expect("storage");
         let expected = b"validated capture object\n";
         let hash = ObjectHash::from_type_and_data(ObjectType::Blob, expected);
         local
@@ -9504,23 +10845,31 @@ mod tests {
         .await
         .expect("seed aggregate budget fixture");
         let mut remaining = 3_usize;
-        let sessions = load_local_capture_pages(
+        let sessions = load_local_capture_keyset_pages(
             &conn,
-            "SELECT value FROM capture_budget WHERE kind = ? ORDER BY value",
-            vec!["session".into()],
-            "session fixture",
+            &CatalogQuery {
+                label: "session fixture",
+                select: "SELECT value FROM capture_budget",
+                filter: "kind = 'session'",
+                key: &[KeyColumn::Integer("value")],
+            },
             &mut remaining,
+            None,
         )
         .await
         .expect("first table fits shared budget");
         assert_eq!(sessions.len(), 2);
         assert_eq!(remaining, 1);
-        let error = load_local_capture_pages(
+        let error = load_local_capture_keyset_pages(
             &conn,
-            "SELECT value FROM capture_budget WHERE kind = ? ORDER BY value",
-            vec!["checkpoint".into()],
-            "checkpoint fixture",
+            &CatalogQuery {
+                label: "checkpoint fixture",
+                select: "SELECT value FROM capture_budget",
+                filter: "kind = 'checkpoint'",
+                key: &[KeyColumn::Integer("value")],
+            },
             &mut remaining,
+            None,
         )
         .await
         .expect_err("second table must not reset the shared budget");

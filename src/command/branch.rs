@@ -3391,7 +3391,7 @@ fn sort_branch_entries(
             }
             let size = crate::internal::object_format::parse_repo_oid(&entry.commit)
                 .ok()
-                .and_then(|hash| crate::utils::util::objects_storage().get(&hash).ok())
+                .and_then(|hash| crate::utils::util::objects_storage().ok()?.get(&hash).ok())
                 .map(|data| data.len() as i64)
                 .unwrap_or(0);
             map.insert(entry.commit.clone(), size);

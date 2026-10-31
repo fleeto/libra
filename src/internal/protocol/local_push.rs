@@ -51,7 +51,7 @@ pub(crate) async fn apply_local_push_to_libra(
 
     // Object store for the target (path-addressed, never the caller's cwd).
     git_internal::hash::set_hash_kind(hash_kind);
-    let storage = ClientStorage::init_local(objects_dir);
+    let storage = ClientStorage::try_init_local(objects_dir).map_err(|error| error.to_string())?;
     if !dry_run {
         for entry in objs {
             storage

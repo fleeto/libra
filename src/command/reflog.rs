@@ -1224,7 +1224,7 @@ fn generate_diff_sync(commit: &Commit) -> Result<String, Box<dyn std::error::Err
 
     // new_blobs from commit tree
     let tree = load_object::<Tree>(&commit.tree_id)?;
-    let new_blobs: Vec<(std::path::PathBuf, ObjectHash)> = tree.get_plain_items();
+    let new_blobs: Vec<(std::path::PathBuf, ObjectHash)> = tree.get_plain_items()?;
 
     // old_blobs from first parent if exists
     let old_blobs: Vec<(std::path::PathBuf, ObjectHash)> = if !commit.parent_commit_ids.is_empty() {
@@ -1232,7 +1232,7 @@ fn generate_diff_sync(commit: &Commit) -> Result<String, Box<dyn std::error::Err
         let parent_hash = crate::internal::object_format::parse_repo_oid(&parent.to_string())?;
         let parent_commit = load_object::<Commit>(&parent_hash)?;
         let parent_tree = load_object::<Tree>(&parent_commit.tree_id)?;
-        parent_tree.get_plain_items()
+        parent_tree.get_plain_items()?
     } else {
         Vec::new()
     };
@@ -1272,7 +1272,7 @@ fn generate_stat_sync(commit: &Commit) -> Result<String, Box<dyn std::error::Err
 
     // new_blobs from commit tree
     let tree = load_object::<Tree>(&commit.tree_id)?;
-    let new_blobs: Vec<(std::path::PathBuf, ObjectHash)> = tree.get_plain_items();
+    let new_blobs: Vec<(std::path::PathBuf, ObjectHash)> = tree.get_plain_items()?;
 
     // old_blobs from first parent if exists
     let old_blobs: Vec<(std::path::PathBuf, ObjectHash)> = if !commit.parent_commit_ids.is_empty() {
@@ -1280,7 +1280,7 @@ fn generate_stat_sync(commit: &Commit) -> Result<String, Box<dyn std::error::Err
         let parent_hash = crate::internal::object_format::parse_repo_oid(&parent.to_string())?;
         let parent_commit = load_object::<Commit>(&parent_hash)?;
         let parent_tree = load_object::<Tree>(&parent_commit.tree_id)?;
-        parent_tree.get_plain_items()
+        parent_tree.get_plain_items()?
     } else {
         Vec::new()
     };

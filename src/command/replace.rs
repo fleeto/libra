@@ -358,7 +358,7 @@ async fn create(object: &str, replacement: &str, force: bool) -> CliResult<()> {
     }
 
     // Git refuses a cross-type replacement unless forced.
-    let storage = util::objects_storage();
+    let storage = util::objects_storage()?;
     let obj_type = storage
         .get_object_type(&obj)
         .map_err(|error| fatal(format!("cannot read object {obj}: {error}")))?;
@@ -411,7 +411,7 @@ async fn create_graft(object: &str, parents: &[String], force: bool) -> CliResul
     use git_internal::internal::object::{commit::Commit, types::ObjectType};
 
     let obj = resolve_any(object).await?;
-    let storage = util::objects_storage();
+    let storage = util::objects_storage()?;
     if storage
         .get_object_type(&obj)
         .map_err(|error| fatal(format!("cannot read object {obj}: {error}")))?
@@ -511,7 +511,7 @@ fn list(pattern: Option<&str>, format: Option<&str>) -> CliResult<()> {
     }
     names.sort();
     let map = load_replace_map(&dir);
-    let storage = util::objects_storage();
+    let storage = util::objects_storage()?;
     for name in names {
         let Ok(replaced) = crate::internal::object_format::parse_repo_oid(&name) else {
             continue;
@@ -545,7 +545,7 @@ fn list(pattern: Option<&str>, format: Option<&str>) -> CliResult<()> {
 /// that exists, otherwise a commit-ish / ref via `get_commit_base`.
 async fn resolve_any(spec: &str) -> CliResult<ObjectHash> {
     if let Ok(hash) = crate::internal::object_format::parse_repo_oid(spec)
-        && util::objects_storage().get(&hash).is_ok()
+        && util::objects_storage()?.get(&hash).is_ok()
     {
         return Ok(hash);
     }
@@ -739,7 +739,8 @@ mod tests {
         let to = oid(0xef);
         // `resolve_any` accepts a raw oid only when the object exists in
         // THIS repo's store.
-        crate::utils::client_storage::ClientStorage::init(objects)
+        crate::utils::client_storage::ClientStorage::try_init(objects)
+            .expect("storage")
             .put(
                 &from,
                 b"payload",

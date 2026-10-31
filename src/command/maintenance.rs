@@ -363,7 +363,8 @@ async fn run_cache_evict(dry_run: bool) -> CliResult<TaskResult> {
     let budget = crate::utils::client_storage::resolve_cache_config()
         .map_err(|error| CliError::fatal(format!("cannot resolve the cache budget: {error}")))?
         .cache_size_bytes as u64;
-    let storage = crate::utils::client_storage::ClientStorage::init(crate::utils::path::objects());
+    let storage =
+        crate::utils::client_storage::ClientStorage::try_init(crate::utils::path::objects())?;
     let report = storage
         .evict_local(EvictRequest {
             budget_bytes: budget,
@@ -594,7 +595,7 @@ async fn run_gc(
     quiet: bool,
     output: &OutputConfig,
 ) -> CliResult<TaskResult> {
-    let storage = ClientStorage::init(path::objects());
+    let storage = ClientStorage::try_init(path::objects())?;
     // lore.md 2.3 deletion safety: if another repo borrows FROM this store, a
     // prune could delete an object it still needs (this store's reachability
     // does not include the borrower's refs). Refuse to prune loose objects
@@ -1116,7 +1117,7 @@ async fn run_loose_objects(
 
     // Encode the old loose objects into one valid pack via the shared writer.
     let pack_dir = repo_path.join("objects").join("pack");
-    let storage = ClientStorage::init(path::objects());
+    let storage = ClientStorage::try_init(path::objects())?;
     let hashes: Vec<ObjectHash> = old_loose
         .iter()
         .filter_map(|(hash_str, _)| parse_object_hash(hash_str))
@@ -1486,7 +1487,7 @@ async fn run_incremental_repack(
     let publish_lock = crate::internal::maintenance_lock::MaintenanceLock::shared(
         &crate::utils::util::storage_path(),
     )?;
-    let storage = ClientStorage::init(path::objects());
+    let storage = ClientStorage::try_init(path::objects())?;
     let all_hashes: Vec<ObjectHash> = collect_reachable_objects(&storage)
         .await?
         .into_iter()
@@ -4738,7 +4739,7 @@ mod tests {
         ConfigKv::set_with_conn(&conn, "libra.repoid", "gc-private-pending", false)
             .await
             .unwrap();
-        let storage = ClientStorage::init(objects);
+        let storage = ClientStorage::try_init(objects).expect("storage");
         let old_blob =
             Blob::from_content_with_kind(HashKind::Sha1, "old HEAD protected by recovery parent")
                 .unwrap();
@@ -4970,7 +4971,7 @@ mod tests {
 
         use crate::utils::storage::{Storage, local::LocalStorage};
         let objects = root.path().join("objects");
-        let local = std::sync::Arc::new(LocalStorage::new(objects.clone()));
+        let local = std::sync::Arc::new(LocalStorage::try_new(objects.clone()).expect("storage"));
         let blob =
             Blob::from_content_with_kind(HashKind::Sha1, "real GC alias exclusion canary").unwrap();
         local

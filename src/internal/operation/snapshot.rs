@@ -295,10 +295,10 @@ impl WorkspaceSnapshotter {
         let mut untracked = BTreeMap::new();
         let mut reused_index_oid = BTreeSet::new();
         let mut bytes = 0u64;
-        let storage = self
-            .storage
-            .clone()
-            .unwrap_or_else(|| ClientStorage::init_local(self.scope.storage.join("objects")));
+        let storage = match self.storage.clone() {
+            Some(storage) => storage,
+            None => ClientStorage::try_init_local(self.scope.storage.join("objects"))?,
+        };
         let autocrlf = self.autocrlf_enabled().await;
 
         for entry in index.tracked_entries(0) {
@@ -419,10 +419,10 @@ impl WorkspaceSnapshotter {
         // ADR-OI-04: batch the marker publication for all snapshot objects;
         // on error nothing is enqueued (payloads stay stored and a retry
         // re-registers them).
-        let storage = self
-            .storage
-            .clone()
-            .unwrap_or_else(|| ClientStorage::init_local(self.scope.storage.join("objects")));
+        let storage = match self.storage.clone() {
+            Some(storage) => storage,
+            None => ClientStorage::try_init_local(self.scope.storage.join("objects"))?,
+        };
         storage.begin_object_index_batch();
         let result = self.capture_inner().await;
         match result {
@@ -454,10 +454,10 @@ impl WorkspaceSnapshotter {
             Err(error) => return Err(SnapshotError::Index(error.to_string())),
         };
         let scan = self.scan_working_copy_until(deadline).await?;
-        let storage = self
-            .storage
-            .clone()
-            .unwrap_or_else(|| ClientStorage::init_local(self.scope.storage.join("objects")));
+        let storage = match self.storage.clone() {
+            Some(storage) => storage,
+            None => ClientStorage::try_init_local(self.scope.storage.join("objects"))?,
+        };
         let index_bytes = match fs::File::open(&index_path) {
             Ok(file) => {
                 let mut bytes = Vec::new();
@@ -1346,7 +1346,7 @@ mod tests {
         .await
         .expect("set repo id");
         let objects = temp.path().join("objects");
-        let storage = ClientStorage::init_local(objects);
+        let storage = ClientStorage::try_init_local(objects).expect("storage");
         #[cfg(debug_assertions)]
         let before = crate::utils::client_storage::batched_marker_publication_count(&db_path);
         storage.begin_object_index_batch();

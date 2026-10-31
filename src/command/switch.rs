@@ -1661,7 +1661,7 @@ pub(crate) async fn guard_target_tree_case(
         .with_stable_code(StableErrorCode::RepoCorrupt));
     };
     let paths: Vec<String> = tree
-        .get_plain_items()
+        .get_plain_items()?
         .into_iter()
         .map(|(path, _)| crate::utils::util::path_to_string(&path))
         .collect();

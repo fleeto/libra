@@ -2,6 +2,8 @@
 //! and lets operators mark captured sessions stopped/active again without
 //! rewriting provider transcripts. There is no `promote --as-intent`
 //! surface: captured sessions stay on the observation path.
+//! `--show-redacted-prompt` is not a flag. A dry-run cannot print a prompt
+//! body in human output or JSON, because that subcommand is not restored.
 
 use std::{
     io::{Read, Write},

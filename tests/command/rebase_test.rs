@@ -589,6 +589,7 @@ fn test_rebase_preserves_executable_mode_in_rewritten_commit() {
     let tree: Tree = load_object(&commit.tree_id).expect("load rebased tree");
     let script_mode = tree
         .get_plain_items_with_mode()
+        .expect("storage")
         .into_iter()
         .find_map(|(path, _hash, mode)| (path == Path::new("script.sh")).then_some(mode))
         .expect("rebased tree should contain script.sh");

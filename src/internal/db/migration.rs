@@ -646,25 +646,85 @@ fn agent_kind_check_spec(version: i64) -> Option<&'static AgentKindCheckSpec> {
     }
 }
 
-/// Rebuild `agent_session`'s CHECK on a connection that is not returned to
-/// the caller's pool while `foreign_keys` is off.
+/// The database an agent_kind CHECK migration rebuilds, for recovery text.
+#[derive(Clone)]
+enum CheckDatabase {
+    File(std::path::PathBuf),
+    Memory,
+}
+
+impl CheckDatabase {
+    /// How to inspect the database: the `sqlite3` command for its resolved
+    /// file (the repository may have been opened from a subdirectory), or
+    /// what to do for an in-memory database.
+    fn check_with(&self, pragmas: &str) -> String {
+        match self {
+            // Quoted for the platform's shell: Windows paths cannot contain
+            // `"`; POSIX single quotes escape everything but `'` itself.
+            CheckDatabase::File(path) if cfg!(windows) => format!(
+                "check the database with `sqlite3 \"{}\" \"{pragmas}\"`",
+                path.display()
+            ),
+            CheckDatabase::File(path) => format!(
+                "check the database with `sqlite3 '{}' '{pragmas}'`",
+                path.display().to_string().replace('\'', "'\\''")
+            ),
+            CheckDatabase::Memory => {
+                "the in-memory database's connection was discarded; recreate that database"
+                    .to_string()
+            }
+        }
+    }
+}
+
+/// Rebuild `agent_session`'s CHECK while no other user of a pool can receive
+/// a connection with `foreign_keys` off (ADR-CAP-CHECK, PI-07).
 ///
 /// `expand` records the receipt and adds `spec.marker`. The reverse refuses
 /// while any row uses that marker, keeps those rows, and otherwise restores
-/// the previous CHECK. File databases use a dedicated connection that is
-/// always closed here. In-memory databases have no second file to open, so
-/// the caller's single connection is used and `foreign_keys` is restored
-/// before return; a failed restore closes that connection.
+/// the previous CHECK. A file database is rebuilt on a private pool of one
+/// connection that is always closed here. An in-memory database has no
+/// second file to open: the caller's single connection is held for the
+/// whole rebuild, which runs as its own task so that a cancelled caller
+/// cannot stop it midway.
 async fn apply_agent_kind_check_dedicated(
     caller: &DatabaseConnection,
     spec: &AgentKindCheckSpec,
     expand: bool,
 ) -> Result<bool, MigrationError> {
-    let Some(path) = sqlite_database_file(caller).await else {
-        return apply_agent_kind_check_on(caller, spec, expand).await;
+    if caller.get_database_backend() != sea_orm::DbBackend::Sqlite {
+        return Err(MigrationError::Other(anyhow::anyhow!(
+            "the agent_kind {} CHECK migration needs a SQLite repository database; nothing was changed",
+            spec.marker
+        )));
+    }
+    let Some(path) = sqlite_database_file(caller).await? else {
+        // INVARIANT: the backend was checked to be SQLite above, so this
+        // pool lookup cannot panic.
+        let pool = caller.get_sqlite_connection_pool().clone();
+        let spec = *spec;
+        return tokio::spawn(async move {
+            apply_agent_kind_check_on(&pool, &spec, expand, CheckDatabase::Memory).await
+        })
+        .await
+        .map_err(|error| {
+            MigrationError::Other(anyhow::anyhow!(
+                "the agent_kind {} CHECK migration task stopped unexpectedly: {error}",
+                spec.marker
+            ))
+        })?;
     };
     let dedicated = open_dedicated_check_connection(&path).await?;
-    let result = apply_agent_kind_check_on(&dedicated, spec, expand).await;
+    // A cancelled migration drops `dedicated` and its held connection with
+    // it: the connection is closed, never handed to anyone with foreign_keys
+    // off. INVARIANT: the dedicated connection is always SQLite.
+    let result = apply_agent_kind_check_on(
+        dedicated.get_sqlite_connection_pool(),
+        spec,
+        expand,
+        CheckDatabase::File(path.clone()),
+    )
+    .await;
     let close_error = dedicated.close().await.err();
     match (result, close_error) {
         (Ok(applied), None) => Ok(applied),
@@ -673,9 +733,11 @@ async fn apply_agent_kind_check_dedicated(
             // dedicated pool failed after that; the caller's pool never saw
             // foreign_keys=OFF. Report the close so the operator can reopen.
             Err(MigrationError::Other(anyhow::anyhow!(
-                "agent_kind {} CHECK migration committed on '{}', but closing the dedicated connection failed: {error}. Reopen the repository and run 'libra doctor'; do not retry by editing schema_versions",
+                "agent_kind {} CHECK migration committed on '{}', but closing the dedicated connection failed: {error}. Reopen the repository; if it does not open, {} and restore it from a backup if either reports a problem. Do not retry by editing schema_versions",
                 spec.marker,
-                path.display()
+                path.display(),
+                CheckDatabase::File(path.clone())
+                    .check_with("PRAGMA foreign_key_check; PRAGMA integrity_check;")
             )))
         }
         (Err(error), _) => Err(error),
@@ -717,10 +779,325 @@ async fn open_dedicated_check_connection(
     })
 }
 
+/// Test-only marker table: a database that has it arms the agent_kind CHECK
+/// rebuild's failpoints, so a failpoint set for one test database never
+/// fires for another (PI-07).
+const AGENT_KIND_CHECK_FAILPOINT_TABLE: &str = "libra_test_agent_kind_check_failpoints";
+
+/// Whether the failpoints are armed for this rebuild: only with
+/// `LIBRA_TEST=1` and only for a database carrying
+/// [`AGENT_KIND_CHECK_FAILPOINT_TABLE`]. Production runs never have both.
+fn agent_kind_check_failpoints_requested() -> bool {
+    std::env::var("LIBRA_TEST").as_deref() == Ok("1")
+}
+
+/// Whether `conn`'s database arms the failpoints.
+async fn agent_kind_check_failpoints_armed(conn: &DatabaseConnection) -> bool {
+    agent_kind_check_failpoints_requested()
+        && conn
+            .query_one_raw(Statement::from_sql_and_values(
+                conn.get_database_backend(),
+                "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = ?",
+                [AGENT_KIND_CHECK_FAILPOINT_TABLE.into()],
+            ))
+            .await
+            .is_ok_and(|row| row.is_some())
+}
+
+/// Test-only failpoints of the agent_kind CHECK rebuild (PI-07), consulted
+/// only when armed (see [`agent_kind_check_failpoints_armed`]); production
+/// runs never consult these variables.
+/// `LIBRA_TEST_AGENT_KIND_CHECK_FAIL_AT=<stage>[,<stage>...]` fails the
+/// rebuild at each listed stage, `..._ABORT_AT=<stage>` aborts the process there (a crash), and
+/// `..._PAUSE_AT=<stage>` writes `<..._RESUME_FILE>.paused` and waits (at
+/// most two minutes) until `..._RESUME_FILE` exists, and
+/// `..._SIGNAL_AT=<stage>` writes `..._SIGNAL_FILE` and goes on.
+/// Stages, in order: `lookup` (finding the database file), `foreign_keys`
+/// (reading and turning it off), `foreign_keys_off` (a failure there stands
+/// for foreign_keys reading back as still on), `begin` (a failure there stands for a failed
+/// BEGIN); in the transaction `claiming` (before the receipt claim), `claimed`, `created`,
+/// `copied`, `dropped`, `renamed`, `restored`, `verified`; `commit` and
+/// `rollback` (a failure there stands for a failed COMMIT or ROLLBACK); after
+/// the commit `committed`; and `restore` (a failure there stands for
+/// foreign_keys not being restored).
+async fn run_agent_kind_check_failpoint(stage: &str) -> Result<(), DbErr> {
+    if std::env::var("LIBRA_TEST_AGENT_KIND_CHECK_SIGNAL_AT").as_deref() == Ok(stage)
+        && let Ok(signal) = std::env::var("LIBRA_TEST_AGENT_KIND_CHECK_SIGNAL_FILE")
+    {
+        let _ = std::fs::write(signal, stage);
+    }
+    if std::env::var("LIBRA_TEST_AGENT_KIND_CHECK_ABORT_AT").as_deref() == Ok(stage) {
+        std::process::abort();
+    }
+    if std::env::var("LIBRA_TEST_AGENT_KIND_CHECK_PAUSE_AT").as_deref() == Ok(stage)
+        && let Ok(resume) = std::env::var("LIBRA_TEST_AGENT_KIND_CHECK_RESUME_FILE")
+    {
+        let resume = std::path::PathBuf::from(resume);
+        let mut paused = resume.clone().into_os_string();
+        paused.push(".paused");
+        let _ = std::fs::write(&paused, stage);
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(120);
+        while !resume.exists() && std::time::Instant::now() < deadline {
+            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        }
+    }
+    if std::env::var("LIBRA_TEST_AGENT_KIND_CHECK_FAIL_AT")
+        .is_ok_and(|stages| stages.split(',').any(|listed| listed == stage))
+    {
+        return Err(DbErr::Custom(format!(
+            "injected agent_kind CHECK failure at {stage}"
+        )));
+    }
+    Ok(())
+}
+
+/// A database error's text, without the `Custom Error:` label of the
+/// messages this migration writes itself.
+fn db_error_text(error: &DbErr) -> String {
+    match error {
+        DbErr::Custom(message) => message.clone(),
+        other => other.to_string(),
+    }
+}
+
+/// One SQLite connection held for the whole agent_kind CHECK rebuild
+/// (PI-07): from turning `foreign_keys` off until it is restored, no other
+/// user of its pool can receive it. Unless [`Self::release`] hands it back
+/// (foreign_keys restored, no transaction open), it is closed when dropped
+/// — after a failure, a cancellation or a panic — rather than returned.
+struct HeldCheckConnection {
+    conn: Option<sea_orm::sqlx::pool::PoolConnection<sea_orm::sqlx::Sqlite>>,
+    /// Whether this database arms the test failpoints.
+    failpoints: bool,
+}
+
+fn sqlx_error(error: sea_orm::sqlx::Error) -> DbErr {
+    DbErr::Custom(error.to_string())
+}
+
+/// SQL of the CHECK rebuild: fixed text, or text built from identifiers
+/// `safe_sql_ident` accepted and DDL read from `sqlite_master`.
+fn checked_sql(sql: impl AsRef<str>) -> sea_orm::sqlx::AssertSqlSafe<String> {
+    sea_orm::sqlx::AssertSqlSafe(sql.as_ref().to_owned())
+}
+
+impl HeldCheckConnection {
+    async fn acquire(pool: &sea_orm::sqlx::SqlitePool) -> Result<Self, MigrationError> {
+        let conn = pool.acquire().await.map_err(|error| {
+            MigrationError::Other(anyhow::anyhow!(
+                "could not get a connection for the agent_kind CHECK migration ({error}); nothing was changed. Reopen the repository to retry"
+            ))
+        })?;
+        let mut held = Self {
+            conn: Some(conn),
+            failpoints: false,
+        };
+        held.failpoints = agent_kind_check_failpoints_requested()
+            && held
+                .count(format!(
+                    "SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name = '{AGENT_KIND_CHECK_FAILPOINT_TABLE}'"
+                ))
+                .await
+                .is_ok_and(|tables| tables > 0);
+        Ok(held)
+    }
+
+    /// The test failpoint at `stage`, when this database arms them.
+    async fn failpoint(&self, stage: &str) -> Result<(), DbErr> {
+        if self.failpoints {
+            run_agent_kind_check_failpoint(stage).await
+        } else {
+            Ok(())
+        }
+    }
+
+    fn connection(&mut self) -> Result<&mut sea_orm::sqlx::SqliteConnection, DbErr> {
+        self.conn.as_deref_mut().ok_or_else(|| {
+            DbErr::Custom("the agent_kind CHECK migration connection was released".to_string())
+        })
+    }
+
+    async fn execute(&mut self, sql: impl AsRef<str>) -> Result<u64, DbErr> {
+        sea_orm::sqlx::query(checked_sql(sql))
+            .execute(self.connection()?)
+            .await
+            .map(|done| done.rows_affected())
+            .map_err(sqlx_error)
+    }
+
+    async fn count(&mut self, sql: impl AsRef<str>) -> Result<i64, DbErr> {
+        sea_orm::sqlx::query_scalar::<_, i64>(checked_sql(sql))
+            .fetch_one(self.connection()?)
+            .await
+            .map_err(sqlx_error)
+    }
+
+    async fn texts(&mut self, sql: impl AsRef<str>) -> Result<Vec<String>, DbErr> {
+        sea_orm::sqlx::query_scalar::<_, String>(checked_sql(sql))
+            .fetch_all(self.connection()?)
+            .await
+            .map_err(sqlx_error)
+    }
+
+    async fn optional_text(&mut self, sql: impl AsRef<str>) -> Result<Option<String>, DbErr> {
+        sea_orm::sqlx::query_scalar::<_, String>(checked_sql(sql))
+            .fetch_optional(self.connection()?)
+            .await
+            .map_err(sqlx_error)
+    }
+
+    async fn foreign_keys(&mut self) -> Result<i64, DbErr> {
+        self.count("PRAGMA foreign_keys").await
+    }
+
+    async fn set_foreign_keys(&mut self, enabled: bool) -> Result<(), DbErr> {
+        self.execute(if enabled {
+            "PRAGMA foreign_keys = ON"
+        } else {
+            "PRAGMA foreign_keys = OFF"
+        })
+        .await
+        .map(|_| ())
+    }
+
+    /// Claim the receipt: whether this call recorded it.
+    async fn claim_receipt(&mut self, spec: &AgentKindCheckSpec) -> Result<bool, DbErr> {
+        sea_orm::sqlx::query(
+            "INSERT OR IGNORE INTO schema_versions (version, name, applied_at) VALUES (?, ?, ?)",
+        )
+        .bind(spec.version)
+        .bind(spec.receipt_name)
+        .bind(Utc::now().to_rfc3339())
+        .execute(self.connection()?)
+        .await
+        .map(|done| done.rows_affected() > 0)
+        .map_err(sqlx_error)
+    }
+
+    /// Give up the receipt: whether this call removed it.
+    async fn drop_receipt(&mut self, version: i64) -> Result<bool, DbErr> {
+        sea_orm::sqlx::query("DELETE FROM schema_versions WHERE version = ?")
+            .bind(version)
+            .execute(self.connection()?)
+            .await
+            .map(|done| done.rows_affected() > 0)
+            .map_err(sqlx_error)
+    }
+
+    /// Hand the connection back to its pool.
+    fn release(mut self) {
+        drop(self.conn.take());
+    }
+}
+
+impl Drop for HeldCheckConnection {
+    fn drop(&mut self) {
+        if let Some(conn) = self.conn.as_mut() {
+            conn.close_on_drop();
+        }
+    }
+}
+
+/// `PRAGMA foreign_key_check` and `PRAGMA integrity_check`; the first
+/// problem found, if any.
+async fn foreign_key_and_integrity_problem(
+    held: &mut HeldCheckConnection,
+) -> Result<Option<String>, DbErr> {
+    // Counted in SQL: a damaged repository's violations are never loaded.
+    let violations = held
+        .count("SELECT COUNT(*) FROM pragma_foreign_key_check")
+        .await?;
+    if violations > 0 {
+        return Ok(Some(format!(
+            "PRAGMA foreign_key_check reported {violations} violation(s)"
+        )));
+    }
+    let integrity = held.optional_text("PRAGMA integrity_check").await?;
+    if integrity.as_deref() != Some("ok") {
+        return Ok(Some(format!(
+            "PRAGMA integrity_check failed: {}",
+            integrity.unwrap_or_else(|| "<no row>".to_string())
+        )));
+    }
+    Ok(None)
+}
+
+/// After the commit, with foreign_keys ON on the migration connection: the
+/// repository must pass `foreign_key_check` and `integrity_check` (PI-07).
+async fn verify_committed_check(held: &mut HeldCheckConnection) -> Result<(), String> {
+    held.failpoint("committed")
+        .await
+        .map_err(|error| db_error_text(&error))?;
+    held.set_foreign_keys(true)
+        .await
+        .map_err(|error| db_error_text(&error))?;
+    if held
+        .foreign_keys()
+        .await
+        .map_err(|error| db_error_text(&error))?
+        != 1
+    {
+        return Err("foreign_keys could not be turned on to check the result".to_string());
+    }
+    match foreign_key_and_integrity_problem(held).await {
+        Ok(None) => Ok(()),
+        Ok(Some(problem)) => Err(problem),
+        Err(error) => Err(db_error_text(&error)),
+    }
+}
+
+/// How the rebuild's transaction ended.
+enum CheckTransactionOutcome {
+    /// Committed; whether this call owned the receipt.
+    Committed(bool),
+    /// The transaction did not start: nothing changed.
+    NotStarted(DbErr),
+    /// Rolled back: nothing changed.
+    RolledBack(DbErr),
+    /// The commit or the rollback itself failed.
+    Unknown(String),
+}
+
+/// Inside the transaction: claim (or give up) the receipt, then rebuild.
+async fn claim_and_rebuild(
+    held: &mut HeldCheckConnection,
+    spec: AgentKindCheckSpec,
+    expand: bool,
+) -> Result<bool, DbErr> {
+    held.failpoint("claiming").await?;
+    let marker = spec.marker;
+    let owned = if expand {
+        held.claim_receipt(&spec).await?
+    } else {
+        let marker_rows = held
+            .count(format!(
+                "SELECT COUNT(*) FROM agent_session WHERE agent_kind = '{marker}'"
+            ))
+            .await?;
+        if marker_rows > 0 {
+            return Err(DbErr::Custom(format!(
+                "cannot roll back agent_kind {marker}: {marker_rows} agent_session row(s) use agent_kind '{marker}' and were kept. Delete or migrate those rows before rolling back"
+            )));
+        }
+        held.drop_receipt(spec.version).await?
+    };
+    if !owned {
+        return Ok(false);
+    }
+    held.failpoint("claimed").await?;
+    rebuild_agent_kind_check(held, spec, expand).await?;
+    Ok(true)
+}
+
+/// Rebuild `agent_session`'s CHECK on one connection held from `pool` for
+/// the whole sequence, with foreign_keys off for the transaction and
+/// restored before the connection is handed back. A connection whose state
+/// is uncertain is closed instead.
 async fn apply_agent_kind_check_on(
-    conn: &DatabaseConnection,
+    pool: &sea_orm::sqlx::SqlitePool,
     spec: &AgentKindCheckSpec,
     expand: bool,
+    database: CheckDatabase,
 ) -> Result<bool, MigrationError> {
     if !safe_sql_ident(spec.marker) || !safe_sql_ident(spec.staging) {
         return Err(MigrationError::Other(anyhow::anyhow!(
@@ -729,144 +1106,313 @@ async fn apply_agent_kind_check_on(
             spec.staging
         )));
     }
-    let previous = pragma_foreign_keys(conn).await?;
-    set_foreign_keys(conn, false).await?;
-    let disabled = pragma_foreign_keys(conn).await?;
-    if disabled != 0 {
-        let _ = set_foreign_keys(conn, previous != 0).await;
-        return Err(MigrationError::Other(anyhow::anyhow!(
-            "could not turn foreign_keys off before rebuilding agent_session; the CHECK was not changed"
-        )));
-    }
+    let mut held = HeldCheckConnection::acquire(pool).await?;
     let spec = *spec;
     let marker = spec.marker;
-    let version = spec.version;
-    let receipt_name = spec.receipt_name;
-    let result = conn
-        .transaction::<_, _, DbErr>(|txn| {
-            Box::pin(async move {
-                let backend = txn.get_database_backend();
-                if expand {
-                    txn.execute_raw(Statement::from_sql_and_values(
-                        backend,
-                        "INSERT OR IGNORE INTO schema_versions (version, name, applied_at) VALUES (?, ?, ?)",
-                        [
-                            version.into(),
-                            receipt_name.into(),
-                            Utc::now().to_rfc3339().into(),
-                        ],
-                    ))
-                    .await?;
-                    if changes(txn).await? == 0 {
-                        return Ok::<bool, DbErr>(false);
-                    }
-                    rebuild_agent_kind_check(txn, spec, true).await?;
-                    Ok(true)
-                } else {
-                    let marker_rows = count_matching(
-                        txn,
-                        &format!(
-                            "SELECT COUNT(*) FROM agent_session WHERE agent_kind = '{marker}'"
-                        ),
-                    )
-                    .await?;
-                    if marker_rows > 0 {
-                        return Err(DbErr::Custom(format!(
-                            "cannot roll back agent_kind {marker}: {marker_rows} agent_session row(s) use agent_kind '{marker}' and were kept. Delete or migrate those rows before rolling back"
-                        )));
-                    }
-                    txn.execute_raw(Statement::from_sql_and_values(
-                        backend,
-                        "DELETE FROM schema_versions WHERE version = ?",
-                        [version.into()],
-                    ))
-                    .await?;
-                    if changes(txn).await? == 0 {
-                        return Ok::<bool, DbErr>(false);
-                    }
-                    rebuild_agent_kind_check(txn, spec, false).await?;
-                    Ok(true)
+    // Every early return below drops `held`, which closes the connection.
+    let setup_failed = |error: DbErr| {
+        MigrationError::Other(anyhow::anyhow!(
+            "agent_kind {} CHECK migration could not read or turn off foreign_keys on its connection ({}); nothing was changed and the connection was closed. Reopen the repository to retry; if this keeps failing, {}",
+            spec.marker,
+            db_error_text(&error),
+            database.check_with("PRAGMA integrity_check;")
+        ))
+    };
+    held.failpoint("foreign_keys").await.map_err(setup_failed)?;
+    let previous = held.foreign_keys().await.map_err(setup_failed)?;
+    held.set_foreign_keys(false).await.map_err(setup_failed)?;
+    // A failpoint here stands for foreign_keys reading back as still on.
+    let still_on = held.failpoint("foreign_keys_off").await.is_err()
+        || held.foreign_keys().await.map_err(setup_failed)? != 0;
+    if still_on {
+        // A failed migration never hands its connection back: `held` is
+        // closed when this returns.
+        return Err(MigrationError::Other(anyhow::anyhow!(
+            "could not turn foreign_keys off before rebuilding agent_session; the CHECK was not changed and the connection was closed. Reopen the repository to retry"
+        )));
+    }
+    let began = match held.failpoint("begin").await {
+        Ok(()) => held.execute("BEGIN").await.map(|_| ()),
+        Err(error) => Err(error),
+    };
+    let outcome = match began {
+        Err(error) => CheckTransactionOutcome::NotStarted(error),
+        Ok(_) => match claim_and_rebuild(&mut held, spec, expand).await {
+            Ok(applied) => {
+                let committed = match held.failpoint("commit").await {
+                    Ok(()) => held.execute("COMMIT").await.map(|_| ()),
+                    Err(error) => Err(error),
+                };
+                match committed {
+                    Ok(()) => CheckTransactionOutcome::Committed(applied),
+                    Err(error) => CheckTransactionOutcome::Unknown(format!(
+                        "its commit failed: {}",
+                        db_error_text(&error)
+                    )),
                 }
+            }
+            Err(error) => {
+                let rolled_back = match held.failpoint("rollback").await {
+                    Ok(()) => held.execute("ROLLBACK").await.map(|_| ()),
+                    Err(rollback_error) => Err(rollback_error),
+                };
+                match rolled_back {
+                    Ok(()) => CheckTransactionOutcome::RolledBack(error),
+                    Err(rollback_error) => CheckTransactionOutcome::Unknown(format!(
+                        "{}, and then its rollback failed: {}",
+                        db_error_text(&error),
+                        db_error_text(&rollback_error)
+                    )),
+                }
+            }
+        },
+    };
+    // Every committed outcome is checked with foreign_keys ON — also a lost
+    // claim, whose receipt another process recorded: this open succeeds only
+    // over a database that passes both checks.
+    let verified = match outcome {
+        CheckTransactionOutcome::Committed(_) => Some(verify_committed_check(&mut held).await),
+        _ => None,
+    };
+    // A connection whose transaction state is unknown is never restored and
+    // handed back: it is closed with whatever it holds.
+    // A failpoint at `restore` stands for a failed restore or readback.
+    let restored = !matches!(outcome, CheckTransactionOutcome::Unknown(_))
+        && held.failpoint("restore").await.is_ok()
+        && held.set_foreign_keys(previous != 0).await.is_ok()
+        && held
+            .foreign_keys()
+            .await
+            .is_ok_and(|value| value == previous);
+    let result = match (outcome, verified) {
+        (CheckTransactionOutcome::Committed(false), Some(Err(problem))) => {
+            Err(MigrationError::Other(anyhow::anyhow!(
+                "agent_kind {marker} CHECK migration was already recorded by another process, but the check with foreign_keys=ON afterwards failed: {problem}. To recover, {}, repair or remove the rows it reports (or restore the database from a backup), then reopen the repository; do not edit schema_versions to retry",
+                database.check_with("PRAGMA foreign_key_check; PRAGMA integrity_check;")
+            )))
+        }
+        (CheckTransactionOutcome::Committed(true), Some(Err(problem))) => {
+            Err(MigrationError::Other(anyhow::anyhow!(
+                "agent_kind {marker} CHECK migration committed and was not rolled back, but the check with foreign_keys=ON afterwards failed: {problem}. To recover, {}, repair or remove the rows it reports (or restore the database from a backup), then reopen the repository; do not edit schema_versions to retry",
+                database.check_with("PRAGMA foreign_key_check; PRAGMA integrity_check;")
+            )))
+        }
+        (CheckTransactionOutcome::Committed(applied), _) if restored => Ok(applied),
+        (CheckTransactionOutcome::Committed(applied), _) => {
+            Err(MigrationError::Other(anyhow::anyhow!(
+                "agent_kind {marker} CHECK migration {} (it was not rolled back), but foreign_keys could not be restored on its connection, which was closed instead of being returned. Reopen the repository to continue; to verify the database, {}",
+                if applied {
+                    "committed"
+                } else {
+                    "was already recorded by another process"
+                },
+                database.check_with("PRAGMA foreign_key_check; PRAGMA integrity_check;")
+            )))
+        }
+        (CheckTransactionOutcome::NotStarted(error), _) => {
+            Err(MigrationError::Other(anyhow::anyhow!(
+                "agent_kind {marker} CHECK migration could not start its transaction ({}); nothing was changed and the connection was closed. Reopen the repository to retry",
+                db_error_text(&error)
+            )))
+        }
+        (CheckTransactionOutcome::RolledBack(error), _) if restored => {
+            Err(MigrationError::Other(anyhow::anyhow!(
+                "agent_kind {marker} CHECK migration was rolled back and changed nothing (the CHECK and its schema_versions receipt are as before): {}. Fix the cause, then reopen the repository to retry",
+                db_error_text(&error)
+            )))
+        }
+        (CheckTransactionOutcome::RolledBack(error), _) => {
+            Err(MigrationError::Other(anyhow::anyhow!(
+                "agent_kind {marker} CHECK migration was rolled back and changed nothing ({}), but foreign_keys could not be restored on its connection, which was closed instead of being returned. Fix the cause, then reopen the repository to retry; if it does not open, {}",
+                db_error_text(&error),
+                database.check_with("PRAGMA foreign_key_check; PRAGMA integrity_check;")
+            )))
+        }
+        (CheckTransactionOutcome::Unknown(detail), _) => {
+            Err(MigrationError::Other(anyhow::anyhow!(
+                "agent_kind {marker} CHECK migration ended with an unknown outcome ({detail}); its connection was closed. Reopen the repository: the migration runs again if its schema_versions receipt was not recorded. If the repository does not open, {} and restore it from a backup if either reports a problem",
+                database.check_with("PRAGMA foreign_key_check; PRAGMA integrity_check;")
+            )))
+        }
+    };
+    // Only a migration that succeeded hands its connection back; any failure
+    // closes it (for an in-memory database, which exists only in tests, its
+    // only connection and so the database itself).
+    if restored && result.is_ok() {
+        held.release();
+    }
+    result
+}
+
+/// A schema object that depends on agent_session — directly, or through a
+/// view that does — and so is dropped before the table rebuild and created
+/// again from the same SQL after it (PI-07).
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct SchemaDependent {
+    kind: String,
+    name: String,
+    sql: String,
+}
+
+/// Whether `sql` names `name` as a whole identifier (bare or with quotes
+/// doubled inside a quoted name), ignoring case.
+fn names_schema_object(sql: &str, name: &str) -> bool {
+    let sql = sql.to_ascii_lowercase();
+    let is_ident = |byte: u8| byte.is_ascii_alphanumeric() || byte == b'_';
+    let name = name.to_ascii_lowercase();
+    [name.clone(), name.replace('"', "\"\"")]
+        .iter()
+        .any(|form| {
+            sql.match_indices(form.as_str()).any(|(at, _)| {
+                let before = at.checked_sub(1).map(|i| sql.as_bytes()[i]);
+                let after = sql.as_bytes().get(at + form.len()).copied();
+                !before.is_some_and(is_ident) && !after.is_some_and(is_ident)
             })
         })
-        .await
-        .map_err(|err| match err {
-            sea_orm::TransactionError::Connection(db) => MigrationError::Database(db),
-            sea_orm::TransactionError::Transaction(db) => MigrationError::Database(db),
-        });
-    let restored = set_foreign_keys(conn, previous != 0).await;
-    let after = pragma_foreign_keys(conn).await;
-    match (result, restored, after) {
-        (Ok(applied), Ok(()), Ok(value)) if value == previous => Ok(applied),
-        (Ok(_), _, _) => {
-            let _ = conn.clone().close().await;
-            Err(MigrationError::Other(anyhow::anyhow!(
-                "agent_kind {marker} CHECK migration committed, but foreign_keys could not be restored on this connection. The connection was closed; reopen the database and verify with PRAGMA foreign_key_check and PRAGMA integrity_check"
-            )))
-        }
-        (Err(error), Ok(()), Ok(value)) if value == previous => Err(error),
-        (Err(error), _, _) => {
-            let _ = conn.clone().close().await;
-            Err(MigrationError::Other(anyhow::anyhow!(
-                "agent_kind {marker} CHECK migration failed ({error}) and foreign_keys could not be restored. The connection was closed and was not returned to the pool"
-            )))
+}
+
+/// Every view naming agent_session or a view already found (in dependency
+/// order: each after the views it names), every trigger on or naming any of
+/// those, and the indexes on agent_session.
+async fn agent_session_dependents(
+    held: &mut HeldCheckConnection,
+) -> Result<Vec<SchemaDependent>, DbErr> {
+    let rows = held
+        .texts(
+            "SELECT type || char(31) || name || char(31) || tbl_name || char(31) || sql FROM sqlite_master WHERE sql IS NOT NULL AND name != 'agent_session' AND type IN ('index', 'trigger', 'view') ORDER BY type, name",
+        )
+        .await?;
+    let mut objects = Vec::with_capacity(rows.len());
+    for row in rows {
+        let mut fields = row.splitn(4, '\u{1f}');
+        match (fields.next(), fields.next(), fields.next(), fields.next()) {
+            (Some(kind), Some(name), Some(table), Some(sql)) => objects.push((
+                SchemaDependent {
+                    kind: kind.to_string(),
+                    name: name.to_string(),
+                    sql: sql.to_string(),
+                },
+                table.to_string(),
+            )),
+            _ => {
+                return Err(DbErr::Custom(
+                    "a schema object naming agent_session could not be read".to_string(),
+                ));
+            }
         }
     }
+    let mut names = vec!["agent_session".to_string()];
+    let mut dependents: Vec<SchemaDependent> = Vec::new();
+    loop {
+        let found: Vec<SchemaDependent> = objects
+            .iter()
+            .filter(|(object, _)| {
+                object.kind == "view"
+                    && !dependents.iter().any(|known| known.name == object.name)
+                    && names
+                        .iter()
+                        .any(|name| names_schema_object(&object.sql, name))
+            })
+            .map(|(object, _)| object.clone())
+            .collect();
+        if found.is_empty() {
+            break;
+        }
+        names.extend(found.iter().map(|view| view.name.clone()));
+        dependents.extend(found);
+    }
+    for (object, table) in &objects {
+        let on_dependent = names.iter().any(|name| name.eq_ignore_ascii_case(table));
+        let wanted = match object.kind.as_str() {
+            "index" => table.eq_ignore_ascii_case("agent_session"),
+            "trigger" => {
+                on_dependent
+                    || names
+                        .iter()
+                        .any(|name| names_schema_object(&object.sql, name))
+            }
+            _ => false,
+        };
+        if wanted {
+            dependents.push(object.clone());
+        }
+    }
+    Ok(dependents)
+}
+
+/// `name` as a quoted SQL identifier: any name SQLite accepted.
+fn quote_ident(name: &str) -> String {
+    format!("\"{}\"", name.replace('"', "\"\""))
+}
+
+/// SQL that drops `object`, its name quoted.
+fn drop_schema_object(object: &SchemaDependent) -> String {
+    format!(
+        "DROP {} {}",
+        object.kind.to_ascii_uppercase(),
+        quote_ident(&object.name)
+    )
 }
 
 async fn rebuild_agent_kind_check(
-    txn: &sea_orm::DatabaseTransaction,
+    held: &mut HeldCheckConnection,
     spec: AgentKindCheckSpec,
     expand: bool,
 ) -> Result<(), DbErr> {
-    let backend = txn.get_database_backend();
-    let create = query_optional_text(
-        txn,
-        "SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'agent_session'",
-    )
-    .await?;
+    let create = held
+        .optional_text(
+            "SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'agent_session'",
+        )
+        .await?;
     let Some(create) = create else {
         return Err(DbErr::Custom(
             "agent_session is missing; apply the agent capture migration before extending its CHECK"
                 .to_string(),
         ));
     };
-    let values = if expand {
-        spec.with_values
+    let (values, source) = if expand {
+        (spec.with_values, spec.without_values)
     } else {
-        spec.without_values
+        (spec.without_values, spec.with_values)
     };
-    let marker_token = format!("'{}'", spec.marker);
-    let already = create.contains(&marker_token);
-    if expand && already {
+    // The DDL pre-image: the list is already the target (nothing to do), or
+    // exactly the reviewed previous set; anything else is refused unchanged.
+    let found = agent_kind_check(&create).map_err(DbErr::Custom)?.values;
+    if same_kinds(&found, values) {
+        // Nothing to rebuild, but the receipt this transaction claimed is
+        // still recorded only over a database that passes both checks.
+        if let Some(problem) = foreign_key_and_integrity_problem(held).await? {
+            return Err(DbErr::Custom(format!(
+                "{problem} before recording the receipt; the transaction will roll back"
+            )));
+        }
         return Ok(());
     }
-    if !expand && !already {
-        return Ok(());
+    if !same_kinds(&found, source) {
+        return Err(DbErr::Custom(format!(
+            "agent_session's agent_kind CHECK is not the reviewed set this migration replaces (expected {}, found {}); the CHECK was not changed. Restore the repository's reviewed schema, for example from a backup, before retrying",
+            source.join(", "),
+            found.join(", ")
+        )));
     }
-    let session_count = count_matching(txn, "SELECT COUNT(*) FROM agent_session").await?;
-    let child_tables = query_text_list(
-        txn,
-        "SELECT name FROM sqlite_master WHERE type = 'table' AND name != 'agent_session' AND sql LIKE '%agent_session%' ORDER BY name",
+    let session_count = held.count("SELECT COUNT(*) FROM agent_session").await?;
+    let child_tables = held.texts("SELECT name FROM sqlite_master WHERE type = 'table' AND name != 'agent_session' AND sql LIKE '%agent_session%' ORDER BY name",
     )
     .await?;
     let mut child_counts = Vec::with_capacity(child_tables.len());
     for name in &child_tables {
-        if !safe_sql_ident(name) {
-            return Err(DbErr::Custom(format!(
-                "refusing to rebuild agent_session: related table name '{name}' is not a plain identifier"
-            )));
-        }
-        let count = count_matching(txn, &format!("SELECT COUNT(*) FROM `{name}`")).await?;
+        // Any name SQLite accepted, quoted.
+        let count = held
+            .count(&format!("SELECT COUNT(*) FROM {}", quote_ident(name)))
+            .await?;
         child_counts.push((name.clone(), count));
     }
-    let dependents = query_text_list(
-        txn,
-        "SELECT sql FROM sqlite_master WHERE tbl_name = 'agent_session' AND sql IS NOT NULL AND type IN ('index', 'trigger') ORDER BY type, name",
-    )
-    .await?;
-    let columns =
-        query_text_list(txn, "SELECT name FROM pragma_table_info('agent_session')").await?;
+    // Every index, trigger and view that depends on agent_session, as it
+    // must be again after the rebuild.
+    let dependents = agent_session_dependents(held).await?;
+    let columns = held
+        .texts("SELECT name FROM pragma_table_info('agent_session')")
+        .await?;
     if columns.is_empty() || columns.iter().any(|name| !safe_sql_ident(name)) {
         return Err(DbErr::Custom(
             "agent_session column names could not be copied safely".to_string(),
@@ -879,102 +1425,250 @@ async fn rebuild_agent_kind_check(
         .join(", ");
     let rewritten = replace_agent_kind_check_list(&create, values).map_err(DbErr::Custom)?;
     let staging = rename_create_table(&rewritten, spec.staging).map_err(DbErr::Custom)?;
-    txn.execute_raw(Statement::from_string(backend, staging))
-        .await?;
-    txn.execute_raw(Statement::from_string(
-        backend,
-        format!(
-            "INSERT INTO `{}` ({column_list}) SELECT {column_list} FROM `agent_session`",
-            spec.staging
-        ),
+    held.execute(staging).await?;
+    held.failpoint("created").await?;
+    held.execute(format!(
+        "INSERT INTO `{}` ({column_list}) SELECT {column_list} FROM `agent_session`",
+        spec.staging
     ))
     .await?;
-    let copied = count_matching(txn, &format!("SELECT COUNT(*) FROM `{}`", spec.staging)).await?;
+    let copied = held
+        .count(&format!("SELECT COUNT(*) FROM `{}`", spec.staging))
+        .await?;
     if copied != session_count {
         return Err(DbErr::Custom(format!(
             "agent_session rebuild copied {copied} rows but the original table has {session_count}; the transaction will roll back"
         )));
     }
-    txn.execute_raw(Statement::from_string(
-        backend,
-        "DROP TABLE `agent_session`".to_string(),
-    ))
-    .await?;
-    txn.execute_raw(Statement::from_string(
-        backend,
-        format!("ALTER TABLE `{}` RENAME TO `agent_session`", spec.staging),
-    ))
-    .await?;
-    for sql in dependents {
-        txn.execute_raw(Statement::from_string(backend, sql))
-            .await?;
+    // The copy holds exactly the original rows, value for value.
+    let mut differing = 0;
+    for (from, minus) in [
+        ("agent_session", spec.staging),
+        (spec.staging, "agent_session"),
+    ] {
+        differing += held.count(&format!(
+                "SELECT COUNT(*) FROM (SELECT {column_list} FROM `{from}` EXCEPT SELECT {column_list} FROM `{minus}`)"
+            ),
+        )
+        .await?;
     }
-    let after = count_matching(txn, "SELECT COUNT(*) FROM agent_session").await?;
+    if differing != 0 {
+        return Err(DbErr::Custom(format!(
+            "agent_session rebuild copy differs from the original in {differing} row(s); the transaction will roll back"
+        )));
+    }
+    held.failpoint("copied").await?;
+    // Triggers first, then views with the ones built on others first, so no
+    // remaining object names something that is gone when the table is.
+    for object in dependents.iter().filter(|object| object.kind == "trigger") {
+        held.execute(drop_schema_object(object)).await?;
+    }
+    for object in dependents
+        .iter()
+        .rev()
+        .filter(|object| object.kind == "view")
+    {
+        held.execute(drop_schema_object(object)).await?;
+    }
+    held.execute("DROP TABLE `agent_session`").await?;
+    held.failpoint("dropped").await?;
+    held.execute(format!(
+        "ALTER TABLE `{}` RENAME TO `agent_session`",
+        spec.staging
+    ))
+    .await?;
+    held.failpoint("renamed").await?;
+    // Indexes on the table, then views in dependency order, then triggers.
+    for kind in ["index", "view", "trigger"] {
+        for object in dependents.iter().filter(|object| object.kind == kind) {
+            held.execute(&object.sql).await?;
+        }
+    }
+    // The rebuilt table's CHECK is the target list.
+    let rebuilt = held
+        .optional_text(
+            "SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'agent_session'",
+        )
+        .await?
+        .unwrap_or_default();
+    if !agent_kind_check(&rebuilt).is_ok_and(|check| same_kinds(&check.values, values)) {
+        return Err(DbErr::Custom(
+            "agent_session's rebuilt CHECK does not list the target kinds; the transaction will roll back"
+                .to_string(),
+        ));
+    }
+    let restored_dependents = agent_session_dependents(held).await?;
+    let comparable = |objects: &[SchemaDependent]| {
+        let mut objects: Vec<_> = objects
+            .iter()
+            .map(|object| format!("{}|{}|{}", object.kind, object.name, object.sql))
+            .collect();
+        objects.sort();
+        objects
+    };
+    if comparable(&restored_dependents) != comparable(&dependents) {
+        return Err(DbErr::Custom(
+            "agent_session's indexes, triggers or views differ after the CHECK rebuild; the transaction will roll back"
+                .to_string(),
+        ));
+    }
+    held.failpoint("restored").await?;
+    let after = held.count("SELECT COUNT(*) FROM agent_session").await?;
     if after != session_count {
         return Err(DbErr::Custom(format!(
             "agent_session row count changed from {session_count} to {after} during the CHECK rebuild"
         )));
     }
     for (name, before) in child_counts {
-        let count = count_matching(txn, &format!("SELECT COUNT(*) FROM `{name}`")).await?;
+        let count = held
+            .count(&format!("SELECT COUNT(*) FROM {}", quote_ident(&name)))
+            .await?;
         if count != before {
             return Err(DbErr::Custom(format!(
                 "related table '{name}' changed from {before} rows to {count} during the agent_session CHECK rebuild"
             )));
         }
     }
-    let fk_rows = txn
-        .query_all_raw(Statement::from_string(
-            backend,
-            "PRAGMA foreign_key_check".to_string(),
-        ))
-        .await?;
-    if !fk_rows.is_empty() {
+    if let Some(problem) = foreign_key_and_integrity_problem(held).await? {
         return Err(DbErr::Custom(format!(
-            "PRAGMA foreign_key_check reported {} violation(s) after rebuilding agent_session",
-            fk_rows.len()
+            "{problem} after rebuilding agent_session; the transaction will roll back"
         )));
     }
-    let integrity = query_optional_text(txn, "PRAGMA integrity_check").await?;
-    if integrity.as_deref() != Some("ok") {
-        return Err(DbErr::Custom(format!(
-            "PRAGMA integrity_check failed after rebuilding agent_session: {}",
-            integrity.unwrap_or_else(|| "<no row>".to_string())
-        )));
-    }
+    held.failpoint("verified").await?;
     Ok(())
 }
 
-fn replace_agent_kind_check_list(sql: &str, values: &[&str]) -> Result<String, String> {
-    let lower = sql.to_ascii_lowercase();
-    let kind_at = lower
-        .find("agent_kind")
-        .ok_or_else(|| "agent_session DDL has no agent_kind column".to_string())?;
-    let in_rel = lower[kind_at..]
-        .find(" in (")
-        .or_else(|| lower[kind_at..].find(" in("))
-        .ok_or_else(|| "agent_kind CHECK has no IN list".to_string())?;
-    let open = sql[kind_at + in_rel..]
-        .find('(')
-        .ok_or_else(|| "agent_kind IN list is missing '('".to_string())?
-        + kind_at
-        + in_rel;
+/// agent_session's agent_kind CHECK, parsed only when the DDL has the
+/// reviewed shape (PI-07): `agent_kind` is named exactly twice, as the
+/// column declared `TEXT NOT NULL CHECK(...)` with nothing else before its
+/// CHECK, and as that CHECK's sole operand; the CHECK, ignoring whitespace
+/// and identifier quotes, is exactly `agent_kind IN (<quoted kinds>)`.
+/// Anything else is refused, so the list read here is the list rewritten.
+struct AgentKindCheck {
+    values: Vec<String>,
+    /// Byte offsets of the parentheses around the IN list.
+    list: (usize, usize),
+}
+
+/// The byte offset of the parenthesis closing the one at `open`.
+fn closing_paren(sql: &str, open: usize) -> Option<usize> {
     let mut depth = 0;
-    let mut close = None;
     for (index, byte) in sql.as_bytes().iter().enumerate().skip(open) {
         match byte {
             b'(' => depth += 1,
             b')' => {
                 depth -= 1;
                 if depth == 0 {
-                    close = Some(index);
-                    break;
+                    return Some(index);
                 }
             }
             _ => {}
         }
     }
-    let close = close.ok_or_else(|| "agent_kind IN list is missing ')'".to_string())?;
+    None
+}
+
+fn agent_kind_check(sql: &str) -> Result<AgentKindCheck, String> {
+    let unreviewed =
+        |why: &str| format!("agent_session's agent_kind CHECK is not in the reviewed form ({why})");
+    let lower = sql.to_ascii_lowercase();
+    let is_ident = |byte: u8| byte.is_ascii_alphanumeric() || byte == b'_';
+    let quote = |ch: char| matches!(ch, '`' | '"' | '[' | ']');
+    let mentions: Vec<usize> = lower
+        .match_indices("agent_kind")
+        .map(|(at, _)| at)
+        .filter(|&at| {
+            let before = at.checked_sub(1).map(|i| lower.as_bytes()[i]);
+            let after = lower.as_bytes().get(at + "agent_kind".len()).copied();
+            !before.is_some_and(is_ident) && !after.is_some_and(is_ident)
+        })
+        .collect();
+    let [column, operand] = mentions[..] else {
+        return Err(unreviewed(
+            "agent_kind is named other than as the column and the CHECK operand",
+        ));
+    };
+    // The CHECK holding the operand, as a whole, right after the column type.
+    let check_at = lower[..operand]
+        .rfind("check")
+        .ok_or_else(|| unreviewed("no CHECK before the operand"))?;
+    let declaration: String = lower[column + "agent_kind".len()..check_at]
+        .chars()
+        .filter(|ch| !ch.is_whitespace() && !quote(*ch))
+        .collect();
+    if declaration != "textnotnull" {
+        return Err(unreviewed(
+            "the agent_kind column is not declared TEXT NOT NULL with only this CHECK",
+        ));
+    }
+    let check_open = check_at
+        + lower[check_at..]
+            .find('(')
+            .ok_or_else(|| unreviewed("the CHECK has no parenthesis"))?;
+    if !lower[check_at + "check".len()..check_open]
+        .trim()
+        .is_empty()
+    {
+        return Err(unreviewed("unexpected text after CHECK"));
+    }
+    let check_close =
+        closing_paren(sql, check_open).ok_or_else(|| unreviewed("the CHECK is not closed"))?;
+    // The IN list right after the operand.
+    let after_operand = lower[operand + "agent_kind".len()..]
+        .trim_start_matches(|ch: char| quote(ch) || ch.is_whitespace());
+    let after_in = after_operand
+        .strip_prefix("in")
+        .ok_or_else(|| unreviewed("the operand is not followed by IN"))?
+        .trim_start();
+    if !after_in.starts_with('(') {
+        return Err(unreviewed("IN is not followed by a list"));
+    }
+    let open = lower.len() - after_in.len();
+    let close = closing_paren(sql, open).ok_or_else(|| unreviewed("the IN list is not closed"))?;
+    if close >= check_close {
+        return Err(unreviewed("the IN list is not inside the CHECK"));
+    }
+    let mut values = Vec::new();
+    for item in sql[open + 1..close].split(',').map(str::trim) {
+        let value = item
+            .strip_prefix('\'')
+            .and_then(|rest| rest.strip_suffix('\''))
+            .filter(|value| !value.is_empty() && value.bytes().all(is_ident))
+            .ok_or_else(|| unreviewed("an IN list entry is not a quoted kind"))?;
+        values.push(value.to_string());
+    }
+    let normalized: String = lower[check_open + 1..check_close]
+        .chars()
+        .filter(|ch| !ch.is_whitespace() && !quote(*ch))
+        .collect();
+    let expected = format!(
+        "agent_kindin({})",
+        values
+            .iter()
+            .map(|value| format!("'{value}'"))
+            .collect::<Vec<_>>()
+            .join(",")
+    );
+    if normalized != expected {
+        return Err(unreviewed("the CHECK is more than agent_kind IN (...)"));
+    }
+    Ok(AgentKindCheck {
+        values,
+        list: (open, close),
+    })
+}
+
+/// Whether `found` lists exactly the kinds of `expected`, in any order.
+fn same_kinds(found: &[String], expected: &[&str]) -> bool {
+    let mut found: Vec<&str> = found.iter().map(String::as_str).collect();
+    let mut expected = expected.to_vec();
+    found.sort_unstable();
+    expected.sort_unstable();
+    found == expected
+}
+
+fn replace_agent_kind_check_list(sql: &str, values: &[&str]) -> Result<String, String> {
+    let (open, close) = agent_kind_check(sql)?.list;
     let list = values
         .iter()
         .map(|value| format!("'{value}'"))
@@ -1029,100 +1723,36 @@ fn safe_sql_ident(name: &str) -> bool {
             .all(|ch| ch.is_ascii_alphanumeric() || ch == '_')
 }
 
-async fn pragma_foreign_keys(conn: &DatabaseConnection) -> Result<i64, MigrationError> {
-    let row = conn
-        .query_one_raw(Statement::from_string(
-            conn.get_database_backend(),
-            "PRAGMA foreign_keys".to_string(),
-        ))
-        .await?
-        .ok_or_else(|| {
-            MigrationError::Database(DbErr::Custom(
-                "PRAGMA foreign_keys returned no row".to_string(),
-            ))
-        })?;
-    row.try_get_by_index(0).map_err(|error| {
-        MigrationError::Database(DbErr::Custom(format!(
-            "PRAGMA foreign_keys could not be read: {error}"
-        )))
-    })
-}
-
-async fn set_foreign_keys(conn: &DatabaseConnection, enabled: bool) -> Result<(), MigrationError> {
-    let sql = if enabled {
-        "PRAGMA foreign_keys = ON"
-    } else {
-        "PRAGMA foreign_keys = OFF"
-    };
-    conn.execute_raw(Statement::from_string(conn.get_database_backend(), sql))
-        .await?;
-    Ok(())
-}
-
-async fn changes(conn: &impl ConnectionTrait) -> Result<i64, DbErr> {
-    let row = conn
-        .query_one_raw(Statement::from_string(
-            conn.get_database_backend(),
-            "SELECT changes()".to_string(),
-        ))
-        .await?
-        .ok_or_else(|| DbErr::Custom("SELECT changes() returned no row".to_string()))?;
-    row.try_get_by_index(0)
-        .map_err(|error| DbErr::Custom(format!("changes() decode failed: {error}")))
-}
-
-async fn count_matching(conn: &impl ConnectionTrait, sql: &str) -> Result<i64, DbErr> {
-    let row = conn
-        .query_one_raw(Statement::from_string(conn.get_database_backend(), sql))
-        .await?
-        .ok_or_else(|| DbErr::Custom(format!("count query returned no row: {sql}")))?;
-    row.try_get_by_index(0)
-        .map_err(|error| DbErr::Custom(format!("count decode failed: {error}")))
-}
-
-async fn query_optional_text(
-    conn: &impl ConnectionTrait,
-    sql: &str,
-) -> Result<Option<String>, DbErr> {
-    let Some(row) = conn
-        .query_one_raw(Statement::from_string(conn.get_database_backend(), sql))
-        .await?
-    else {
-        return Ok(None);
-    };
-    row.try_get_by_index(0)
-        .map(Some)
-        .map_err(|error| DbErr::Custom(format!("text decode failed: {error}")))
-}
-
-async fn query_text_list(conn: &impl ConnectionTrait, sql: &str) -> Result<Vec<String>, DbErr> {
-    let rows = conn
-        .query_all_raw(Statement::from_string(conn.get_database_backend(), sql))
-        .await?;
-    rows.into_iter()
-        .map(|row| {
-            row.try_get_by_index(0)
-                .map_err(|error| DbErr::Custom(format!("text list decode failed: {error}")))
-        })
-        .collect()
-}
-
 /// The SQLite file behind `conn`, via `PRAGMA database_list`. `None` for
 /// `:memory:` and anything path-less.
-async fn sqlite_database_file(conn: &DatabaseConnection) -> Option<std::path::PathBuf> {
+/// The main database's file, or `None` for an in-memory database (an empty
+/// file name). A lookup that fails is an error, never `None`: a file
+/// database must not fall back to the caller's connection (PI-07).
+async fn sqlite_database_file(
+    conn: &DatabaseConnection,
+) -> Result<Option<std::path::PathBuf>, MigrationError> {
+    let lookup_failed = |detail: String| {
+        MigrationError::Other(anyhow::anyhow!(
+            "could not find the repository database file for the agent_kind CHECK migration ({detail}); nothing was changed. Reopen the repository to retry"
+        ))
+    };
+    if agent_kind_check_failpoints_armed(conn).await {
+        run_agent_kind_check_failpoint("lookup")
+            .await
+            .map_err(|error| lookup_failed(db_error_text(&error)))?;
+    }
     let row = conn
         .query_one_raw(Statement::from_string(
             conn.get_database_backend(),
             "PRAGMA database_list".to_string(),
         ))
         .await
-        .ok()??;
-    let file: String = row.try_get_by_index(2).ok()?;
-    if file.is_empty() {
-        None
-    } else {
-        Some(std::path::PathBuf::from(file))
-    }
+        .map_err(|error| lookup_failed(error.to_string()))?
+        .ok_or_else(|| lookup_failed("PRAGMA database_list returned no row".to_string()))?;
+    let file: String = row
+        .try_get_by_index(2)
+        .map_err(|error| lookup_failed(error.to_string()))?;
+    Ok((!file.is_empty()).then(|| std::path::PathBuf::from(file)))
 }
 
 /// Apply one migration atomically. Returns `true` when this call inserted

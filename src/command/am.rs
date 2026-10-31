@@ -767,7 +767,7 @@ async fn resolve_three_way_bases(
     use crate::command::apply::patch_index_old_ids;
 
     let mut bases = std::collections::HashMap::new();
-    let storage = util::objects_storage();
+    let storage = util::objects_storage()?;
     for oid_prefix in patch_index_old_ids(patch_text, 1) {
         let candidates = storage.search_checked(&oid_prefix).await.map_err(|error| {
             CliError::fatal(format!(

@@ -895,7 +895,7 @@ async fn test_detach_head_basic() {
 // a tree with many parents.
 async fn create_commit_tree() {
     let index = Index::load(path::index()).unwrap();
-    let storage = ClientStorage::init(path::objects());
+    let storage = ClientStorage::try_init(path::objects()).expect("storage");
 
     let tree = commit::create_tree(&index, &storage, "".into())
         .await

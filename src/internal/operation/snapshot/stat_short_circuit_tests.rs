@@ -65,7 +65,7 @@ impl ShortCircuitFixture {
         .expect("unborn HEAD");
         connection.close().await.expect("close setup pool");
         fs::write(gitdir.join("HEAD"), "ref: refs/heads/main\n").expect("HEAD");
-        let storage = ClientStorage::init_local(storage_path.join("objects"));
+        let storage = ClientStorage::try_init_local(storage_path.join("objects")).expect("storage");
         let scope = PinnedRequestScope {
             scope: WorktreeScope::Main,
             workdir: worktree.clone(),

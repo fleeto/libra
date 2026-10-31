@@ -636,7 +636,7 @@ async fn tracked_path_set() -> Result<HashSet<String>, String> {
         && let Some(commit) = Commit::try_load(&head_oid)
         && let Some(tree) = Tree::try_load(&commit.tree_id)
     {
-        for (path, _hash) in tree.get_plain_items() {
+        for (path, _hash) in tree.get_plain_items().map_err(|error| error.to_string())? {
             if let Some(norm) = normalize_rel(&path) {
                 set.insert(norm);
             }

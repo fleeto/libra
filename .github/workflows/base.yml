@@ -3,6 +3,10 @@ on:
   push:
     # Release candidates must finish even while main continues advancing.
     branches: [main, 'release/**']
+  workflow_dispatch:
+
+permissions:
+  contents: read
 
 name: Check, Build and Test
 
@@ -61,8 +65,6 @@ jobs:
     name: compat-owner-liveness-macos
     runs-on: macos-latest
     timeout-minutes: 60
-    permissions:
-      contents: read
     env:
       CARGO_TERM_COLOR: always
       RUSTFLAGS: "-D warnings"
@@ -146,8 +148,6 @@ jobs:
     name: compat-scoped-input-windows
     runs-on: windows-latest
     timeout-minutes: 60
-    permissions:
-      contents: read
     env:
       CARGO_TERM_COLOR: always
       EXPECTED_EVENT_NAME: ${{ github.event_name }}
@@ -184,12 +184,12 @@ jobs:
               $actualHead[0].Trim() -ne $env:EXPECTED_EVENT_SHA) {
             throw 'Checked-out source does not match the event SHA'
           }
-          if ($env:EXPECTED_EVENT_NAME -eq 'push') {
+          if ($env:EXPECTED_EVENT_NAME -eq 'push' -or $env:EXPECTED_EVENT_NAME -eq 'workflow_dispatch') {
             if ($env:GITHUB_REF -ne 'refs/heads/main' -and
                 -not $env:GITHUB_REF.StartsWith('refs/heads/release/', [System.StringComparison]::Ordinal)) {
               throw 'Scoped Windows push tests require a main or release candidate ref'
             }
-            Write-Output "Scoped Windows source: ref=$($env:GITHUB_REF) sha=$($env:EXPECTED_EVENT_SHA) workflow=$($env:GITHUB_WORKFLOW_SHA) run=$($env:GITHUB_RUN_ID) attempt=$($env:GITHUB_RUN_ATTEMPT)"
+            Write-Output "Scoped Windows source: event=$($env:EXPECTED_EVENT_NAME) ref=$($env:GITHUB_REF) sha=$($env:EXPECTED_EVENT_SHA) workflow=$($env:GITHUB_WORKFLOW_SHA) run=$($env:GITHUB_RUN_ID) attempt=$($env:GITHUB_RUN_ATTEMPT)"
           } elseif ($env:EXPECTED_EVENT_NAME -eq 'pull_request') {
             if ([string]::IsNullOrWhiteSpace($env:EXPECTED_PR_NUMBER) -or
                 $env:GITHUB_REF -ne "refs/pull/$($env:EXPECTED_PR_NUMBER)/merge") {
@@ -263,7 +263,7 @@ jobs:
         run: |
           $ErrorActionPreference = 'Stop'
           $PSNativeCommandUseErrorActionPreference = $false
-          foreach ($filter in @('utils::windows_fs::tests::', 'internal::ai::capture::key::windows::tests::', 'internal::ai::workspace_isolation::tests::', 'internal::operation::middleware::lease::windows_repository_lock_tests::', 'internal::db::windows_sqlite_paths_drop_verbatim_prefix_before_url_parsing', 'internal::db::tests::test_close_cached_db_conn_instance_for_path_matches_dotdot_alias', 'command::cloud::tests::capture_snapshot_spool_', 'command::cloud::tests::capture_spool_owner_')) {
+          foreach ($filter in @('utils::windows_fs::tests::', 'internal::ai::capture::key::windows::tests::', 'internal::ai::workspace_isolation::tests::', 'internal::operation::middleware::lease::windows_repository_lock_tests::', 'internal::db::windows_sqlite_paths_drop_verbatim_prefix_before_url_parsing', 'internal::db::tests::test_close_cached_db_conn_instance_for_path_matches_dotdot_alias', 'command::cloud::tests::capture_snapshot_spool_', 'command::cloud::tests::capture_spool_owner_', 'command::cloud::tests::capture_snapshot_catalog_')) {
             $executed = @(& cargo test --locked --lib $filter -- --nocapture --color never --test-threads=1)
             $testExit = $LASTEXITCODE
             $executed | Write-Output

@@ -150,7 +150,8 @@ async fn evict(
                 .cache_size_bytes as u64
         }
     };
-    let storage = crate::utils::client_storage::ClientStorage::init(crate::utils::path::objects());
+    let storage =
+        crate::utils::client_storage::ClientStorage::try_init(crate::utils::path::objects())?;
     let report = storage
         .evict_local(EvictRequest {
             budget_bytes: budget,

@@ -389,7 +389,7 @@ pub fn all_attribute_states_for_path_from(
 /// One attribute file's text from a non-worktree source, or `None` when the
 /// path is not present there.
 fn read_attribute_source_contents(key: &str, kind: AttributeSourceKind<'_>) -> Option<String> {
-    let storage = util::objects_storage();
+    let storage = util::objects_storage().ok()?;
     let oid = match kind {
         AttributeSourceKind::Worktree => None?,
         AttributeSourceKind::Index => {
@@ -402,6 +402,7 @@ fn read_attribute_source_contents(key: &str, kind: AttributeSourceKind<'_>) -> O
             let loaded = git_internal::internal::object::tree::Tree::try_load(tree)?;
             loaded
                 .get_plain_items_with_mode()
+                .ok()?
                 .into_iter()
                 .find(|(path, _, mode)| {
                     path.to_string_lossy() == key

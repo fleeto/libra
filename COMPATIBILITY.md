@@ -475,17 +475,21 @@ CHECK of existing D1 `agent_session` and `agent_capture_session_v2` tables
 (read-only), on every sync, and refuses with `LBR-CONFLICT-002` when a table
 created before `grok` support would reject a local kind or when the CHECK
 cannot be read; recovery is a new D1 database plus `libra cloud sync --force`.
-`cloud sync` then freezes the objects and refs it uploads into an owner-only
-spool under `.libra/cloud-sync/snapshots/<run>` before any remote write;
-objects or refs written after the snapshot wait for the next one (a commit
+`cloud sync` then freezes the objects, refs and agent-capture catalog it
+uploads into an owner-only spool under `.libra/cloud-sync/snapshots/<run>`
+before any remote write; objects or refs written after the snapshot wait for
+the next one, and the frozen catalog is published only if the current catalog
+still matches it after the object upload and every existing publication check
+passes, so catalog rows erased, tombstoned or changed after the snapshot
+refuse that phase instead of being published (a commit
 during the snapshot retakes it, up to three attempts, then stops before any
 remote write; refs are streamed into the spool page by page and the
 metadata JSON is uploaded from it in bounded chunks, byte-identical to the
 whole-collection form; a sync that fails anywhere never prints `Sync complete.`
 or emits `cloud_sync.complete`, and its phase events are
 `cloud_sync.objects.finished` / `cloud_sync.agent_capture.finished`), and the spool
-is removed when the run ends (if removal fails, sync names the directory and
-how to delete it by hand); leftovers of earlier runs are removed at the next
+is removed when the run ends (if removal fails, sync names the directory, the
+snapshot files it holds and how to delete it by hand); leftovers of earlier runs are removed at the next
 sync only when their owner marker proves the owner exited on this host, boot
 and PID namespace, and are otherwise kept and reported (always on Windows).
 Repository migration `2026103001` accepts local `agent_kind=hermes` and keeps the previous kinds, including `grok` and `opencode`. `pi` stays rejected. The internal reader keeps official JSONL rows when `active` or `compacted` is true and can fall back to a read-only SQLite view. `libra agent import --path <session-id>.jsonl --agent hermes --yes` imports one such export locally, keeps thinking unproven, and does not scan a Hermes home. The bounded snapshot marks that thinking partial, refuses retained thinking text above 8 MiB, and does not treat it as the assistant answer. The live bridge runs `hermes sessions export --format jsonl --session-id <id> <output-file>` only under the export-job lease, with a 2 second deadline. `libra agent rpc trust hermes` pins that executable and does not accept OpenCode trust. `libra agent hooks hermes observe` accepts the proven observers. `on_session_end` records a turn and does not close the session. `on_session_finalize` is the teardown. Control hooks and subagent events are not registered. Hook install rewrites only a Libra-owned plugin whose bytes contain the `libra capture` marker and match the recorded sha256. Review and investigate launch stay disabled. `cloud sync` still refuses `hermes`.
@@ -1992,3 +1996,11 @@ and separate 128 MiB scan and repair transcript-read budgets per page
 (16 MiB per checkpoint).
 It refuses erased sessions and grants no native reasoning authority. New
 Codex acceptance cases remain local-only (`test-live-agent` plus `ignored`).
+
+## Promote dry-run prompt output (SC-03)
+
+`agent session promote --dry-run` is not a command. The subcommand stays deleted, so human output and JSON cannot print a prompt body. `--show-redacted-prompt` is not added.
+
+## Human host redaction (SC-07)
+
+`auth status` human output redacts a username after the URL helper. A username whose longest prefix is `github_pat_`, `ghp_`, or `sk-` is shown as `[REDACTED]`. `login` human output redacts the server `exchanged.host`, and `whoami` human output redacts `body.host`. An origin with no userinfo stays byte-for-byte the same, with no added trailing slash. `--json` for auth, login, and whoami is unchanged. 人读 host 脱敏 applies only to those human lines.

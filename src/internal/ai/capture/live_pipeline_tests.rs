@@ -3720,11 +3720,13 @@ async fn terminal_replay_after_each_checkpoint_store_fault_completes_once() {
         // an expired takeover generation).
         for marker in markers {
             if marker.cleanup_pending || !marker.is_live(chrono::Utc::now().timestamp_millis()) {
-                let storage =
-                    std::sync::Arc::new(crate::utils::client_storage::ClientStorage::init(
+                let storage = std::sync::Arc::new(
+                    crate::utils::client_storage::ClientStorage::try_init(
                         // The repair runs over this repository's object store.
                         repo_path.join("objects"),
-                    ));
+                    )
+                    .expect("storage"),
+                );
                 assert!(
                     crate::internal::ai::history::HistoryManager::for_traces(
                         storage,

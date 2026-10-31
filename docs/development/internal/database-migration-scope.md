@@ -114,6 +114,94 @@ System defaults. JSON retains its existing fields and adds scope/ledger/reason,
 without untrusted receipt names or values. All preflight and cascade reads
 remain physically read-only and never append the barrier.
 
+### Repository CHECK extension on a dedicated connection (ADR-CAP-CHECK, PI-07)
+
+Extending the Repository `agent_session.agent_kind` CHECK requires rebuilding
+the table, which SQLite allows only with `foreign_keys` off. That must never
+happen on a pooled connection another caller can receive. The runner sends
+exactly the reviewed CHECK versions (`agent_kind_check_spec`: `2026101901`
+`grok`, `2026103001` `hermes`) through `apply_agent_kind_check_dedicated`;
+every other migration keeps the ordinary `apply_one_migration` /
+`apply_down_migration` path on the caller's connection, and role routing is
+unchanged. The registered SQL of those versions aborts if run directly.
+
+- **Connection.** A file database is rebuilt on a connection of its own:
+  `open_dedicated_check_connection` opens a private SeaORM pool of at most
+  one connection (30 s busy timeout, `synchronous = FULL`), separate from
+  the caller's pool, and closes it afterwards. The rebuild holds one
+  connection exclusively from turning `foreign_keys` off until it is
+  restored (`HeldCheckConnection`, also for an in-memory database's single
+  connection). It hands the connection back only when the migration
+  succeeded — its transaction committed and `foreign_keys` restored. Any
+  failure (a failed setup, `BEGIN`, step, `COMMIT`, `ROLLBACK`, re-check or
+  restore, a cancellation, a panic) closes the connection instead of
+  returning it, so a failed migration's connection is never reused; for an
+  in-memory database, which exists only in tests, that discards the
+  database itself. The private pool of a file database is closed afterwards
+  in every case. Failing to read the database's file name is an
+  error, never a fallback to the caller's connection. An in-memory database
+  has no second file to open: the caller's single connection is used, and
+  the rebuild runs as its own task, so a cancelled caller cannot stop it
+  between turning `foreign_keys` off and restoring it.
+- **Order.** `foreign_keys` is turned off and read back before `BEGIN`. The
+  transaction then claims the `schema_versions` receipt first (`INSERT OR
+  IGNORE`; a lost claim is a no-op for the concurrent runner), checks the DDL
+  pre-image — `agent_kind` is named only as the column, declared `TEXT NOT
+  NULL` with no other constraint before its CHECK, and as that CHECK's sole
+  operand; the CHECK is exactly `agent_kind IN (<quoted kinds>)`; and that
+  list is already the target or exactly the reviewed previous set; anything
+  else is refused and nothing changes. A list that is already the target is
+  not rebuilt, but its receipt is still recorded only after `PRAGMA
+  foreign_key_check` and `PRAGMA integrity_check` pass. Otherwise it creates
+  the new table, copies every column, requires the copy to
+  equal the original row for row (`EXCEPT` both ways), drops every object
+  that depends on the table — transitively: the views naming it or a view
+  that does, the triggers on or naming any of those (including triggers on
+  other tables that write to it) — triggers first, then views with the ones
+  built on others first (by their `sqlite_master` name, quoted), then the
+  old table, renames the new one, recreates its indexes,
+  then views in dependency order, then triggers, requires the rebuilt CHECK
+  to list the target kinds, that dependent set to be unchanged and every
+  referencing table's row count unchanged, and runs `PRAGMA
+  foreign_key_check` and `PRAGMA integrity_check` before it commits.
+- **After the commit.** The connection turns `foreign_keys` back on and runs
+  both checks again — also when this runner lost the receipt claim to a
+  concurrent one, which then reports the receipt as already recorded by
+  another process if a check fails. A failure there is reported as committed and *not*
+  rolled back; it never claims a rollback. A failure before the commit is
+  reported as rolled back with the CHECK and receipt unchanged only once the
+  `ROLLBACK` succeeded; a failed `BEGIN` is reported as a transaction that
+  did not start; a failed `COMMIT` or `ROLLBACK` is reported as an unknown
+  outcome and the connection is closed. Recovery text names the resolved
+  database file, quoted for the platform's shell (`sqlite3 '<that file>' ...`,
+  or with double quotes on Windows), so it is right even when the repository
+  was opened from a subdirectory. Related tables are counted by their quoted
+  names, so any table name SQLite accepts is handled. The
+  repository-open error keeps the migration's own message after its generic
+  context, once.
+- **Test failpoints.** Armed only with `LIBRA_TEST=1` and only for a
+  database that carries the test-only marker table
+  `libra_test_agent_kind_check_failpoints`, so a failpoint set for one test
+  database never fires for another sharing the process, and a production
+  run (no `LIBRA_TEST`, no marker) ignores every failpoint variable;
+  `LIBRA_TEST_AGENT_KIND_CHECK_FAIL_AT` / `_ABORT_AT` / `_PAUSE_AT` (with
+  `_RESUME_FILE`) / `_SIGNAL_AT` (with `_SIGNAL_FILE`) fail (at each stage
+  of a comma-separated list), abort, pause or signal at `lookup`, `foreign_keys`, `foreign_keys_off`, `begin`, `claiming`, `claimed`, `created`, `copied`, `dropped`,
+  `renamed`, `restored`, `verified`, `commit`, `rollback`, `committed`
+  (after the commit) or `restore` (restoring `foreign_keys`).
+  `db_migration_test` covers every step failure and crash, a concurrent
+  upgrade whose loser reaches its claim while the winner holds the lock and
+  never rebuilds, a cancelled file-database run, an abandoned in-memory run,
+  an in-memory caller kept off the connection until foreign_keys is
+  restored, a failed file-name lookup that changes nothing, failed
+  COMMIT/ROLLBACK reported as unknown,
+  an unreviewed pre-image (an extra kind, a wider expression around the
+  reviewed list, or another constraint ahead of it), an already expanded
+  CHECK recorded only over a clean database, a quoted view name, and the re-check after the commit
+  finding a real foreign-key violation (`agent_kind_check_rebuild_*`).
+  Recovery text names concrete checks on the resolved database file rather
+  than a command that does not run them.
+
 ## Read-only schema diagnosis
 
 `libra config doctor --global-schema` routes directly to GlobalConfig metadata

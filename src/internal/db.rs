@@ -836,9 +836,16 @@ async fn apply_database_schema_upgrades(
     // recorded. Future persistence-touching CEXes plug in by adding to
     // `builtin_migrations`; no new `ensure_*_schema` helpers should be
     // added here.
+    // The cause chain stays in the message: the failing migration's own
+    // actionable text follows the generic context (PI-07).
     let applied_versions = migration::run_builtin_migrations(conn)
         .await
-        .map_err(|err| IOError::other(format!("Failed to run schema migrations: {err}")))?;
+        .map_err(|err| {
+            IOError::other(format!(
+                "Failed to run schema migrations: {}",
+                error_chain_text(&err)
+            ))
+        })?;
     let current_version = migration::current_builtin_schema_version_readonly(conn)
         .await
         .map_err(|err| IOError::other(format!("Failed to read schema version: {err}")))?;
@@ -849,6 +856,23 @@ async fn apply_database_schema_upgrades(
         latest_version,
         applied_versions,
     })
+}
+
+/// `error` and its causes joined with ": ", skipping a cause the text so far
+/// already ends with (an error that wraps its source repeats it).
+fn error_chain_text(error: &anyhow::Error) -> String {
+    let mut text = String::new();
+    for cause in error.chain() {
+        let cause = cause.to_string();
+        if text.ends_with(&cause) {
+            continue;
+        }
+        if !text.is_empty() {
+            text.push_str(": ");
+        }
+        text.push_str(&cause);
+    }
+    text
 }
 
 /// Create a new SQLite database file at the specified path.
@@ -874,6 +898,29 @@ mod tests {
         config, object_index,
         reference::{self, ConfigKind},
     };
+
+    #[test]
+    fn migration_failure_text_keeps_each_cause_once() {
+        // PI-07: a repository-open error carries the failing migration's own
+        // text after its generic context, each cause once, whether the
+        // migration error wraps an anyhow error or a database error.
+        let other = anyhow::Error::new(migration::MigrationError::Other(anyhow::anyhow!(
+            "migration 7 (seven) could not add its column; fix it and retry"
+        )))
+        .context("failed to run built-in schema migrations");
+        assert_eq!(
+            error_chain_text(&other),
+            "failed to run built-in schema migrations: migration 7 (seven) could not add its column; fix it and retry"
+        );
+        let database = anyhow::Error::new(migration::MigrationError::Database(
+            sea_orm::DbErr::Custom("no such table: missing".to_string()),
+        ))
+        .context("failed to run built-in schema migrations");
+        assert_eq!(
+            error_chain_text(&database),
+            "failed to run built-in schema migrations: database error: Custom Error: no such table: missing"
+        );
+    }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn sqlite_pools_disable_the_racy_reaper_and_preserve_single_connection() {

@@ -102,7 +102,7 @@ pub async fn execute(args: RepackArgs) {
 pub async fn execute_safe(args: RepackArgs, output: &OutputConfig) -> CliResult<()> {
     let repo_path = util::try_get_storage_path(None)
         .map_err(|e| CliError::repo_not_found().with_hint(e.to_string()))?;
-    let storage = ClientStorage::init(path::objects());
+    let storage = ClientStorage::try_init(path::objects())?;
     let hash_kind = git_internal::hash::get_hash_kind();
 
     // Resolve the delta window/depth before any write. `--window`/`--depth`

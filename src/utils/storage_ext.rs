@@ -276,7 +276,7 @@ mod tests {
     #[tokio::test]
     async fn test_storage_ext() {
         let dir = tempdir().unwrap();
-        let storage = Arc::new(LocalStorage::new(dir.path().to_path_buf()));
+        let storage = Arc::new(LocalStorage::try_new(dir.path().to_path_buf()).expect("storage"));
 
         // 1. Test Task Storage
         let actor = ActorRef::human("tester").unwrap();

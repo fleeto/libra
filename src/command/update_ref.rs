@@ -971,7 +971,7 @@ async fn resolve_new_value(value: &str, zero: &str, ref_name: &str) -> CliResult
     // Git's update-ref refuses to point a ref at an object that is not in the
     // store; do the same so we never create a dangling ref. Reading the type
     // proves existence and answers the commit question in one lookup.
-    let object_type = util::objects_storage()
+    let object_type = util::objects_storage()?
         .get_object_type(&object_id)
         .map_err(|error| match error {
             GitError::ObjectNotFound(_) => invalid_target_fatal(format!(

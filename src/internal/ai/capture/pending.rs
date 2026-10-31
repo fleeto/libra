@@ -6958,7 +6958,7 @@ pub(crate) mod tests {
         );
         let f = Fixture::new_at(FixtureRoot::ChildCwd(root)).await;
         let objects = f.storage.join("objects");
-        let storage = ClientStorage::init(objects.clone());
+        let storage = ClientStorage::try_init(objects.clone()).expect("storage");
         let blob =
             Blob::from_content_with_kind(HashKind::Sha1, "parent graph held by recovery").unwrap();
         let canary =
@@ -7069,7 +7069,7 @@ pub(crate) mod tests {
         // Production doctor expired-marker retirement.
         let history = HistoryManager::new_with_ref(
             Arc::new(ClientStorage::from_test_storage(
-                Arc::new(LocalStorage::new(objects.clone())),
+                Arc::new(LocalStorage::try_new(objects.clone()).expect("storage")),
                 objects,
             )),
             f.storage.clone(),
@@ -7599,7 +7599,7 @@ pub(crate) mod tests {
             .unwrap();
             let objects = f.storage.join("objects");
             let storage = Arc::new(ClientStorage::from_test_storage(
-                Arc::new(LocalStorage::new(objects.clone())),
+                Arc::new(LocalStorage::try_new(objects.clone()).expect("storage")),
                 objects,
             ));
             let history = HistoryManager::new_with_ref(

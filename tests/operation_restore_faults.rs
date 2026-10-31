@@ -240,7 +240,7 @@ async fn stale_generation_is_rejected_before_publish() {
     let database = db::create_database(dir.path().join("repo.db").to_str().unwrap())
         .await
         .expect("database");
-    let storage = ClientStorage::init_local(dir.path().join("objects"));
+    let storage = ClientStorage::try_init_local(dir.path().join("objects")).expect("storage");
     let refs = oid(b"refs");
     storage.put(&refs, b"refs", ObjectType::Blob).expect("refs");
     let store = OperationStoreV2::new_for_repo("repo", database, storage);

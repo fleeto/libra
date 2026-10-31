@@ -6248,3 +6248,1346 @@ async fn memory_path_search_is_repository_role_only() {
     );
     conn.close().await.expect("close repository database");
 }
+
+// ---- PI-07: the Repository agent_kind CHECK rebuild on its dedicated connection ----
+
+/// The schema tip just below the `hermes` CHECK expansion.
+const PRE_HERMES_TIP: i64 = 2026102201;
+const HERMES_CHECK_VERSION: i64 = 2026103001;
+/// In-transaction failpoint stages of the rebuild, in order.
+const CHECK_REBUILD_STAGES: [&str; 7] = [
+    "claimed", "created", "copied", "dropped", "renamed", "restored", "verified",
+];
+const KINDS_BEFORE_HERMES: [&str; 8] = [
+    "claude_code",
+    "cursor",
+    "codex",
+    "gemini",
+    "opencode",
+    "copilot",
+    "factory_ai",
+    "grok",
+];
+
+/// A real repository (made by `libra init`) taken back to the schema below
+/// the `hermes` CHECK expansion, with a session of every earlier kind, every
+/// table that references `agent_session` populated, and a view naming it.
+struct CheckRebuildRepo {
+    root: TempDir,
+    home: TempDir,
+}
+
+impl CheckRebuildRepo {
+    fn db(&self) -> PathBuf {
+        self.root.path().join(".libra").join("libra.db")
+    }
+
+    fn url(&self) -> String {
+        format!("sqlite://{}", self.db().display())
+    }
+
+    /// `libra status` in the repository: opening it runs the pending
+    /// migrations through the production path.
+    fn open_with(&self, envs: &[(&str, &str)]) -> std::process::Command {
+        let mut command = check_rebuild_libra(self.home.path());
+        command.arg("status").current_dir(self.root.path());
+        for (key, value) in envs {
+            command.env(key, value);
+        }
+        command
+    }
+
+    fn open(&self, envs: &[(&str, &str)]) -> std::process::Output {
+        self.open_with(envs).output().expect("run libra status")
+    }
+}
+
+/// The `libra` binary with an environment of its own under `home`: other
+/// tests of this binary change configuration and failpoint variables of the
+/// shared process while it runs, so nothing the child reads is inherited.
+fn check_rebuild_libra(home: &std::path::Path) -> std::process::Command {
+    let mut command = std::process::Command::new(env!("CARGO_BIN_EXE_libra"));
+    command
+        .env("LIBRA_TEST", "1")
+        .env("LIBRA_TEST_HOME", home)
+        .env("HOME", home)
+        .env("USERPROFILE", home)
+        .env("XDG_CONFIG_HOME", home.join(".config"))
+        .env("LIBRA_CONFIG_GLOBAL_DB", home.join("global-config.db"))
+        .env("LIBRA_CONFIG_SYSTEM_DB", home.join("system-config.db"))
+        .env("LIBRA_NO_HOOKS", "1");
+    for key in [
+        "LIBRA_TEST_AGENT_KIND_CHECK_FAIL_AT",
+        "LIBRA_TEST_AGENT_KIND_CHECK_ABORT_AT",
+        "LIBRA_TEST_AGENT_KIND_CHECK_PAUSE_AT",
+        "LIBRA_TEST_AGENT_KIND_CHECK_RESUME_FILE",
+        "LIBRA_TEST_AGENT_KIND_CHECK_SIGNAL_AT",
+        "LIBRA_TEST_AGENT_KIND_CHECK_SIGNAL_FILE",
+    ] {
+        command.env_remove(key);
+    }
+    command
+}
+
+async fn check_rebuild_exec(conn: &DatabaseConnection, sql: &str) {
+    conn.execute_unprepared(sql)
+        .await
+        .unwrap_or_else(|error| panic!("exec {sql}: {error}"));
+}
+
+async fn pre_hermes_repository() -> CheckRebuildRepo {
+    let repo = CheckRebuildRepo {
+        root: tempfile::tempdir().expect("repo dir"),
+        home: tempfile::tempdir().expect("home dir"),
+    };
+    let init = check_rebuild_libra(repo.home.path())
+        .arg("init")
+        .current_dir(repo.root.path())
+        .output()
+        .expect("run libra init");
+    assert!(
+        init.status.success(),
+        "libra init: {}",
+        String::from_utf8_lossy(&init.stderr)
+    );
+    let conn = connect(&repo.url()).await;
+    let rolled_back = all_builtin_runner()
+        .expect("builtin registry")
+        .rollback_to(&conn, PRE_HERMES_TIP)
+        .await
+        .expect("take the repository below the hermes CHECK");
+    assert_eq!(rolled_back, vec![HERMES_CHECK_VERSION]);
+    for kind in KINDS_BEFORE_HERMES {
+        check_rebuild_exec(
+            &conn,
+            &format!(
+                "INSERT INTO agent_session (session_id, agent_kind, provider_session_id, state, working_dir, metadata_json, redaction_report, started_at, last_event_at) VALUES ('sess-{kind}', '{kind}', 'provider-{kind}', 'stopped', '/work', '{{}}', '{{}}', 1, 1)"
+            ),
+        )
+        .await;
+    }
+    for sql in [
+        "INSERT INTO agent_checkpoint (checkpoint_id, session_id, scope, parent_commit, tree_oid, metadata_blob_oid, traces_commit, created_at) VALUES ('cp-1', 'sess-claude_code', 'temporary', 'parent', 'tree', 'meta', 'traces', 1)",
+        "INSERT INTO agent_session_commit (session_id, hash_kind, commit_oid) VALUES ('sess-claude_code', 'sha1', 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa')",
+        "INSERT INTO agent_coverage_claim (session_id, logical_turn_key, coverage_schema_version, coverage_digest, completeness, revision, state, source_channel, created_at, updated_at) VALUES ('sess-claude_code', 'turn-1', 1, 'digest', 'incomplete', 0, 'reserved_live', 'live', 1, 1)",
+        "INSERT INTO agent_coverage_revision (session_id, logical_turn_key, coverage_schema_version, revision, checkpoint_id, coverage_digest, completeness, source_channel, created_at) VALUES ('sess-claude_code', 'turn-1', 1, 1, 'cp-1', 'digest', 'incomplete', 'live', 1)",
+        "INSERT INTO agent_coverage_conflict (session_id, logical_turn_key, coverage_schema_version, incumbent_revision, incumbent_digest, incumbent_checkpoint_id, incoming_digest, incoming_source_channel, incoming_observed_at, incoming_canonical_json, incoming_redaction_report_json) VALUES ('sess-claude_code', 'turn-1', 1, 0, 'digest', 'cp-1', 'incoming', 'live', 1, '{}', '{}')",
+        "INSERT INTO agent_subagent_content_claim (parent_session_id, provider_kind, source_key, content_schema_version, current_revision, state, fence_token, created_at, updated_at) VALUES ('sess-claude_code', 'claude_code', 'key', 1, 0, 'idle', 0, 1, 1)",
+        "INSERT INTO agent_subagent_content_revision (parent_session_id, provider_kind, source_key, content_schema_version, revision, checkpoint_id, content_digest, source_channel, partial, created_at) VALUES ('sess-claude_code', 'claude_code', 'key', 1, 1, 'cp-1', 'digest', 'live', 0, 1)",
+        "INSERT INTO agent_subagent_link (content_checkpoint_id, parent_session_id, link_state, boundary_checkpoint_id, stable_subagent_id, created_at, updated_at) VALUES ('cp-1', 'sess-claude_code', 'resolved', 'cp-1', 'sub-1', 1, 1)",
+        "INSERT INTO agent_import_tombstone (tombstone_id, agent_kind, provider_session_id, erased_session_id, erased_at) VALUES ('tomb-1', 'codex', 'erased-provider', 'codex__erased', 1)",
+        // Arms the rebuild's test failpoints for this database only.
+        "CREATE TABLE libra_test_agent_kind_check_failpoints (armed INTEGER)",
+        "CREATE VIEW pi07_session_kinds AS SELECT session_id, agent_kind FROM agent_session",
+        "CREATE VIEW \"pi07 quoted \"\"view\"\"\" AS SELECT session_id FROM agent_session",
+        // Objects that depend on agent_session only indirectly: a view built on
+        // a view of it, and a trigger on another table that writes to it.
+        "CREATE VIEW pi07_session_kinds_named AS SELECT session_id FROM pi07_session_kinds",
+        "CREATE TABLE pi07_touch (session_id TEXT NOT NULL)",
+        // A populated child whose name needs quoting.
+        "CREATE TABLE \"pi07 child records\" (session_id TEXT NOT NULL REFERENCES agent_session(session_id) ON DELETE CASCADE)",
+        "INSERT INTO \"pi07 child records\" (session_id) VALUES ('sess-claude_code')",
+        "CREATE TRIGGER pi07_touch_session AFTER INSERT ON pi07_touch BEGIN UPDATE agent_session SET last_event_at = last_event_at + 1 WHERE session_id = NEW.session_id; END",
+    ] {
+        check_rebuild_exec(&conn, sql).await;
+    }
+    // Every table that references agent_session holds a row the rebuild
+    // must keep.
+    for table in check_rebuild_texts(
+        &conn,
+        "SELECT name FROM sqlite_master WHERE type = 'table' AND name != 'agent_session' AND LOWER(sql) LIKE '%references%agent_session%' ORDER BY name",
+    )
+    .await
+    {
+        let rows = check_rebuild_texts(&conn, &format!("SELECT COUNT(*) || '' FROM `{table}`")).await;
+        assert_ne!(rows, vec!["0".to_string()], "{table} is not populated");
+    }
+    conn.close().await.expect("close");
+    repo
+}
+
+/// The `sqlite3 <path> <pragmas>` command a recovery message names (quoted
+/// for the platform's shell) must target this repository's database file,
+/// wherever the command ran.
+fn assert_sqlite3_target(repo: &CheckRebuildRepo, line: &str, pragmas: &str) {
+    let (open, between) = if cfg!(windows) {
+        ("`sqlite3 \"", format!("\" \"{pragmas}\"`"))
+    } else {
+        ("`sqlite3 '", format!("' '{pragmas}'`"))
+    };
+    let start = line
+        .find(open)
+        .unwrap_or_else(|| panic!("no sqlite3 command in: {line}"))
+        + open.len();
+    let end = start
+        + line[start..]
+            .find(&between)
+            .unwrap_or_else(|| panic!("no {pragmas} after the path in: {line}"));
+    let named = std::path::PathBuf::from(&line[start..end]);
+    assert_eq!(
+        std::fs::canonicalize(&named).expect("the named database exists"),
+        std::fs::canonicalize(repo.db()).expect("the repository database exists"),
+        "{line}"
+    );
+}
+
+/// The human `fatal:` line of a failed command's stderr.
+fn fatal_line(stderr: &str) -> &str {
+    stderr
+        .lines()
+        .find(|line| line.starts_with("fatal:"))
+        .unwrap_or_default()
+}
+
+async fn check_rebuild_texts(conn: &DatabaseConnection, sql: &str) -> Vec<String> {
+    conn.query_all_raw(Statement::from_string(conn.get_database_backend(), sql))
+        .await
+        .unwrap_or_else(|error| panic!("{sql}: {error}"))
+        .into_iter()
+        .map(|row| row.try_get_by_index::<String>(0).expect("text column"))
+        .collect()
+}
+
+/// Every table's rows (by value), and the schema, of the repository: what
+/// a complete rebuild keeps and a failed one leaves exactly as it was.
+#[derive(Debug, PartialEq, Eq)]
+struct RepositoryDigest {
+    rows: std::collections::BTreeMap<String, Vec<String>>,
+    schema: Vec<String>,
+}
+
+impl RepositoryDigest {
+    /// The rows of every table except the schema_versions ledger.
+    fn data(&self) -> std::collections::BTreeMap<String, Vec<String>> {
+        let mut rows = self.rows.clone();
+        rows.remove("schema_versions");
+        rows
+    }
+}
+
+async fn repository_digest(repo: &CheckRebuildRepo) -> RepositoryDigest {
+    let conn = connect(&repo.url()).await;
+    let mut rows = std::collections::BTreeMap::new();
+    for table in check_rebuild_texts(
+        &conn,
+        "SELECT name FROM sqlite_master WHERE type = 'table' AND name NOT LIKE 'sqlite_%' ORDER BY name",
+    )
+    .await
+    {
+        let columns =
+            check_rebuild_texts(&conn, &format!("SELECT name FROM pragma_table_info('{table}')"))
+                .await;
+        let row = columns
+            .iter()
+            .map(|column| format!("quote(`{column}`)"))
+            .collect::<Vec<_>>()
+            .join(" || char(31) || ");
+        let values = check_rebuild_texts(
+            &conn,
+            &format!("SELECT {row} AS r FROM `{table}` ORDER BY r"),
+        )
+        .await;
+        rows.insert(table, values);
+    }
+    let schema = check_rebuild_texts(
+        &conn,
+        "SELECT type || '|' || name || '|' || COALESCE(sql, '') FROM sqlite_master ORDER BY type, name",
+    )
+    .await;
+    conn.close().await.expect("close");
+    RepositoryDigest { rows, schema }
+}
+
+async fn check_rebuild_state(repo: &CheckRebuildRepo) -> (bool, String) {
+    let conn = connect(&repo.url()).await;
+    let receipts = check_rebuild_texts(
+        &conn,
+        &format!(
+            "SELECT version || '' FROM schema_versions WHERE version = {HERMES_CHECK_VERSION}"
+        ),
+    )
+    .await;
+    let ddl = check_rebuild_texts(
+        &conn,
+        "SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'agent_session'",
+    )
+    .await;
+    conn.close().await.expect("close");
+    (receipts.len() == 1, ddl.concat())
+}
+
+/// After a complete rebuild: one receipt, the CHECK lists every earlier kind
+/// and `hermes`, every row, index, trigger and view as before, and a clean
+/// foreign-key and integrity check with foreign_keys ON.
+async fn assert_check_rebuilt(repo: &CheckRebuildRepo, before: &RepositoryDigest) {
+    let (receipt, ddl) = check_rebuild_state(repo).await;
+    assert!(receipt, "the hermes receipt is recorded once");
+    for kind in KINDS_BEFORE_HERMES.iter().chain(&["hermes"]) {
+        assert!(ddl.contains(&format!("'{kind}'")), "{kind} missing: {ddl}");
+    }
+    let after = repository_digest(repo).await;
+    assert_eq!(
+        after.data(),
+        before.data(),
+        "every row is kept, value for value"
+    );
+    let dependents = |digest: &RepositoryDigest| -> Vec<String> {
+        digest
+            .schema
+            .iter()
+            .filter(|entry| {
+                !entry.starts_with("table|")
+                    && (entry.contains("agent_session") || entry.starts_with("view|"))
+            })
+            .cloned()
+            .collect()
+    };
+    assert_eq!(
+        dependents(&after),
+        dependents(before),
+        "indexes, triggers and views"
+    );
+    let conn = connect(&repo.url()).await;
+    check_rebuild_exec(&conn, "PRAGMA foreign_keys = ON").await;
+    assert!(
+        check_rebuild_texts(&conn, "SELECT 'x' FROM pragma_foreign_key_check")
+            .await
+            .is_empty()
+    );
+    assert_eq!(
+        check_rebuild_texts(&conn, "PRAGMA integrity_check").await,
+        vec!["ok".to_string()]
+    );
+    assert_eq!(
+        check_rebuild_texts(
+            &conn,
+            "SELECT COUNT(*) || '' FROM pi07_session_kinds WHERE agent_kind = 'grok'"
+        )
+        .await,
+        vec!["1".to_string()],
+        "the view still reads the rebuilt table"
+    );
+    assert_eq!(
+        check_rebuild_texts(
+            &conn,
+            "SELECT COUNT(*) || '' FROM pi07_session_kinds_named WHERE session_id = 'sess-grok'"
+        )
+        .await,
+        vec!["1".to_string()],
+        "the view built on a view still reads the rebuilt table"
+    );
+    // The trigger on another table still writes to the rebuilt table; the
+    // check runs in a transaction that is rolled back, leaving the data as is.
+    check_rebuild_exec(
+        &conn,
+        "BEGIN;
+         INSERT INTO pi07_touch (session_id) VALUES ('sess-grok');",
+    )
+    .await;
+    assert_eq!(
+        check_rebuild_texts(
+            &conn,
+            "SELECT last_event_at || '' FROM agent_session WHERE session_id = 'sess-grok'"
+        )
+        .await,
+        vec!["2".to_string()],
+        "the trigger on another table updates the rebuilt table"
+    );
+    check_rebuild_exec(&conn, "ROLLBACK").await;
+    conn.close().await.expect("close");
+}
+
+#[tokio::test]
+#[serial(env)]
+async fn agent_kind_check_rebuild_keeps_every_row_and_dependent() {
+    let repo = pre_hermes_repository().await;
+    let before = repository_digest(&repo).await;
+    let opened = repo.open(&[]);
+    assert!(
+        opened.status.success(),
+        "{}",
+        String::from_utf8_lossy(&opened.stderr)
+    );
+    assert_check_rebuilt(&repo, &before).await;
+    // A second open finds the receipt and changes nothing.
+    let rebuilt = repository_digest(&repo).await;
+    assert!(repo.open(&[]).status.success());
+    assert_eq!(repository_digest(&repo).await, rebuilt);
+}
+
+#[tokio::test]
+#[serial(env)]
+async fn agent_kind_check_rebuild_rolls_back_every_failed_step() {
+    let repo = pre_hermes_repository().await;
+    let before = repository_digest(&repo).await;
+    for stage in CHECK_REBUILD_STAGES {
+        let failed = repo.open(&[("LIBRA_TEST_AGENT_KIND_CHECK_FAIL_AT", stage)]);
+        assert!(!failed.status.success(), "{stage}: the open fails");
+        let stderr = String::from_utf8_lossy(&failed.stderr);
+        assert!(
+            stderr.contains(
+                "agent_kind hermes CHECK migration was rolled back and changed nothing (the CHECK and its schema_versions receipt are as before)"
+            ),
+            "{stage}: {stderr}"
+        );
+        assert!(
+            stderr.contains(&format!("injected agent_kind CHECK failure at {stage}")),
+            "{stage}: {stderr}"
+        );
+        assert_eq!(
+            fatal_line(&stderr)
+                .matches("CHECK migration was rolled back and changed nothing")
+                .count(),
+            1,
+            "{stage}: the cause is reported once: {stderr}"
+        );
+        assert_eq!(
+            repository_digest(&repo).await,
+            before,
+            "{stage}: the whole repository database is as before"
+        );
+    }
+    let opened = repo.open(&[]);
+    assert!(
+        opened.status.success(),
+        "{}",
+        String::from_utf8_lossy(&opened.stderr)
+    );
+    assert_check_rebuilt(&repo, &before).await;
+}
+
+#[tokio::test]
+#[serial(env)]
+async fn agent_kind_check_rebuild_survives_a_crash_at_every_step() {
+    let repo = pre_hermes_repository().await;
+    let before = repository_digest(&repo).await;
+    for stage in CHECK_REBUILD_STAGES {
+        let crashed = repo.open(&[("LIBRA_TEST_AGENT_KIND_CHECK_ABORT_AT", stage)]);
+        assert!(!crashed.status.success(), "{stage}: the process aborts");
+        // Opening the database rolls the interrupted transaction back.
+        assert_eq!(
+            repository_digest(&repo).await,
+            before,
+            "{stage}: a crash before the commit leaves the database as before"
+        );
+    }
+    // A crash right after the commit keeps the complete rebuild.
+    let crashed = repo.open(&[("LIBRA_TEST_AGENT_KIND_CHECK_ABORT_AT", "committed")]);
+    assert!(
+        !crashed.status.success(),
+        "the process aborts after the commit"
+    );
+    assert_check_rebuilt(&repo, &before).await;
+    assert!(repo.open(&[]).status.success());
+    assert_check_rebuilt(&repo, &before).await;
+}
+
+#[tokio::test]
+#[serial(env)]
+async fn agent_kind_check_rebuild_runs_once_under_concurrent_upgrades() {
+    let repo = pre_hermes_repository().await;
+    let before = repository_digest(&repo).await;
+    let resume = repo.home.path().join("resume");
+    let paused = repo.home.path().join("resume.paused");
+    let resume_text = resume.display().to_string();
+    // The first upgrade claims the receipt and pauses inside its
+    // transaction; the second starts while it holds the write lock.
+    let first = repo
+        .open_with(&[
+            ("LIBRA_TEST_AGENT_KIND_CHECK_PAUSE_AT", "claimed"),
+            ("LIBRA_TEST_AGENT_KIND_CHECK_RESUME_FILE", &resume_text),
+        ])
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .expect("start the first upgrade");
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(60);
+    while !paused.exists() {
+        assert!(
+            std::time::Instant::now() < deadline,
+            "the first upgrade never reached its claim"
+        );
+        std::thread::sleep(std::time::Duration::from_millis(20));
+    }
+    // The second upgrade signals right before its own receipt claim, which
+    // waits on the first one's write lock; it fails if it ever rebuilds.
+    let claiming = repo.home.path().join("second-claiming");
+    let claiming_text = claiming.display().to_string();
+    let mut second = repo
+        .open_with(&[
+            ("LIBRA_TEST_AGENT_KIND_CHECK_SIGNAL_AT", "claiming"),
+            ("LIBRA_TEST_AGENT_KIND_CHECK_SIGNAL_FILE", &claiming_text),
+            ("LIBRA_TEST_AGENT_KIND_CHECK_FAIL_AT", "created"),
+        ])
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .expect("start the second upgrade");
+    while !claiming.exists() {
+        assert!(
+            std::time::Instant::now() < deadline,
+            "the second upgrade never reached its claim"
+        );
+        assert!(
+            second
+                .try_wait()
+                .expect("poll the second upgrade")
+                .is_none(),
+            "the second upgrade ended before reaching its claim"
+        );
+        std::thread::sleep(std::time::Duration::from_millis(20));
+    }
+    std::thread::sleep(std::time::Duration::from_millis(300));
+    assert!(
+        second
+            .try_wait()
+            .expect("poll the second upgrade")
+            .is_none(),
+        "the second upgrade waits on the first one's transaction"
+    );
+    std::fs::write(&resume, "go").expect("resume the first upgrade");
+    let first = first.wait_with_output().expect("first upgrade");
+    let second = second.wait_with_output().expect("second upgrade");
+    assert!(
+        first.status.success(),
+        "{}",
+        String::from_utf8_lossy(&first.stderr)
+    );
+    assert!(
+        second.status.success(),
+        "{}",
+        String::from_utf8_lossy(&second.stderr)
+    );
+    assert_check_rebuilt(&repo, &before).await;
+}
+
+#[tokio::test]
+#[serial(env)]
+async fn agent_kind_check_rebuild_refuses_an_unreviewed_check() {
+    // A CHECK that is not the reviewed pre-hermes form: an extra kind, the
+    // reviewed list with an expression that admits any kind, or another
+    // constraint ahead of the reviewed CHECK.
+    for (label, search, replacement, reason) in [
+        (
+            "extra kind",
+            "'grok'",
+            "'grok', 'mystery'",
+            "agent_session's agent_kind CHECK is not the reviewed set this migration replaces (expected claude_code, cursor, codex, gemini, opencode, copilot, factory_ai, grok, found claude_code, cursor, codex, gemini, opencode, copilot, factory_ai, grok, mystery); the CHECK was not changed. Restore the repository's reviewed schema, for example from a backup, before retrying",
+        ),
+        (
+            "wider expression",
+            "'grok'",
+            "'grok') OR 1 = 1 OR (1",
+            "agent_session's agent_kind CHECK is not in the reviewed form (the CHECK is more than agent_kind IN (...))",
+        ),
+        (
+            "decoy constraint",
+            "NOT NULL CHECK(`agent_kind`",
+            "NOT NULL CHECK('claude_code' IN ('claude_code', 'cursor')) CHECK(`agent_kind`",
+            "agent_session's agent_kind CHECK is not in the reviewed form (the agent_kind column is not declared TEXT NOT NULL with only this CHECK)",
+        ),
+    ] {
+        let repo = pre_hermes_repository().await;
+        let conn = connect(&repo.url()).await;
+        check_rebuild_exec(
+            &conn,
+            &format!(
+                "PRAGMA writable_schema = ON;
+                 UPDATE sqlite_master SET sql = replace(sql, '{}', '{}')
+                 WHERE type = 'table' AND name = 'agent_session';
+                 PRAGMA writable_schema = OFF;",
+                search.replace('\'', "''"),
+                replacement.replace('\'', "''")
+            ),
+        )
+        .await;
+        conn.close().await.expect("close");
+        let (_, ddl) = check_rebuild_state(&repo).await;
+        assert!(
+            ddl.contains(replacement),
+            "{label}: the fixture applies: {ddl}"
+        );
+        let before = repository_digest(&repo).await;
+        let failed = repo.open(&[]);
+        assert!(!failed.status.success(), "{label}");
+        let stderr = String::from_utf8_lossy(&failed.stderr);
+        assert!(stderr.contains(reason), "{label}: {stderr}");
+        assert!(
+            stderr.contains("CHECK migration was rolled back and changed nothing"),
+            "{label}: {stderr}"
+        );
+        assert_eq!(repository_digest(&repo).await, before, "{label}");
+    }
+}
+
+#[tokio::test]
+#[serial(env)]
+async fn agent_kind_check_rebuild_records_an_expanded_check_only_when_clean() {
+    // The CHECK already lists hermes but the receipt is missing: nothing is
+    // rebuilt, and the receipt is recorded only over a database that passes
+    // the foreign-key and integrity checks.
+    let repo = pre_hermes_repository().await;
+    let conn = connect(&repo.url()).await;
+    check_rebuild_exec(
+        &conn,
+        "PRAGMA writable_schema = ON;
+         UPDATE sqlite_master SET sql = replace(sql, '''grok''', '''grok'', ''hermes''')
+         WHERE type = 'table' AND name = 'agent_session';
+         PRAGMA writable_schema = OFF;",
+    )
+    .await;
+    conn.close().await.expect("close");
+    let conn = connect(&repo.url()).await;
+    check_rebuild_exec(
+        &conn,
+        "PRAGMA foreign_keys = OFF;
+         INSERT INTO agent_checkpoint (checkpoint_id, session_id, scope, parent_commit, tree_oid, metadata_blob_oid, traces_commit, created_at) VALUES ('cp-dangling', 'no-such-session', 'temporary', 'parent', 'tree', 'meta', 'traces-dangling', 1);",
+    )
+    .await;
+    conn.close().await.expect("close");
+    let before = repository_digest(&repo).await;
+    let failed = repo.open(&[]);
+    assert!(!failed.status.success());
+    let stderr = String::from_utf8_lossy(&failed.stderr);
+    assert!(
+        stderr.contains(
+            "PRAGMA foreign_key_check reported 1 violation(s) before recording the receipt; the transaction will roll back"
+        ),
+        "{stderr}"
+    );
+    assert_eq!(
+        repository_digest(&repo).await,
+        before,
+        "no receipt was recorded"
+    );
+    let conn = connect(&repo.url()).await;
+    check_rebuild_exec(
+        &conn,
+        "DELETE FROM agent_checkpoint WHERE checkpoint_id = 'cp-dangling'",
+    )
+    .await;
+    conn.close().await.expect("close");
+    let rebuilt_before = repository_digest(&repo).await;
+    let opened = repo.open(&[]);
+    assert!(
+        opened.status.success(),
+        "{}",
+        String::from_utf8_lossy(&opened.stderr)
+    );
+    let (receipt, ddl) = check_rebuild_state(&repo).await;
+    assert!(receipt, "the receipt is recorded over a clean database");
+    assert_eq!(
+        repository_digest(&repo).await.data(),
+        rebuilt_before.data(),
+        "nothing else changes"
+    );
+    assert!(ddl.contains("'hermes'"), "{ddl}");
+}
+
+#[tokio::test]
+#[serial(env)]
+async fn agent_kind_check_rebuild_reports_a_failed_check_after_the_commit() {
+    let repo = pre_hermes_repository().await;
+    let before = repository_digest(&repo).await;
+    // Opened from a subdirectory: the recovery command still names the
+    // repository's own database file.
+    let subdirectory = repo.root.path().join("nested").join("deeper");
+    std::fs::create_dir_all(&subdirectory).expect("create a subdirectory");
+    let failed = repo
+        .open_with(&[("LIBRA_TEST_AGENT_KIND_CHECK_FAIL_AT", "committed")])
+        .current_dir(&subdirectory)
+        .output()
+        .expect("run libra status from a subdirectory");
+    assert!(!failed.status.success());
+    let stderr = String::from_utf8_lossy(&failed.stderr);
+    assert!(
+        stderr.contains(
+            "agent_kind hermes CHECK migration committed and was not rolled back, but the check with foreign_keys=ON afterwards failed: injected agent_kind CHECK failure at committed"
+        ),
+        "{stderr}"
+    );
+    assert!(
+        !stderr.contains("rolled back and changed nothing"),
+        "{stderr}"
+    );
+    assert_eq!(
+        fatal_line(&stderr)
+            .matches("CHECK migration committed and was not rolled back")
+            .count(),
+        1,
+        "the cause is reported once: {stderr}"
+    );
+    assert_sqlite3_target(
+        &repo,
+        fatal_line(&stderr),
+        "PRAGMA foreign_key_check; PRAGMA integrity_check;",
+    );
+    assert_check_rebuilt(&repo, &before).await;
+}
+
+#[tokio::test]
+#[serial(env)]
+async fn agent_kind_check_rebuild_rechecks_with_foreign_keys_on_after_the_commit() {
+    let repo = pre_hermes_repository().await;
+    let resume = repo.home.path().join("resume");
+    let paused = repo.home.path().join("resume.paused");
+    let resume_text = resume.display().to_string();
+    let upgrade = repo
+        .open_with(&[
+            ("LIBRA_TEST_AGENT_KIND_CHECK_PAUSE_AT", "committed"),
+            ("LIBRA_TEST_AGENT_KIND_CHECK_RESUME_FILE", &resume_text),
+        ])
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .expect("start the upgrade");
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(60);
+    while !paused.exists() {
+        assert!(
+            std::time::Instant::now() < deadline,
+            "the upgrade never committed"
+        );
+        std::thread::sleep(std::time::Duration::from_millis(20));
+    }
+    // Between the commit and the re-check, a row breaks a foreign key: only
+    // the re-check on the migration connection can see it.
+    let conn = connect(&repo.url()).await;
+    check_rebuild_exec(
+        &conn,
+        "PRAGMA foreign_keys = OFF;
+         INSERT INTO agent_checkpoint (checkpoint_id, session_id, scope, parent_commit, tree_oid, metadata_blob_oid, traces_commit, created_at) VALUES ('cp-dangling', 'no-such-session', 'temporary', 'parent', 'tree', 'meta', 'traces-dangling', 1);",
+    )
+    .await;
+    conn.close().await.expect("close");
+    std::fs::write(&resume, "go").expect("resume the upgrade");
+    let upgrade = upgrade.wait_with_output().expect("upgrade");
+    assert!(!upgrade.status.success());
+    let stderr = String::from_utf8_lossy(&upgrade.stderr);
+    assert!(
+        stderr.contains(
+            "agent_kind hermes CHECK migration committed and was not rolled back, but the check with foreign_keys=ON afterwards failed: PRAGMA foreign_key_check reported 1 violation(s). To recover, check the database with `sqlite3 "
+        ),
+        "{stderr}"
+    );
+    assert!(
+        stderr.contains(
+            "`, repair or remove the rows it reports (or restore the database from a backup), then reopen the repository; do not edit schema_versions to retry"
+        ),
+        "{stderr}"
+    );
+    assert_sqlite3_target(
+        &repo,
+        fatal_line(&stderr),
+        "PRAGMA foreign_key_check; PRAGMA integrity_check;",
+    );
+    let (receipt, ddl) = check_rebuild_state(&repo).await;
+    assert!(receipt, "the committed rebuild keeps its receipt");
+    assert!(ddl.contains("'hermes'"), "{ddl}");
+}
+
+#[tokio::test]
+#[serial(env)]
+async fn agent_kind_check_rebuild_finishes_an_in_memory_run_its_caller_abandoned() {
+    // In memory, the caller's single connection is the only one. A caller
+    // cancelled inside the rebuild must not leave it with foreign_keys off:
+    // the rebuild finishes on its own and restores it.
+    let conn = connect("sqlite::memory:").await;
+    let runner = all_builtin_runner().expect("builtin registry");
+    runner
+        .run_pending_up_to(&conn, PRE_HERMES_TIP)
+        .await
+        .expect("migrate below the hermes CHECK");
+    // The repository bootstrap owns ai_thread, which agent_session references.
+    check_rebuild_exec(
+        &conn,
+        "CREATE TABLE IF NOT EXISTS ai_thread (thread_id TEXT PRIMARY KEY);
+         CREATE TABLE libra_test_agent_kind_check_failpoints (armed INTEGER);",
+    )
+    .await;
+    check_rebuild_exec(
+        &conn,
+        "INSERT INTO agent_session (session_id, agent_kind, provider_session_id, state, working_dir, metadata_json, redaction_report, started_at, last_event_at) VALUES ('sess-grok', 'grok', 'provider-grok', 'stopped', '/work', '{}', '{}', 1, 1)",
+    )
+    .await;
+    let foreign_keys = |conn: DatabaseConnection| async move {
+        check_rebuild_texts(&conn, "SELECT foreign_keys || '' FROM pragma_foreign_keys").await
+    };
+    let before = foreign_keys(conn.clone()).await;
+    let dir = tempfile::tempdir().expect("tempdir");
+    let resume = dir.path().join("resume");
+    let paused = dir.path().join("resume.paused");
+    let _test = ScopedEnvVar::set("LIBRA_TEST", "1");
+    let _pause = ScopedEnvVar::set("LIBRA_TEST_AGENT_KIND_CHECK_PAUSE_AT", "claimed");
+    let _resume = ScopedEnvVar::set(
+        "LIBRA_TEST_AGENT_KIND_CHECK_RESUME_FILE",
+        resume.as_os_str(),
+    );
+    {
+        let upgrade = runner.run_pending(&conn);
+        tokio::pin!(upgrade);
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(60);
+        loop {
+            tokio::select! {
+                result = &mut upgrade => panic!("the upgrade ended before it was cancelled: {result:?}"),
+                () = tokio::time::sleep(std::time::Duration::from_millis(20)) => {}
+            }
+            if paused.exists() {
+                break;
+            }
+            assert!(
+                std::time::Instant::now() < deadline,
+                "the upgrade never claimed"
+            );
+        }
+        // Leaving the block drops (cancels) the caller's future.
+    }
+    std::fs::write(&resume, "go").expect("resume the rebuild");
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(60);
+    loop {
+        let receipts = check_rebuild_texts(
+            &conn,
+            &format!(
+                "SELECT version || '' FROM schema_versions WHERE version = {HERMES_CHECK_VERSION}"
+            ),
+        )
+        .await;
+        if receipts.len() == 1 && foreign_keys(conn.clone()).await == before {
+            break;
+        }
+        assert!(
+            std::time::Instant::now() < deadline,
+            "the abandoned rebuild did not finish and restore foreign_keys"
+        );
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+    }
+    let ddl = check_rebuild_texts(
+        &conn,
+        "SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'agent_session'",
+    )
+    .await
+    .concat();
+    assert!(ddl.contains("'hermes'"), "{ddl}");
+}
+
+#[tokio::test]
+#[serial(env)]
+async fn agent_kind_check_rebuild_never_falls_back_when_the_file_lookup_fails() {
+    // A file database whose name cannot be read is refused; it is never
+    // rebuilt on the caller's connection as if it were in memory.
+    let repo = pre_hermes_repository().await;
+    let before = repository_digest(&repo).await;
+    let failed = repo.open(&[("LIBRA_TEST_AGENT_KIND_CHECK_FAIL_AT", "lookup")]);
+    assert!(!failed.status.success());
+    let stderr = String::from_utf8_lossy(&failed.stderr);
+    assert!(
+        stderr.contains(
+            "could not find the repository database file for the agent_kind CHECK migration (injected agent_kind CHECK failure at lookup); nothing was changed. Reopen the repository to retry"
+        ),
+        "{stderr}"
+    );
+    assert_eq!(repository_digest(&repo).await, before);
+    let opened = repo.open(&[]);
+    assert!(
+        opened.status.success(),
+        "{}",
+        String::from_utf8_lossy(&opened.stderr)
+    );
+    assert_check_rebuilt(&repo, &before).await;
+}
+
+#[tokio::test]
+#[serial(env)]
+async fn agent_kind_check_rebuild_rechecks_a_lost_claim_with_foreign_keys_on() {
+    // An upgrader that loses the receipt claim to a concurrent one still
+    // checks the database with foreign_keys ON before it reports success.
+    let repo = pre_hermes_repository().await;
+    let home = repo.home.path();
+    let wait_for = |path: &std::path::Path, what: &str| {
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(60);
+        while !path.exists() {
+            assert!(std::time::Instant::now() < deadline, "{what}");
+            std::thread::sleep(std::time::Duration::from_millis(20));
+        }
+    };
+    let winner_resume = home.join("winner-resume");
+    let winner_resume_text = winner_resume.display().to_string();
+    let winner = repo
+        .open_with(&[
+            ("LIBRA_TEST_AGENT_KIND_CHECK_PAUSE_AT", "claimed"),
+            (
+                "LIBRA_TEST_AGENT_KIND_CHECK_RESUME_FILE",
+                &winner_resume_text,
+            ),
+        ])
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .expect("start the winner");
+    wait_for(
+        &home.join("winner-resume.paused"),
+        "the winner never claimed",
+    );
+    // The loser read the schema while the receipt was not yet committed and
+    // is about to claim it; once it has lost, it pauses before its check.
+    let loser_resume = home.join("loser-resume");
+    let loser_resume_text = loser_resume.display().to_string();
+    let claiming = home.join("loser-claiming");
+    let claiming_text = claiming.display().to_string();
+    let loser = repo
+        .open_with(&[
+            ("LIBRA_TEST_AGENT_KIND_CHECK_SIGNAL_AT", "claiming"),
+            ("LIBRA_TEST_AGENT_KIND_CHECK_SIGNAL_FILE", &claiming_text),
+            ("LIBRA_TEST_AGENT_KIND_CHECK_PAUSE_AT", "committed"),
+            (
+                "LIBRA_TEST_AGENT_KIND_CHECK_RESUME_FILE",
+                &loser_resume_text,
+            ),
+            ("LIBRA_TEST_AGENT_KIND_CHECK_FAIL_AT", "created"),
+        ])
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .expect("start the loser");
+    wait_for(&claiming, "the loser never reached its claim");
+    std::fs::write(&winner_resume, "go").expect("resume the winner");
+    let winner = winner.wait_with_output().expect("winner");
+    assert!(
+        winner.status.success(),
+        "{}",
+        String::from_utf8_lossy(&winner.stderr)
+    );
+    wait_for(
+        &home.join("loser-resume.paused"),
+        "the loser never reached its check after losing the claim",
+    );
+    // After the winner's commit, a row breaks a foreign key.
+    let conn = connect(&repo.url()).await;
+    check_rebuild_exec(
+        &conn,
+        "PRAGMA foreign_keys = OFF;
+         INSERT INTO agent_checkpoint (checkpoint_id, session_id, scope, parent_commit, tree_oid, metadata_blob_oid, traces_commit, created_at) VALUES ('cp-dangling', 'no-such-session', 'temporary', 'parent', 'tree', 'meta', 'traces-dangling', 1);",
+    )
+    .await;
+    conn.close().await.expect("close");
+    std::fs::write(&loser_resume, "go").expect("resume the loser");
+    let loser = loser.wait_with_output().expect("loser");
+    assert!(!loser.status.success(), "the loser does not report success");
+    let stderr = String::from_utf8_lossy(&loser.stderr);
+    assert!(
+        stderr.contains(
+            "agent_kind hermes CHECK migration was already recorded by another process, but the check with foreign_keys=ON afterwards failed: PRAGMA foreign_key_check reported 1 violation(s)"
+        ),
+        "{stderr}"
+    );
+    assert!(!stderr.contains("rolled back"), "{stderr}");
+    let (receipt, ddl) = check_rebuild_state(&repo).await;
+    assert!(receipt, "the winner's receipt stays");
+    assert!(ddl.contains("'hermes'"), "{ddl}");
+}
+
+#[tokio::test]
+#[serial(env)]
+async fn agent_kind_check_rebuild_ignores_failpoints_outside_tests() {
+    // The failpoints need both LIBRA_TEST=1 and the marker table: without
+    // either, every failpoint variable — an abort included — is ignored and
+    // the rebuild completes.
+    let every_failpoint = [
+        ("LIBRA_TEST_AGENT_KIND_CHECK_ABORT_AT", "claimed"),
+        (
+            "LIBRA_TEST_AGENT_KIND_CHECK_FAIL_AT",
+            "lookup,foreign_keys,copied,commit",
+        ),
+        ("LIBRA_TEST_AGENT_KIND_CHECK_PAUSE_AT", "created"),
+    ];
+    for label in ["without LIBRA_TEST", "without the marker table"] {
+        let repo = pre_hermes_repository().await;
+        if label == "without the marker table" {
+            let conn = connect(&repo.url()).await;
+            check_rebuild_exec(&conn, "DROP TABLE libra_test_agent_kind_check_failpoints").await;
+            conn.close().await.expect("close");
+        }
+        let before = repository_digest(&repo).await;
+        let resume = repo.home.path().join("never-written");
+        let mut command = repo.open_with(&every_failpoint);
+        command.env(
+            "LIBRA_TEST_AGENT_KIND_CHECK_RESUME_FILE",
+            resume.as_os_str(),
+        );
+        if label == "without LIBRA_TEST" {
+            command.env_remove("LIBRA_TEST");
+        }
+        let opened = command.output().expect("run libra status");
+        assert!(
+            opened.status.success(),
+            "{label}: {}",
+            String::from_utf8_lossy(&opened.stderr)
+        );
+        assert!(
+            !repo.home.path().join("never-written.paused").exists(),
+            "{label}: no failpoint paused"
+        );
+        assert_check_rebuilt(&repo, &before).await;
+    }
+}
+
+#[tokio::test]
+#[serial(env)]
+async fn agent_kind_check_rebuild_reports_a_foreign_keys_setup_failure() {
+    // A failure before the transaction (reading or turning off foreign_keys,
+    // or BEGIN itself) changes nothing, closes the connection and says so; a
+    // failed BEGIN is not called a rollback.
+    for (stage, text, check) in [
+        (
+            "foreign_keys",
+            "agent_kind hermes CHECK migration could not read or turn off foreign_keys on its connection (injected agent_kind CHECK failure at foreign_keys); nothing was changed and the connection was closed. Reopen the repository to retry; if this keeps failing, check the database with `sqlite3 ",
+            "PRAGMA integrity_check;",
+        ),
+        (
+            "begin",
+            "agent_kind hermes CHECK migration could not start its transaction (injected agent_kind CHECK failure at begin); nothing was changed and the connection was closed. Reopen the repository to retry",
+            "",
+        ),
+    ] {
+        let repo = pre_hermes_repository().await;
+        let before = repository_digest(&repo).await;
+        let failed = repo.open(&[("LIBRA_TEST_AGENT_KIND_CHECK_FAIL_AT", stage)]);
+        assert!(!failed.status.success(), "{stage}");
+        let stderr = String::from_utf8_lossy(&failed.stderr);
+        assert!(stderr.contains(text), "{stage}: {stderr}");
+        assert!(!stderr.contains("rolled back"), "{stage}: {stderr}");
+        if !check.is_empty() {
+            assert_sqlite3_target(&repo, fatal_line(&stderr), check);
+        }
+        assert_eq!(repository_digest(&repo).await, before, "{stage}");
+        let opened = repo.open(&[]);
+        assert!(
+            opened.status.success(),
+            "{stage}: {}",
+            String::from_utf8_lossy(&opened.stderr)
+        );
+        assert_check_rebuilt(&repo, &before).await;
+    }
+}
+
+#[tokio::test]
+#[serial(env)]
+async fn agent_kind_check_rebuild_reports_a_foreign_keys_restore_failure() {
+    // foreign_keys cannot be restored after the transaction ended: the
+    // connection is closed instead of being returned, and the message says
+    // what the transaction did and how to check the database.
+    for (label, stages, text, committed) in [
+        (
+            "after a commit",
+            "restore",
+            "agent_kind hermes CHECK migration committed (it was not rolled back), but foreign_keys could not be restored on its connection, which was closed instead of being returned. Reopen the repository to continue; to verify the database, check the database with `sqlite3 ",
+            true,
+        ),
+        (
+            "after a rollback",
+            "copied,restore",
+            "agent_kind hermes CHECK migration was rolled back and changed nothing (injected agent_kind CHECK failure at copied), but foreign_keys could not be restored on its connection, which was closed instead of being returned. Fix the cause, then reopen the repository to retry; if it does not open, check the database with `sqlite3 ",
+            false,
+        ),
+    ] {
+        let repo = pre_hermes_repository().await;
+        let before = repository_digest(&repo).await;
+        let failed = repo.open(&[("LIBRA_TEST_AGENT_KIND_CHECK_FAIL_AT", stages)]);
+        assert!(!failed.status.success(), "{label}");
+        let stderr = String::from_utf8_lossy(&failed.stderr);
+        assert!(stderr.contains(text), "{label}: {stderr}");
+        assert_sqlite3_target(
+            &repo,
+            fatal_line(&stderr),
+            "PRAGMA foreign_key_check; PRAGMA integrity_check;",
+        );
+        if committed {
+            assert_check_rebuilt(&repo, &before).await;
+        } else {
+            assert_eq!(repository_digest(&repo).await, before, "{label}");
+            let opened = repo.open(&[]);
+            assert!(
+                opened.status.success(),
+                "{label}: {}",
+                String::from_utf8_lossy(&opened.stderr)
+            );
+            assert_check_rebuilt(&repo, &before).await;
+        }
+    }
+}
+
+#[tokio::test]
+#[serial(env)]
+async fn agent_kind_check_rebuild_reports_an_unknown_outcome_when_commit_or_rollback_fails() {
+    // A failed COMMIT, or a failed ROLLBACK after a failed step, does not
+    // establish what happened: it is reported as unknown, never as a
+    // rollback, and the connection is closed.
+    for (label, stages, detail) in [
+        (
+            "commit",
+            "commit",
+            "(its commit failed: injected agent_kind CHECK failure at commit)",
+        ),
+        (
+            "rollback",
+            "copied,rollback",
+            "(injected agent_kind CHECK failure at copied, and then its rollback failed: injected agent_kind CHECK failure at rollback)",
+        ),
+    ] {
+        let repo = pre_hermes_repository().await;
+        let before = repository_digest(&repo).await;
+        let failed = repo.open(&[("LIBRA_TEST_AGENT_KIND_CHECK_FAIL_AT", stages)]);
+        assert!(!failed.status.success(), "{label}");
+        let stderr = String::from_utf8_lossy(&failed.stderr);
+        assert!(
+            stderr.contains(&format!(
+                "agent_kind hermes CHECK migration ended with an unknown outcome {detail}; its connection was closed. Reopen the repository: the migration runs again if its schema_versions receipt was not recorded."
+            )),
+            "{label}: {stderr}"
+        );
+        assert!(
+            !stderr.contains("rolled back and changed nothing"),
+            "{label}: {stderr}"
+        );
+        // Closing the connection ended its open transaction.
+        assert_eq!(repository_digest(&repo).await, before, "{label}");
+        let opened = repo.open(&[]);
+        assert!(
+            opened.status.success(),
+            "{label}: {}",
+            String::from_utf8_lossy(&opened.stderr)
+        );
+        assert_check_rebuilt(&repo, &before).await;
+    }
+}
+
+#[tokio::test]
+#[serial(env)]
+async fn agent_kind_check_rebuild_discards_a_failed_in_memory_connection() {
+    // A failed rebuild never hands its connection back: in memory that is
+    // the database's only connection, so the caller's pool then opens a new,
+    // empty database instead of reusing the failed one — whether a step
+    // failed (and was rolled back) or foreign_keys read back as still on.
+    for (stage, text) in [
+        (
+            "copied",
+            "CHECK migration was rolled back and changed nothing",
+        ),
+        (
+            "foreign_keys_off",
+            "could not turn foreign_keys off before rebuilding agent_session; the CHECK was not changed and the connection was closed",
+        ),
+        (
+            "restore",
+            "foreign_keys could not be restored on its connection, which was closed instead of being returned",
+        ),
+    ] {
+        let conn = connect("sqlite::memory:").await;
+        all_builtin_runner()
+            .expect("builtin registry")
+            .run_pending_up_to(&conn, PRE_HERMES_TIP)
+            .await
+            .expect("migrate below the hermes CHECK");
+        check_rebuild_exec(
+            &conn,
+            "CREATE TABLE IF NOT EXISTS ai_thread (thread_id TEXT PRIMARY KEY);
+         CREATE TABLE libra_test_agent_kind_check_failpoints (armed INTEGER);",
+        )
+        .await;
+        let _test = ScopedEnvVar::set("LIBRA_TEST", "1");
+        let _fail = ScopedEnvVar::set("LIBRA_TEST_AGENT_KIND_CHECK_FAIL_AT", stage);
+        let error = all_builtin_runner()
+            .expect("builtin registry")
+            .run_pending(&conn)
+            .await
+            .expect_err("the injected failure fails the rebuild");
+        assert!(error.to_string().contains(text), "{stage}: {error}");
+        assert_eq!(
+            check_rebuild_texts(
+                &conn,
+                "SELECT COUNT(*) || '' FROM sqlite_master WHERE name = 'agent_session'"
+            )
+            .await,
+            vec!["0".to_string()],
+            "{stage}: the failed connection was discarded, not returned"
+        );
+    }
+}
+
+#[tokio::test]
+#[serial(env)]
+async fn agent_kind_check_rebuild_holds_the_in_memory_connection_until_restored() {
+    // In memory the rebuild holds the caller's only connection from turning
+    // foreign_keys off until it is restored: paused after its commit (still
+    // before the restore), the caller cannot receive that connection.
+    let conn = connect("sqlite::memory:").await;
+    all_builtin_runner()
+        .expect("builtin registry")
+        .run_pending_up_to(&conn, PRE_HERMES_TIP)
+        .await
+        .expect("migrate below the hermes CHECK");
+    check_rebuild_exec(
+        &conn,
+        "CREATE TABLE IF NOT EXISTS ai_thread (thread_id TEXT PRIMARY KEY);
+         CREATE TABLE libra_test_agent_kind_check_failpoints (armed INTEGER);",
+    )
+    .await;
+    let foreign_keys = |conn: DatabaseConnection| async move {
+        check_rebuild_texts(&conn, "SELECT foreign_keys || '' FROM pragma_foreign_keys").await
+    };
+    let before = foreign_keys(conn.clone()).await;
+    let dir = tempfile::tempdir().expect("tempdir");
+    let resume = dir.path().join("resume");
+    let paused = dir.path().join("resume.paused");
+    let _test = ScopedEnvVar::set("LIBRA_TEST", "1");
+    let _pause = ScopedEnvVar::set("LIBRA_TEST_AGENT_KIND_CHECK_PAUSE_AT", "committed");
+    let _resume = ScopedEnvVar::set(
+        "LIBRA_TEST_AGENT_KIND_CHECK_RESUME_FILE",
+        resume.as_os_str(),
+    );
+    let upgrade = tokio::spawn({
+        let conn = conn.clone();
+        async move {
+            all_builtin_runner()
+                .expect("builtin registry")
+                .run_pending(&conn)
+                .await
+        }
+    });
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(60);
+    while !paused.exists() {
+        assert!(
+            std::time::Instant::now() < deadline,
+            "the rebuild never committed"
+        );
+        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+    }
+    assert!(
+        tokio::time::timeout(
+            std::time::Duration::from_millis(500),
+            foreign_keys(conn.clone())
+        )
+        .await
+        .is_err(),
+        "the caller received the connection before foreign_keys was restored"
+    );
+    std::fs::write(&resume, "go").expect("resume the rebuild");
+    let applied = upgrade
+        .await
+        .expect("join the upgrade")
+        .expect("the upgrade completes");
+    assert_eq!(applied, vec![HERMES_CHECK_VERSION]);
+    assert_eq!(foreign_keys(conn.clone()).await, before);
+}
+
+#[tokio::test]
+#[serial(env)]
+async fn agent_kind_check_rebuild_discards_a_cancelled_connection() {
+    let repo = pre_hermes_repository().await;
+    let before = repository_digest(&repo).await;
+    let caller = connect(&repo.url()).await;
+    check_rebuild_exec(&caller, "PRAGMA foreign_keys = ON").await;
+    let foreign_keys = |conn: DatabaseConnection| async move {
+        check_rebuild_texts(&conn, "SELECT foreign_keys || '' FROM pragma_foreign_keys").await
+    };
+    let resume = repo.home.path().join("resume");
+    let paused = repo.home.path().join("resume.paused");
+    {
+        let _test = ScopedEnvVar::set("LIBRA_TEST", "1");
+        let _pause = ScopedEnvVar::set("LIBRA_TEST_AGENT_KIND_CHECK_PAUSE_AT", "claimed");
+        let _resume = ScopedEnvVar::set(
+            "LIBRA_TEST_AGENT_KIND_CHECK_RESUME_FILE",
+            resume.as_os_str(),
+        );
+        let runner = all_builtin_runner().expect("builtin registry");
+        let upgrade = runner.run_pending(&caller);
+        tokio::pin!(upgrade);
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(60);
+        loop {
+            tokio::select! {
+                result = &mut upgrade => panic!("the upgrade ended before it was cancelled: {result:?}"),
+                () = tokio::time::sleep(std::time::Duration::from_millis(20)) => {}
+            }
+            if paused.exists() {
+                break;
+            }
+            assert!(
+                std::time::Instant::now() < deadline,
+                "the upgrade never claimed"
+            );
+        }
+        // The rebuild now holds its transaction, with foreign_keys off, on
+        // its own connection: the caller's connection is free at once and
+        // still has foreign_keys on.
+        let during = tokio::time::timeout(
+            std::time::Duration::from_secs(2),
+            foreign_keys(caller.clone()),
+        )
+        .await
+        .expect("the caller's connection is not held by the rebuild");
+        assert_eq!(during, vec!["1".to_string()]);
+        // Leaving the block drops (cancels) the upgrade.
+    }
+    assert_eq!(
+        foreign_keys(caller.clone()).await,
+        vec!["1".to_string()],
+        "the caller's connection never had foreign_keys turned off"
+    );
+    caller.close().await.expect("close the caller");
+    // The cancelled transaction is gone with its connection: the repository
+    // is as before, and the next open completes the rebuild.
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(60);
+    loop {
+        if repository_digest(&repo).await == before {
+            break;
+        }
+        assert!(
+            std::time::Instant::now() < deadline,
+            "the cancelled rebuild left changes behind"
+        );
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+    }
+    let opened = repo.open(&[]);
+    assert!(
+        opened.status.success(),
+        "{}",
+        String::from_utf8_lossy(&opened.stderr)
+    );
+    assert_check_rebuilt(&repo, &before).await;
+}
+
+#[tokio::test]
+async fn agent_kind_check_rebuild_leaves_ordinary_migrations_on_the_pool() {
+    // An ordinary migration runs on the caller's connection, as before; only
+    // the reviewed agent_kind versions take the dedicated path.
+    let (_dir, url, _path) = fresh_db_url();
+    let conn = connect(&url).await;
+    check_rebuild_exec(&conn, "PRAGMA foreign_keys = ON").await;
+    let mut runner = MigrationRunner::new();
+    runner
+        .register(Migration {
+            version: 1,
+            name: "pi07_ordinary",
+            up: "CREATE TABLE pi07_ordinary (id INTEGER PRIMARY KEY);",
+            down: Some("DROP TABLE pi07_ordinary;"),
+        })
+        .expect("register");
+    assert_eq!(runner.run_pending(&conn).await.expect("apply"), vec![1]);
+    assert_eq!(
+        check_rebuild_texts(
+            &conn,
+            "SELECT name FROM sqlite_master WHERE name = 'pi07_ordinary'"
+        )
+        .await,
+        vec!["pi07_ordinary".to_string()]
+    );
+    assert_eq!(
+        check_rebuild_texts(&conn, "SELECT foreign_keys || '' FROM pragma_foreign_keys").await,
+        vec!["1".to_string()]
+    );
+    // The reviewed SQL itself refuses to run outside the dedicated path.
+    let hermes = builtin_migrations()
+        .into_iter()
+        .find(|migration| migration.version == HERMES_CHECK_VERSION)
+        .expect("hermes migration");
+    assert!(hermes.up.contains("RAISE(ABORT"));
+}

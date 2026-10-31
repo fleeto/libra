@@ -932,7 +932,7 @@ impl RestoreEngine {
             Err(error) => return Err(RestoreError::Storage(error.to_string())),
         };
         let scratch = tempfile::tempdir().map_err(RestoreError::Io)?;
-        let scratch_storage = ClientStorage::init_local(scratch.path().join("objects"));
+        let scratch_storage = ClientStorage::try_init_local(scratch.path().join("objects"))?;
         let outcome = WorkspaceSnapshotter::new(self.scope.clone(), pointer)
             .with_storage(scratch_storage.clone())
             .capture()
@@ -1892,7 +1892,7 @@ impl RestoreEngine {
         confirm_repo_wide: bool,
     ) -> Result<(), RestoreError> {
         let _scope_guard = WorktreeScope::pin_request_scope(self.scope.workdir.clone());
-        let storage = ClientStorage::init_local(self.scope.storage.join("objects"));
+        let storage = ClientStorage::try_init_local(self.scope.storage.join("objects"))?;
         let names = selected_facets(what);
         let registry = registry_for_scope(self.scope.clone(), storage.clone())
             .map_err(|error| RestoreError::Facet(error.to_string()))?;
@@ -2901,7 +2901,7 @@ mod tests {
         let root = tempdir().expect("worktree");
         fs::create_dir_all(root.path().join(".libra")).expect("metadata dir");
         fs::write(root.path().join("keep.txt"), b"keep").expect("existing file");
-        let storage = ClientStorage::init_local(root.path().join("objects"));
+        let storage = ClientStorage::try_init_local(root.path().join("objects")).expect("storage");
         let keep = ObjectHash::from_type_and_data(ObjectType::Blob, b"keep");
         storage
             .put(&keep, b"keep", ObjectType::Blob)
@@ -2953,7 +2953,7 @@ mod tests {
         fs::write(root.path().join("src/cache/db.sqlite"), b"local data").expect("cache data");
         fs::create_dir_all(root.path().join("vendor/.git")).expect("submodule metadata");
         fs::write(root.path().join("vendor/.git/config"), b"submodule").expect("submodule config");
-        let storage = ClientStorage::init_local(root.path().join("objects"));
+        let storage = ClientStorage::try_init_local(root.path().join("objects")).expect("storage");
         let old = ObjectHash::from_type_and_data(ObjectType::Blob, b"old");
         storage
             .put(&old, b"old", ObjectType::Blob)
@@ -3016,7 +3016,7 @@ mod tests {
         fs::create_dir_all(root.path().join(".libra")).expect("metadata dir");
         fs::create_dir_all(root.path().join("vendor/.git")).expect("submodule metadata");
         fs::write(root.path().join("vendor/.git/config"), b"submodule").expect("config");
-        let storage = ClientStorage::init_local(root.path().join("objects"));
+        let storage = ClientStorage::try_init_local(root.path().join("objects")).expect("storage");
         let empty_tree = store_empty_tree(&storage);
         let blob = ObjectHash::from_type_and_data(ObjectType::Blob, b"would overwrite submodule");
         storage
@@ -3070,7 +3070,7 @@ mod tests {
         fs::create_dir_all(root.path().join(".libra")).expect("metadata dir");
         fs::create_dir_all(root.path().join("dir")).expect("managed directory");
         fs::write(root.path().join("dir/old.txt"), b"old child").expect("old child");
-        let storage = ClientStorage::init_local(root.path().join("objects"));
+        let storage = ClientStorage::try_init_local(root.path().join("objects")).expect("storage");
         let old_child = ObjectHash::from_type_and_data(ObjectType::Blob, b"old child");
         let replacement = ObjectHash::from_type_and_data(ObjectType::Blob, b"replacement");
         storage
@@ -3127,7 +3127,7 @@ mod tests {
         fs::create_dir_all(root.path().join("dir")).expect("managed directory");
         fs::write(root.path().join("dir/old.txt"), b"old child").expect("old child");
         fs::write(root.path().join("dir/.private"), b"private").expect("opaque child");
-        let storage = ClientStorage::init_local(root.path().join("objects"));
+        let storage = ClientStorage::try_init_local(root.path().join("objects")).expect("storage");
         let old_child = ObjectHash::from_type_and_data(ObjectType::Blob, b"old child");
         let replacement = ObjectHash::from_type_and_data(ObjectType::Blob, b"replacement");
         storage
@@ -3194,7 +3194,7 @@ mod tests {
         fs::write(root.path().join("vendor/.git/config"), b"submodule").expect("submodule config");
         fs::write(root.path().join("blocker"), b"opaque file").expect("unmanaged blocker");
 
-        let storage = ClientStorage::init_local(root.path().join("objects"));
+        let storage = ClientStorage::try_init_local(root.path().join("objects")).expect("storage");
         let current_tree_oid = store_empty_tree(&storage);
         let first = ObjectHash::from_type_and_data(ObjectType::Blob, b"first target");
         let nested = ObjectHash::from_type_and_data(ObjectType::Blob, b"nested target");
@@ -3379,7 +3379,7 @@ mod tests {
         let database = db::create_database(dir.path().join("repo.db").to_str().unwrap())
             .await
             .expect("database");
-        let storage = ClientStorage::init_local(dir.path().join("objects"));
+        let storage = ClientStorage::try_init_local(dir.path().join("objects")).expect("storage");
         let store = OperationStoreV2::new_for_repo("repo", database, storage);
         let same = ObjectHash::from_type_and_data(ObjectType::Blob, b"same");
         let added = ObjectHash::from_type_and_data(ObjectType::Blob, b"added");
@@ -3460,7 +3460,7 @@ mod tests {
         )
         .await
         .expect("database");
-        let storage = ClientStorage::init_local(root.path().join("objects"));
+        let storage = ClientStorage::try_init_local(root.path().join("objects")).expect("storage");
         let engine = RestoreEngine::new(scope, "repo", database.clone(), storage);
 
         // The live reference table has a linked worktree's HEAD that the target
@@ -3598,7 +3598,7 @@ mod tests {
         )
         .await
         .expect("database");
-        let storage = ClientStorage::init_local(root.path().join("objects"));
+        let storage = ClientStorage::try_init_local(root.path().join("objects")).expect("storage");
         let engine = RestoreEngine::new(scope, "repo", database.clone(), storage.clone());
 
         let tree = store_empty_tree(&storage);

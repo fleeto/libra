@@ -132,6 +132,10 @@ async fn repo_with_initial_commit(root: &Path) -> ChangeDirGuard {
     ConfigKv::set("user.email", "bridge-vcs@example.com", false)
         .await
         .expect("set user.email");
+    // VCS behavior is under test, not signing; isolate the repository from host vault keys.
+    ConfigKv::set("commit.gpgSign", "false", false)
+        .await
+        .expect("disable fixture signing locally");
     write_file(root, "tracked.txt", "one\n");
     stage(&["tracked.txt"]).await;
     cli_commit("initial commit").await;

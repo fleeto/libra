@@ -19,6 +19,14 @@ SQLite-backed metadata store, sets up the `origin` remote, and checks out the de
 (or the branch specified with `-b`). Vault signing is always bootstrapped during clone,
 matching `libra init` defaults. For non-bare clones, any checked-out `.gitignore` files are
 copied to matching `.libraignore` files so Libra ignore rules work immediately.
+For a checked-out worktree, index stat data is recorded only after each
+materialized path still matches its source blob and its metadata remains stable
+across verification; changed or racy files are left for `libra status` to
+content-check. Ordinary files are re-hashed after atomic publication before
+their stat can be trusted. On non-Unix platforms,
+volatile stat fields remain zeroed because creation time cannot prove that
+content stayed unchanged; the observed worktree size is retained and status
+compares content.
 
 For bare clones, no working tree checkout is performed and the repository directory itself
 becomes the object store. Bare clones do not create `.libraignore`.

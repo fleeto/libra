@@ -951,6 +951,8 @@ fn origin_flag_names_the_remote() {
 /// are covered by `test_clone_local_path_ignores_shallow_options_matrix`.
 #[test]
 fn test_clone_local_flag_accepted_for_local_source() {
+    use git_internal::{hash::HashKind, internal::index::Index};
+
     use super::run_libra_command;
 
     let source = tempdir().expect("source dir");
@@ -986,6 +988,21 @@ fn test_clone_local_flag_accepted_for_local_source() {
             String::from_utf8_lossy(&out.stderr)
         );
         assert!(dest.join(".libra").exists(), "{flag}: clone created a repo");
+        let index = Index::load_with_hash_kind(HashKind::Sha1, dest.join(".libra/index"))
+            .expect("load cloned index");
+        let entry = index.get("f.txt", 0).expect("cloned file index entry");
+        let metadata = fs::symlink_metadata(dest.join("f.txt")).expect("cloned file stat");
+        assert_eq!(u64::from(entry.size), metadata.len(), "{flag}: index size");
+        assert_eq!(
+            entry.ctime.to_string() == "0:0",
+            !cfg!(unix),
+            "{flag}: index ctime"
+        );
+        assert_eq!(
+            entry.mtime.to_string() == "0:0",
+            !cfg!(unix),
+            "{flag}: index mtime"
+        );
         let log = run_libra_command(&["log", "--oneline"], &dest);
         assert!(
             String::from_utf8_lossy(&log.stdout).contains("c1"),

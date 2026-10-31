@@ -556,3 +556,6 @@ src/command/cloud.rs	capture_snapshot_paging_routes_a_background_upload_warning	
 src/command/cloud.rs	capture_snapshot_spool_retries_or_stops_when_rows_change	lane:cwd+env	PI-09: enter_isolated_libra_repo sets HOME/LIBRA_TEST_HOME and changes cwd; remote side is MockD1 plus InMemory R2 only
 src/command/cloud.rs	capture_snapshot_spool_keeps_a_row_promoted_after_the_freeze_unsynced	lane:cwd+env	PI-09: enter_isolated_libra_repo sets HOME/LIBRA_TEST_HOME and changes cwd; remote side is MockD1 plus InMemory R2 only
 src/command/cloud.rs	capture_snapshot_spool_retries_when_the_freeze_connection_is_replaced	lane:cwd+env	PI-09: enter_isolated_libra_repo sets HOME/LIBRA_TEST_HOME and changes cwd; remote side is MockD1 plus InMemory R2 only
+src/command/restore.rs	restore_races_do_not_certify_modified_content_as_clean	lane:cwd+env	isolated repository restore race changes cwd and configuration environment
+src/command/restore.rs	restore_trusted_stat_does_not_load_fallback_blob	lane:cwd+env	initializes isolated restore fixture and changes cwd/config environment
+src/command/restore.rs	restore_legacy_api_reuses_published_snapshot	lane:cwd+env	initializes isolated restore fixture and changes cwd/config environment

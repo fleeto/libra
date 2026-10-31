@@ -182,7 +182,15 @@ consent before content access/export, provider-root descriptor authorization,
 typed redaction before persistence, current-repository ownership, coverage
 claim + import identity fencing, and local erase tombstones. The default
 `agent list --json` remains schema v1; callers opt into the method matrix with
-`--schema-version 2`. Batch limits charge bytes actually read from the held
+`--schema-version 2`. The importable kinds are one set,
+`agent_import::IMPORTABLE_AGENT_KINDS` (`claude_code`, `codex`, `opencode`,
+`hermes`; plan-20260911 PI-29): `agent import --agent` parses against it, and
+every prepared-import entry point (`import_prepared`,
+`import_prepared_with_coverage_versions`, the retention and shared persistence
+paths) refuses any other kind before a lease, catalog row, checkpoint or object
+is written, so an embedding caller cannot store a session the CLI refuses.
+Registry readability (`transcript_readable`) does not make a kind importable.
+Batch limits charge bytes actually read from the held
 source even when a candidate later fails validation, and the absolute deadline
 begins before discovery, bounds reservation/object/CAS work, and releases every
 owned uncommitted import lease on expiry. Transaction commit awaits are not

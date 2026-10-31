@@ -7867,3 +7867,357 @@ fn pi_content_projection_keeps_readable_context_entries() {
         ]
     );
 }
+
+// ---- PI-16: Pi session usage totals and model attribution ----
+
+/// A Pi `Usage` value (`ai/src/types.ts`), with only `cost.total` set
+/// among the cost parts.
+fn pi_usage(input: u64, output: u64, cache_read: u64, cache_write: u64, cost: f64) -> Value {
+    json!({
+        "input": input,
+        "output": output,
+        "cacheRead": cache_read,
+        "cacheWrite": cache_write,
+        "totalTokens": input + output + cache_read + cache_write,
+        "cost": {"input": 0, "output": 0, "cacheRead": 0, "cacheWrite": 0, "total": cost},
+    })
+}
+
+fn pi_assistant(model: &str, response_model: Option<Value>, usage: Option<Value>) -> Value {
+    let mut message = json!({
+        "role": "assistant",
+        "content": [{"type": "text", "text": "ok"}],
+        "provider": "deepseek",
+        "model": model,
+    });
+    if let Some(response_model) = response_model {
+        message["responseModel"] = response_model;
+    }
+    if let Some(usage) = usage {
+        message["usage"] = usage;
+    }
+    json!({ "message": message })
+}
+
+/// Every usage source of one session: the active branch (with history
+/// before a compaction), an abandoned branch, a `usage` entry of an
+/// unknown kind, compaction and branch-summary usage, a tool result with
+/// and without usage, and a `model_change` naming a virtual model.
+fn pi_usage_session() -> PiV3File {
+    PiV3File::new()
+        .entry(
+            "model_change",
+            "mc",
+            None,
+            json!({"provider": "virtual", "modelId": "auto-router"}),
+        )
+        .message("u1", Some("mc"), "user")
+        .entry(
+            "message",
+            "a1",
+            Some("u1"),
+            pi_assistant("deepseek-v4-pro", None, Some(pi_usage(10, 20, 1, 2, 0.5))),
+        )
+        .entry(
+            "message",
+            "t1",
+            Some("a1"),
+            json!({"message": {"role": "toolResult", "toolCallId": "c1", "toolName": "read", "content": [], "isError": false, "usage": pi_usage(1, 1, 0, 0, 0.25)}}),
+        )
+        .entry(
+            "message",
+            "t2",
+            Some("t1"),
+            json!({"message": {"role": "toolResult", "toolCallId": "c2", "toolName": "read", "content": [], "isError": false}}),
+        )
+        .entry(
+            "usage",
+            "us",
+            Some("t2"),
+            json!({"kind": "never-seen-kind", "provider": "deepseek", "model": "deepseek-flash", "usage": pi_usage(3, 4, 0, 0, 0.125)}),
+        )
+        .entry(
+            "compaction",
+            "co",
+            Some("us"),
+            json!({"summary": "s", "firstKeptEntryId": "co", "tokensBefore": 40, "usage": pi_usage(5, 5, 0, 0, 0.0625)}),
+        )
+        .entry(
+            "branch_summary",
+            "bs",
+            Some("co"),
+            json!({"fromId": "u1", "summary": "s", "usage": pi_usage(2, 2, 0, 0, 0.03125)}),
+        )
+        .message("u2", Some("bs"), "user")
+        // Abandoned: a sibling answer to `u1` that the active branch left.
+        .entry(
+            "message",
+            "a2",
+            Some("u1"),
+            pi_assistant("deepseek-v4-pro", None, Some(pi_usage(100, 100, 0, 0, 1.0))),
+        )
+        .entry(
+            "message",
+            "a3",
+            Some("u2"),
+            pi_assistant(
+                "deepseek-v4-pro",
+                Some(json!("deepseek-v4-pro-0610")),
+                Some(pi_usage(0, 0, 0, 0, 0.0)),
+            ),
+        )
+}
+
+fn pi_metadata(
+    file: &PiV3File,
+) -> libra::internal::ai::observed_agents::builtin::pi::PiSessionMetadata {
+    libra::internal::ai::observed_agents::builtin::pi::project_pi_session_metadata(
+        &file.bytes(),
+        Default::default(),
+    )
+    .expect("session metadata")
+}
+
+/// PI-16 AC1: the session token total is the sum of every usage source in
+/// every raw entry, as Pi's `getSessionStats` counts it: off the active
+/// branch, before a compaction, a `usage` entry of an unknown kind,
+/// compaction and branch-summary usage, and tool-result and assistant usage.
+#[test]
+fn pi_session_metadata_totals_tokens_over_every_entry() {
+    let file = pi_usage_session();
+    let metadata = pi_metadata(&file);
+    assert!(!metadata.partial(), "{:?}", metadata.partial_reasons);
+    assert_eq!(metadata.usage_sources, 7);
+    assert_eq!(
+        (
+            metadata.totals.input,
+            metadata.totals.output,
+            metadata.totals.cache_read,
+            metadata.totals.cache_write,
+        ),
+        (121, 132, 1, 2)
+    );
+    assert_eq!(metadata.totals.tokens(), 256);
+    // The abandoned branch is counted: the active branch alone is short.
+    let branch = libra::internal::ai::observed_agents::builtin::pi::normalize_pi_session(
+        &file.bytes(),
+        Default::default(),
+    )
+    .expect("normalize");
+    assert!(!branch.entries.iter().any(|entry| entry.id == "a2"));
+}
+
+/// PI-16 AC2: the session cost total sums `cost.total` over the same
+/// sources.
+#[test]
+fn pi_session_metadata_totals_cost_over_every_entry() {
+    let metadata = pi_metadata(&pi_usage_session());
+    assert_eq!(
+        metadata.totals.cost,
+        0.5 + 0.25 + 0.125 + 0.0625 + 0.03125 + 1.0
+    );
+    assert_eq!(metadata.totals.cost, 1.96875);
+}
+
+/// PI-16 AC3: an assistant message with a `responseModel` is attributed to
+/// it, even when it differs from `model`.
+#[test]
+fn pi_session_metadata_attributes_the_response_model() {
+    let metadata = pi_metadata(&pi_usage_session());
+    let a3 = metadata
+        .models
+        .iter()
+        .find(|model| model.entry_id == "a3")
+        .expect("a3");
+    assert_eq!(a3.model.as_deref(), Some("deepseek-v4-pro-0610"));
+    assert!(a3.from_response_model);
+    assert_eq!(a3.provider.as_deref(), Some("deepseek"));
+}
+
+/// PI-16 AC4: without a `responseModel` (absent or `null`, as `??` treats
+/// them) the model is the message's `model`, never a `model_change`'s
+/// possibly virtual `modelId`. Ill-typed models and usage are partial and
+/// left out.
+#[test]
+fn pi_session_metadata_falls_back_to_the_message_model() {
+    use libra::internal::ai::observed_agents::builtin::pi::PiMetadataPartialReason;
+
+    let metadata = pi_metadata(&pi_usage_session());
+    assert_eq!(
+        metadata
+            .models
+            .iter()
+            .map(|model| (
+                model.entry_id.as_str(),
+                model.model.as_deref(),
+                model.from_response_model
+            ))
+            .collect::<Vec<_>>(),
+        vec![
+            ("a1", Some("deepseek-v4-pro"), false),
+            ("a2", Some("deepseek-v4-pro"), false),
+            ("a3", Some("deepseek-v4-pro-0610"), true),
+        ]
+    );
+    assert!(
+        metadata
+            .models
+            .iter()
+            .all(|model| model.model.as_deref() != Some("auto-router"))
+    );
+
+    let null_response = PiV3File::new()
+        .entry(
+            "model_change",
+            "mc",
+            None,
+            json!({"provider": "virtual", "modelId": "auto-router"}),
+        )
+        .message("u1", Some("mc"), "user")
+        .entry(
+            "message",
+            "a1",
+            Some("u1"),
+            pi_assistant(
+                "deepseek-flash",
+                Some(Value::Null),
+                Some(pi_usage(1, 1, 0, 0, 0.0)),
+            ),
+        );
+    let metadata = pi_metadata(&null_response);
+    assert!(!metadata.partial(), "{:?}", metadata.partial_reasons);
+    assert_eq!(metadata.models[0].model.as_deref(), Some("deepseek-flash"));
+    assert!(!metadata.models[0].from_response_model);
+
+    for (assistant, reason) in [
+        (
+            pi_assistant("m", Some(json!(7)), Some(pi_usage(1, 1, 0, 0, 0.0))),
+            PiMetadataPartialReason::MalformedModel,
+        ),
+        (
+            pi_assistant("m", None, None),
+            PiMetadataPartialReason::MalformedUsage,
+        ),
+        (
+            pi_assistant(
+                "m",
+                None,
+                Some(
+                    json!({"input": 1.5, "output": 1, "cacheRead": 0, "cacheWrite": 0, "cost": {"total": 0}}),
+                ),
+            ),
+            PiMetadataPartialReason::MalformedUsage,
+        ),
+        (
+            pi_assistant(
+                "m",
+                None,
+                Some(
+                    json!({"input": -1, "output": 1, "cacheRead": 0, "cacheWrite": 0, "cost": {"total": 0}}),
+                ),
+            ),
+            PiMetadataPartialReason::MalformedUsage,
+        ),
+        (
+            pi_assistant(
+                "m",
+                None,
+                Some(json!({"input": 1, "output": 1, "cacheRead": 0, "cacheWrite": 0})),
+            ),
+            PiMetadataPartialReason::MalformedUsage,
+        ),
+        (
+            {
+                let mut assistant = pi_assistant("m", None, Some(pi_usage(1, 1, 0, 0, 0.0)));
+                if let Some(message) = assistant["message"].as_object_mut() {
+                    message.remove("provider");
+                }
+                assistant
+            },
+            PiMetadataPartialReason::MalformedModel,
+        ),
+    ] {
+        let file = PiV3File::new().message("u1", None, "user").entry(
+            "message",
+            "a1",
+            Some("u1"),
+            assistant.clone(),
+        );
+        let metadata = pi_metadata(&file);
+        assert_eq!(
+            metadata.partial_reasons,
+            BTreeSet::from([reason]),
+            "{assistant}"
+        );
+    }
+    let overflow = PiV3File::new()
+        .message("u1", None, "user")
+        .entry(
+            "message",
+            "a1",
+            Some("u1"),
+            pi_assistant("m", None, Some(pi_usage(u64::MAX, 0, 0, 0, 0.0))),
+        )
+        .entry(
+            "message",
+            "a2",
+            Some("a1"),
+            pi_assistant("m", None, Some(pi_usage(1, 0, 0, 0, 0.0))),
+        );
+    let metadata = pi_metadata(&overflow);
+    assert_eq!(
+        metadata.partial_reasons,
+        BTreeSet::from([PiMetadataPartialReason::TokenOverflow])
+    );
+    assert_eq!(metadata.totals.input, u64::MAX);
+
+    // One usage whose counters fit but whose four-way sum does not.
+    let sum_overflow = PiV3File::new()
+        .message("u1", None, "user")
+        .entry("message", "a1", Some("u1"), pi_assistant("m", None, Some(pi_usage(u64::MAX, 0, 0, 0, 0.0))))
+        .entry("usage", "us", Some("a1"), json!({"kind": "k", "provider": "p", "model": "m", "usage": {"input": 0, "output": 1, "cacheRead": 0, "cacheWrite": 0, "cost": {"total": 0}}}));
+    let metadata = pi_metadata(&sum_overflow);
+    assert_eq!(
+        metadata.partial_reasons,
+        BTreeSet::from([PiMetadataPartialReason::TokenOverflow])
+    );
+    assert_eq!(metadata.totals.tokens(), u64::MAX);
+
+    // Finite costs that sum past `f64::MAX`.
+    let cost_overflow = PiV3File::new()
+        .message("u1", None, "user")
+        .entry(
+            "message",
+            "a1",
+            Some("u1"),
+            pi_assistant("m", None, Some(pi_usage(0, 0, 0, 0, 1e308))),
+        )
+        .entry(
+            "message",
+            "a2",
+            Some("a1"),
+            pi_assistant("m", None, Some(pi_usage(0, 0, 0, 0, 1e308))),
+        );
+    assert_eq!(
+        pi_metadata(&cost_overflow).partial_reasons,
+        BTreeSet::from([PiMetadataPartialReason::CostOverflow])
+    );
+
+    // A usage entry on a line the normalizer skipped (torn) may be missing
+    // from the totals.
+    let torn = PiV3File::new()
+        .message("u1", None, "user")
+        .entry(
+            "message",
+            "a1",
+            Some("u1"),
+            pi_assistant("m", None, Some(pi_usage(1, 1, 0, 0, 0.0))),
+        )
+        .raw(r#"{"type":"usage","id":"us","parentId":"a1","usage":{"input":5"#);
+    let metadata = pi_metadata(&torn);
+    assert_eq!(
+        metadata.partial_reasons,
+        BTreeSet::from([PiMetadataPartialReason::SkippedLine])
+    );
+    assert_eq!(metadata.totals.tokens(), 2);
+}

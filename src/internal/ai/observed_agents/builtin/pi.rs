@@ -7,7 +7,9 @@
 //! PI-03 normalizes one v3 session file into its tree, disk leaf, active
 //! branch, and user turns, without keeping content; PI-11 projects that
 //! branch's message content, keeping thinking and tool-call blocks exactly
-//! as written. Pi stays unsupported:
+//! as written; PI-16 totals a session's token and cost usage over every
+//! entry and attributes each assistant message to `responseModel ?? model`.
+//! Pi stays unsupported:
 //! nothing here imports a session, installs hooks, or reads a transcript for
 //! capture.
 //!
@@ -1686,6 +1688,254 @@ fn bound_nested_calls(
         calls: calls.unwrap_or(0),
         complete,
         raw: within.then(|| PiRawJson(nested.to_owned())),
+    }
+}
+
+/// Session token and cost totals, as Pi's `UsageTotals`
+/// (`usage-totals.ts:4-28`): the four token counters and `cost.total`.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct PiUsageTotals {
+    pub input: u64,
+    pub output: u64,
+    pub cache_read: u64,
+    pub cache_write: u64,
+    /// Sum of each usage's `cost.total`.
+    pub cost: f64,
+}
+
+impl PiUsageTotals {
+    /// All tokens, as Pi's breakdown counts them (`usage-totals.ts:90-94`),
+    /// saturating at `u64::MAX` (then [`PiMetadataPartialReason::TokenOverflow`]).
+    pub fn tokens(&self) -> u64 {
+        self.input
+            .saturating_add(self.output)
+            .saturating_add(self.cache_read)
+            .saturating_add(self.cache_write)
+    }
+}
+
+/// The model one assistant message is attributed to.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct PiModelAttribution {
+    /// The assistant message entry's `id`.
+    pub entry_id: String,
+    pub provider: Option<String>,
+    /// `responseModel` when the message has one, else `model`
+    /// (`usage-totals.ts:66`); `None` when that value is not a string.
+    pub model: Option<String>,
+    /// Whether the message has a `responseModel` (absent and `null` fall
+    /// back to `model`, as `??` does).
+    pub from_response_model: bool,
+}
+
+/// Why session metadata may be incomplete.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
+pub enum PiMetadataPartialReason {
+    /// A usage source whose `usage` is missing or not Pi's shape
+    /// (non-negative integer token counters and a finite `cost.total`): it
+    /// is left out of the totals.
+    MalformedUsage,
+    /// An assistant message whose `responseModel` is not a string, that has
+    /// no `responseModel` and no string `model`, or whose required
+    /// `provider` is missing or not a string.
+    MalformedModel,
+    /// A token counter, or their sum, would overflow; it stops at
+    /// `u64::MAX`.
+    TokenOverflow,
+    /// The cost total is no longer finite.
+    CostOverflow,
+    /// A line the normalizer skipped (unparseable or a falsy JSON value) may
+    /// have been a usage source or an assistant message.
+    SkippedLine,
+}
+
+/// Session usage totals and model attribution of one session file.
+#[derive(Clone, Debug, PartialEq)]
+pub struct PiSessionMetadata {
+    pub totals: PiUsageTotals,
+    /// Usage sources added to the totals.
+    pub usage_sources: usize,
+    /// Every assistant message in the file, in file order.
+    pub models: Vec<PiModelAttribution>,
+    pub partial_reasons: BTreeSet<PiMetadataPartialReason>,
+}
+
+impl PiSessionMetadata {
+    pub fn partial(&self) -> bool {
+        !self.partial_reasons.is_empty()
+    }
+}
+
+/// One usage value in Pi's shape.
+struct ParsedUsage {
+    input: u64,
+    output: u64,
+    cache_read: u64,
+    cache_write: u64,
+    cost: f64,
+}
+
+fn parse_usage(raw: &serde_json::value::RawValue) -> Option<ParsedUsage> {
+    let fields = raw_fields(raw.get())?;
+    let counter = |name: &str| typed_field::<u64>(&fields, name).ok().flatten();
+    let cost = member(&fields, "cost")
+        .and_then(|cost| raw_fields(cost.get()))
+        .and_then(|cost| typed_field::<f64>(&cost, "total").ok().flatten())
+        .filter(|total| total.is_finite())?;
+    Some(ParsedUsage {
+        input: counter("input")?,
+        output: counter("output")?,
+        cache_read: counter("cacheRead")?,
+        cache_write: counter("cacheWrite")?,
+        cost,
+    })
+}
+
+/// Project a session file's token and cost totals and the model of each
+/// assistant message. As Pi's `getSessionStats`
+/// (`agent-session.ts:4243-4275`), the totals cover every entry in the
+/// file, on the active branch or not, compacted or not: `usage` entries of
+/// any `kind`, the `usage` of `branch_summary` and `compaction` entries and
+/// of tool results when present, and each assistant message's `usage`. A
+/// model is the message's `responseModel ?? model`; `model_change`
+/// entries, whose `modelId` can name a virtual model, are never used. The
+/// file is normalized first, so it is refused exactly when
+/// [`normalize_pi_session`] refuses it.
+pub fn project_pi_session_metadata(
+    bytes: &[u8],
+    limits: PiNormalizeLimits,
+) -> std::result::Result<PiSessionMetadata, PiNormalizeRefusal> {
+    // The same refusals as the normalizer. A line it skipped is skipped
+    // here too, and may have held usage.
+    let branch = normalize_pi_session(bytes, limits)?;
+    let mut metadata = PiSessionMetadata {
+        totals: PiUsageTotals::default(),
+        usage_sources: 0,
+        models: Vec::new(),
+        partial_reasons: BTreeSet::new(),
+    };
+    if branch
+        .partial_reasons
+        .contains(&PiBranchPartialReason::MalformedLine)
+    {
+        metadata
+            .partial_reasons
+            .insert(PiMetadataPartialReason::SkippedLine);
+    }
+    let mut header_seen = false;
+    for line in bytes.split(|byte| *byte == b'\n') {
+        let Some(fields) = std::str::from_utf8(line).ok().and_then(raw_fields) else {
+            continue;
+        };
+        let kind = typed_field::<String>(&fields, "type").ok().flatten();
+        if !header_seen {
+            // The normalizer has proved the first parsed object is the header.
+            header_seen = true;
+            continue;
+        }
+        let message = member(&fields, "message").and_then(|raw| raw_fields(raw.get()));
+        let role = message
+            .as_ref()
+            .and_then(|message| typed_field::<String>(message, "role").ok().flatten());
+        // Each usage source, and whether Pi adds it unconditionally (a
+        // missing one is then malformed) or only when present.
+        let source = match (kind.as_deref(), role.as_deref()) {
+            (Some("usage"), _) => Some((member(&fields, "usage"), true)),
+            (Some("branch_summary" | "compaction"), _) => Some((member(&fields, "usage"), false)),
+            (Some("message"), Some("toolResult")) => message
+                .as_ref()
+                .map(|message| (member(message, "usage"), false)),
+            (Some("message"), Some("assistant")) => message
+                .as_ref()
+                .map(|message| (member(message, "usage"), true)),
+            _ => None,
+        };
+        if let Some((usage, required)) = source {
+            match usage.filter(|raw| raw.get() != "null") {
+                Some(raw) => match parse_usage(raw) {
+                    Some(usage) => add_usage(&mut metadata, usage),
+                    None => {
+                        metadata
+                            .partial_reasons
+                            .insert(PiMetadataPartialReason::MalformedUsage);
+                    }
+                },
+                None if required => {
+                    metadata
+                        .partial_reasons
+                        .insert(PiMetadataPartialReason::MalformedUsage);
+                }
+                None => {}
+            }
+        }
+        if let (Some("message"), Some("assistant"), Some(message)) =
+            (kind.as_deref(), role.as_deref(), message.as_ref())
+        {
+            // `responseModel ?? model`: `??` falls back on absent and `null`.
+            let (model, from_response_model) =
+                match member(message, "responseModel").filter(|raw| raw.get() != "null") {
+                    None => (
+                        typed_field::<String>(message, "model").ok().flatten(),
+                        false,
+                    ),
+                    Some(raw) => (serde_json::from_str::<String>(raw.get()).ok(), true),
+                };
+            let provider = typed_field::<String>(message, "provider").ok().flatten();
+            if model.is_none() || provider.is_none() {
+                metadata
+                    .partial_reasons
+                    .insert(PiMetadataPartialReason::MalformedModel);
+            }
+            metadata.models.push(PiModelAttribution {
+                entry_id: typed_field::<String>(&fields, "id")
+                    .ok()
+                    .flatten()
+                    .unwrap_or_default(),
+                provider,
+                model,
+                from_response_model,
+            });
+        }
+    }
+    Ok(metadata)
+}
+
+fn add_usage(metadata: &mut PiSessionMetadata, usage: ParsedUsage) {
+    let totals = &mut metadata.totals;
+    let mut overflow = false;
+    for (total, value) in [
+        (&mut totals.input, usage.input),
+        (&mut totals.output, usage.output),
+        (&mut totals.cache_read, usage.cache_read),
+        (&mut totals.cache_write, usage.cache_write),
+    ] {
+        match total.checked_add(value) {
+            Some(sum) => *total = sum,
+            None => {
+                *total = u64::MAX;
+                overflow = true;
+            }
+        }
+    }
+    // The four-way sum `tokens()` reports must not overflow either.
+    overflow |= totals
+        .input
+        .checked_add(totals.output)
+        .and_then(|sum| sum.checked_add(totals.cache_read))
+        .and_then(|sum| sum.checked_add(totals.cache_write))
+        .is_none();
+    totals.cost += usage.cost;
+    let cost_overflow = !totals.cost.is_finite();
+    metadata.usage_sources += 1;
+    if overflow {
+        metadata
+            .partial_reasons
+            .insert(PiMetadataPartialReason::TokenOverflow);
+    }
+    if cost_overflow {
+        metadata
+            .partial_reasons
+            .insert(PiMetadataPartialReason::CostOverflow);
     }
 }
 

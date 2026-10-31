@@ -6,7 +6,7 @@
 //! triple before invoking these helpers so `internal::operation` never depends
 //! on `command`.
 
-use std::time::SystemTime;
+use std::time::{SystemTime, UNIX_EPOCH};
 
 use git_internal::internal::index::{IndexEntry, Time};
 
@@ -20,6 +20,12 @@ pub fn entry_stat_matches(
     mtime: SystemTime,
     size: u64,
 ) -> bool {
+    // Zero timestamps mark an unverified/smudged entry, even if a filesystem
+    // happens to report the epoch for the actual file as well.
+    let untrusted = Time::from_system_time(UNIX_EPOCH);
+    if entry.ctime == untrusted || entry.mtime == untrusted {
+        return false;
+    }
     let Ok(stat_size) = u32::try_from(size) else {
         return false;
     };
@@ -65,6 +71,30 @@ mod tests {
         entry.ctime = git_internal::internal::index::Time::from_system_time(ctime);
         entry.mtime = git_internal::internal::index::Time::from_system_time(mtime);
         entry
+    }
+
+    #[test]
+    fn zero_stat_fields_never_authorize_short_circuit() {
+        let nonzero = UNIX_EPOCH + Duration::from_secs(1_700_000_000);
+        let index_mtime = nonzero + Duration::from_secs(20);
+        for (ctime, mtime) in [
+            (UNIX_EPOCH, UNIX_EPOCH),
+            (UNIX_EPOCH, nonzero),
+            (nonzero, UNIX_EPOCH),
+        ] {
+            let entry = sample_entry(ctime, mtime, 11);
+            assert!(
+                !entry_stat_matches(&entry, ctime, mtime, 11),
+                "zero stat means no proof even when the filesystem timestamps match"
+            );
+            assert!(index_entry_stat_differs(
+                &entry,
+                ctime,
+                mtime,
+                11,
+                Some(index_mtime)
+            ));
+        }
     }
 
     /// G18: status and snapshot both call this module's helpers; the former

@@ -1074,7 +1074,7 @@ FIX08采纳候选待双审；Mega109/活动108、Libra26/活动25、联合135/�
 
 | 计划 | 类别 | 状态 | 一句话进度（卡片状态） |
 |---|---|---|---|
-| [`plan-20261028-status-performance.md`](plan-20261028-status-performance.md) | status 正确性与性能 | 实施中 | **2026-10-30 03:06:14 UTC**：SP-00 与 SP-01 `done/complete`（SP-01 PR #655 已于 2026-10-30T01:23:41Z 按 EX-SP-01-CLOSE-01 / EX-SP-01-UPSTREAM-CI-01 合并为 `e4eb85061af79b4deff37e569265f1c6b82787d4`，#640 已关闭，#656 继续跟踪上游 Hermes 架构守卫；网站与独立发版由 DEFER-SP-DOCS-01 / DEFER-SP-REL-01 跟踪）。**SP-02 `done/complete`（修复卡收口口径 EX-SP-02-CLOSE-01，版本保持 `0.30.101` 不变）**：#641，分支 `codex/SP-02`，经用户批准扩写集至 8 生产文件（`4/8` M 范围），完成 `decoded_object_size(s)` 与 `object_size(s)` 加载预算分离、`restore` 批量 decoded-size 写入、EN/zh-CN `restore.md` 同步及本地验证（RED 52952 vs 26400 复现后转 GREEN；`utils::storage::` 84/84、`storage_config_hold` 11/11、`command::restore::tests::` 9/9、`restore_test::` 50/50、新增 `restore_delta_index_size_` 4/4、`compat_serial_registry` 26/26、两项生产 unwrap 守卫各 1/1，fmt 与严格 Clippy 全特性均 exit 0；本机 16 GiB 内存硬门槛下 nextest 记 not-run）；按用户“首先设置任务完成，然后再提交、推送、创建 PR，版本不变”指令收口提交推送建 PR，PR CI 在推送后单独观察、不在提交前预称远端通过，网站与独立 patch 发布分别由 DEFER-SP-DOCS-02 / DEFER-SP-REL-02 跟踪（未执行）；SP-03..09 仍 `pending`。 |
+| [`plan-20261028-status-performance.md`](plan-20261028-status-performance.md) | status 正确性与性能 | 实施中 | **2026-10-30 20:08:44 UTC**：SP-00 与 SP-01 `done/complete`（SP-01 PR #655 已于 2026-10-30T01:23:41Z 按 EX-SP-01-CLOSE-01 / EX-SP-01-UPSTREAM-CI-01 合并为 `e4eb85061af79b4deff37e569265f1c6b82787d4`，#640 已关闭，#656 继续跟踪上游 Hermes 架构守卫；网站与独立发版由 DEFER-SP-DOCS-01 / DEFER-SP-REL-01 跟踪）。**SP-02 `done/complete`（修复卡收口口径 EX-SP-02-CLOSE-01，版本保持 `0.30.101` 不变）**：#641，分支 `codex/SP-02`，经用户批准扩写集至 8 生产文件（`4/8` M 范围），完成 `decoded_object_size(s)` 与 `object_size(s)` 加载预算分离、`restore` 批量 decoded-size 写入、EN/zh-CN `restore.md` 同步及本地验证（RED 52952 vs 26400 复现后转 GREEN；`utils::storage::` 84/84、`storage_config_hold` 11/11、`command::restore::tests::` 9/9、`restore_test::` 50/50、新增 `restore_delta_index_size_` 4/4、`compat_serial_registry` 26/26、两项生产 unwrap 守卫各 1/1，fmt 与严格 Clippy 全特性均 exit 0；本机 16 GiB 内存硬门槛下 nextest 记 not-run）；按用户“首先设置任务完成，然后再提交、推送、创建 PR，版本不变”指令收口提交推送建 PR，PR CI 在推送后单独观察、不在提交前预称远端通过，网站与独立 patch 发布分别由 DEFER-SP-DOCS-02 / DEFER-SP-REL-02 跟踪（未执行）；SP-03（#642）本地整改完成/remote-pending：PR #661首个head bb8e2c3因与main冲突未跑CI，已合入98aa6be、保留双方serial登记及Result接口，版本随主线0.30.118。合并后14个指定测试命令、fmt/严格Clippy/cargo check、两release和新16格/1200调用/960样本矩阵独立审计均通过，default下降30.03%–51.86%。EX-SP-03-VER-01及EX-SP-03-CLOSE-01按用户1→3→2生效；最终同head全量CI/CodeQL待验，成功回执不专建提交，随下次例行同步。网站与独立发布未执行；SP-04..09仍pending。 |
 | [`plan-20261025-qualification.md`](plan-20261025-qualification.md) | 来源资格前滚修复 | **2026-10-31 05:20:08 UTC 起草；2026-10-31 05:54:24 UTC R4 后前滚；2026-10-31 06:09:09 UTC R5 后归属措辞补正：** v0.30.92 release success 与同 SHA release-branch base run `40995496573` failure 并存；完整来源资格/Claude 未取得，DEP-QUAL-HANDOFF 未解除（producer outgoing / consumer incoming），且具名交付门 DEP-QUAL-CODEONLY-GOV 仍 incoming、仅在 GOV 自身适用 main D 全绿后解除。后续仅按 v2.16 具名 code-only 前滚、实际 branch D，无新 tag/Release；旧窗口及失败不重置。 **历史：** **2026-10-29 UTC Claude 执行 Agent：** 来源资格未闭合。FIX-LTR-06 A 全量先因 replace 夹具（FIX-LTR-07）、再因存储配置 fail-closed 一族（FIX-LTR-08）失败；三卡依用户决定同随 v0.30.92，A 全量在三卡合并树（green3 后，main `ba38e30`）R4：nextest PASS 10836/10836；blaze 的 ra-jit 守护进程再次停在「loading」、未跑任何测试，依用户决定 DEC-QUAL-R4-CARGO-TEST 于 08:08:47Z 停止（`run-r4-blaze.STOPPED-BY-USER.txt`；执行器 08:08:53Z 退出），改跑普通进程内 `cargo test --all`：在窗口结束时 TIMEOUT（`command_test` 中途），已完成的 69 个二进制中 lib 15 例失败、`command_test` 已运行部分 3 例 fsck 失败，均在 nextest 下通过；依 DEC-QUAL-R4-BASELINE 在发布代码上对照，对照显示：最终树两次进程内 lib 运行合计 21 例失败，其中 17 例在发布代码上同样失败，另 4 例只在最终树失败（判为同族是推断）；依 DEC-QUAL-INPROCESS-DEFER（含接受这 4 例）登记为 DEFER-QUAL-INPROCESS-ISOLATION；其中 4 例带存储配置拒绝文字，依 DEC-QUAL-FIX08-NEXTEST-RULE 不作为 FIX-LTR-08 的依据；A 的全量门以 nextest PASS 为准（`fix-ltr06/r4-gate.json`）。 R4 之后上游前进到 `1e5310c`（改动产品代码），在合并树上重跑 R5，R5（main `1e5310c` 加三卡，被测文件逐文件存档于 `fix-ltr08/tested-tree-snapshot-r5/`）：fmt、strict clippy PASS；nextest 全量 PASS，10836/10836，0 FLAKY、0 重试（`fix-ltr06/run-r5/`）；门文件 `fix-ltr06/r5-gate.json`。 R5 PASS 且计划治理文字复审 PASS 后才提交和推送；root 窗口已归还未重新授予。依赖保持 incoming。 **2026-10-28 09:16:58 UTC Claude 执行 Agent 复核（原文保留）：**来源资格未闭合。F2 仍 unknown/P1，用户已决定限定关闭条件（FIX-LTR-06 完整 C/D、F2 诊断、本地 Claude 关闭审查 PASS），尚未满足；FIX-LTR-06 blocked（ER-03 已 PASS；root 已于 07:49:04Z 授予窗口，尚未 claim）；FIX05–FIX03 C 与 e24c88b 最终窗口原件取不到；FIX05 卡 VER-6 未勾、VER-1/VER-4 未落地、AC-3 被复现反证；六个提交与四个附注 tag 签名 NO_PUBKEY 3F5F84D5…；本地 main 先为 29eaa97（另一写者），现已快进到 8abdcf7（PR #649，06:07:23Z 已在远端 main，仅文档）。DOC-LTR-03 in-progress。依赖保持 incoming。 **2026-10-27 早前（原文保留）：** 2026-10-27现场：五张实现卡 main/release D 已观察，含 v0.30.87 base 40156941519、CodeQL 40156941508、release 40157032761，以及 v0.30.88–v0.30.91；终态登记 `e5424c5` 的 main D success，随后 `380c262` 登记。FIX03 实际 Claude 资格 PASS 本轮未重放，F2 仍 unknown，依赖保持 incoming，不闭合 LTR-10。 **历史索引：** 2026-10-26：FIX-LTR-05P 至 FIX-LTR-05V 已在 main，均无版本 bump。DEC-QUAL-05 用户原话已记录：UTC 2026-10-26T05:40:46Z，范围只有 from_payload 与 from_payload_with_hint_policy，期限到下一个 patch 标签，v0.30.88 可以带上这两条 dead_code 诊断。session 4042079a RELEASE_ORDER_VERDICT PASS。FIX-LTR-05W 已在 main `2a80a10`。ER03 `c6cf48c1` PASS，实现审查 `2ee621eb` PASS。当时 `init` 未改。FIX-LTR-05X 已在 main `a729384`。ER03 `8059d2f4` PASS，实现审查 `bd0e229d` PASS。FIX-LTR-05Y 已在 main `ec98926`。ER03 `db7a5d7f` PASS，实现审查 `a2a2af14` PASS。FIX-LTR-05Z ER03 `272c8d7d` PASS，实现审查 `4a42ec63` PASS。仓库库打不开仍不构造可写的 LocalStorage。全局库存在但打不开时，对象存储回到历史本地后端，已有对象仍可读取。完整套件 run `db0184d9`：10822 passed，0 failed。随后 ae50414 上父卡 VER-1 至 VER-5 通过：93、62、51、58、54，0 failed。含解密前缀的完整套件 `df24361e`：10822 passed，0 failed。审查 `d9641b0d` VERDICT PASS。本提交占用 v0.30.88。tag 与 D 尚未观察。F2 仍 unknown。RISK-QUAL-ADD-LOOSE 未修。2026-10-26T19:12:37Z 修订允许 FIX04 只加两行 cfg，同时 CLOSE 保持 unknown，P1 不关闭。v0.30.88 的 D 已于 2026-10-26T18:23:07Z 观察成功：base 40349034162 attempt 2、CodeQL 40349034316、release 40349204443，SHA e85470a。FIX04 已在 main `ff30d4a`，tag v0.30.89，实现审查 354b5170 PASS。D 已于 2026-10-26T20:44:43Z 观察成功：base 40391580491、CodeQL 40391580303、release 40391698253。F2 仍 unknown。FIX02 从该树接续。索引结清后导出模块 `6bbd9880` 15 passed，真实云 `219d5a37` 1 passed，fixture `b5c92ec6-90ec-4a3e-a1c4-2faa9b2ae259`。默认全量 `58f94c1b`：10822 passed，0 failed，22 skipped，1 次非 TRY1 的重试通过。本卡占用 v0.30.90。实现审查 `0a4e9544` VERDICT PASS。D 已观察成功：base `40406196457`、CodeQL `40406196519`、release `40406331881`，SHA `98852b7`。FIX03 从该树接续。MCP `6e211dc4` 16 passed，精确用例 `fa7ba635` 1 passed，network `d4b03bd4` 3 passed，全量 `3b39b1e1` 10822 passed。审查 `b11fc563` VERDICT PASS。本卡占用 v0.30.91。D 已观察成功：base `40426098305`、CodeQL `40426098171`、release `40426201816`，SHA `e24c88b`。最终资格在该树：fmt 0，clippy 0，全量 `8bb4fff2` 10822 passed、0 failed、22 skipped，doc 0，network `990e6bd6` 3 passed、0 skipped。五张实现卡 D 均已观察。终态文档审查 `bde085f1` VERDICT PASS。终态文档 `e5424c5` 的 main D 已观察成功：base `40433225564`、CodeQL `40433225610`。这是例行补记。未修 P2：RISK-QUAL-MACOS-CHILD、RISK-QUAL-CLEANUP-SIGKILL、RISK-QUAL-WIN-PARENT、RISK-QUAL-HELPER-THREAD。F2 仍 unknown。不解除 LTR10 incoming，不改 H1，scoped-traces 仍 0/26。本行前部在 v0.30.88 提交时写的「tag 与 D 尚未观察」是当时状态，后文各卡的观察成功覆盖它。 | 原 FAIL/STOP 保留。DOC-LTR-02 main D 已在 a4d84829 观察为 success。 |
 | [`plan-20261019-agent-mcp-server.md`](plan-20261019-agent-mcp-server.md) | B（外部 Agent 标准 MCP 接入） | 实施中 | 41 卡（MC-01..MC-08、MC-10..MC-41、MC-43；MC-09 已撤销，MC-42 已并入 MC-06）。MC-01 `done` / `complete`（`v0.30.68`，tag `e418297`；main `e4d843d` 的 base.yml 39427673509 attempt 2 与 codeql 39427673357 成功）；MC-22 `done`（0.30.69）；MC-16 `done` / `complete`（`v0.30.71`）；MC-19 `done` / `complete`（`v0.30.72`）；MC-29 `in-progress`（`v0.30.79` 的 release.yml 39576472385 success；该 merge SHA 的 base/codeql 被后续 main 提交取消）；MC-35 `done` / `complete`（`v0.30.82` / `24fabae`；release.yml 39591913788 success；codeql 39591846433 success；含该提交的 `f0ea585` base.yml 39629633740 与 codeql 39629633747 success）；MC-32 `done` / `complete`（`v0.30.84` / `99a92c1`；release.yml 39642596203 success；codeql 39642505059 success；含该提交的 `2b67073` base.yml 39729493615 与 codeql 39729493671 success）；MC-36 `in-progress` / `locally-accepted`（发布候选 `0.30.86`）；其余 pending。`libra agent mcp` 标准 MCP 入口（stdio 供 WorkBuddy；loopback HTTP 经 HTTPS 终端供 Grok Bot 客户端工具——不是 Grok 模型），bridge 对外契约不变、只服务 DeepSeek Harness；计划级 review：Codex R64 PASS（R66 差异确认 PASS）。 |
 | [`plan-20261019-worktree-layout.md`](plan-20261019-worktree-layout.md) | 横切（worktree 默认目录与任务生命周期） | 已完成 | WD-01..08 与 WD-02G **9/9 done/complete**。默认 `.libra/worktree`，旧数据不迁移；v0.30.85 已发布，未发布 v0.31.1。候选/合流各八作业及 CodeQL、双全量、真实 macFUSE 16/16、旧版拒绝 9/9、四平台签名 stable/安装与网站生产 24/24 均通过。失败/重试/范围外残留及 v2.14 终止链记录见正文。 |
@@ -1506,7 +1506,7 @@ DEFER-AD-01..16：Git advice、ignored 相对路径、`add -u --ignore-missing` 
 
 ### 5.4 其它计划
 
-- plan-20261028-status-performance：`DEFER-SP-DOCS-01`（SP-01 网站 `status` 文档同步、验证和部署，未执行）、`DEFER-SP-REL-01`（SP-01 独立 patch bump 与发布流水线，未执行）、`DEFER-SP-DOCS-02`（SP-02 网站 `restore` 文档同步、验证和部署，因 `/Volumes/Sea/libra-backend` 未挂载经用户批准暂搁，未执行）、`DEFER-SP-REL-02`（SP-02 独立 patch bump 与发布流水线，按用户“版本不变”指令暂搁，未执行）、`DEFER-SP-01..03`（会话级 pack 缓存、marker 合并、stat/hash 有界批处理，待 SP-09 复测与新决策）。
+- plan-20261028-status-performance：SP-03（#642）于 2026-10-30 在 `codex/SP-03` 实施中；用户按 EX-SP-03-DOCS-01 批准先搁置网站文档依赖，登记 `DEFER-SP-DOCS-03`（网站 clone/restore 文档、验证与部署未执行，不计完成）。本地 7/7 特有验收项与 8/8 验证项完成：restore 54/54、clone 43/43、新 stat 前缀 4/4、并发/racy 单测各 1/1、fmt 检查通过。用户按 EX-SP-03-PERF-01 要求完成 2,125 路径 main/候选 release 配对对比（5 次预热 + 20 对）：首次 status 中位数 -36.17%，clone +11.27%，clone+首次 status 合计 +4.57%；状态语义/index 不变量全通过，端到端总耗时回归如实记录，故不宣称整体性能收益。网站门延后，整卡仍 in-progress。既有 `DEFER-SP-DOCS-01/02`（SP-01/02 网站文档交付）、`DEFER-SP-REL-01/02`（SP-01/02 独立发布）及 `DEFER-SP-01..03`（pack 会话缓存、marker 合并、stat/hash 有界批处理，待 SP-09 复测与新决策）继续有效。
 
 - plan-20261015：`DEFER-LTR-06`，用户取消 LTR-00 后续验收；卡保持 blocked/空，原 AC-3/自身 ER-05 FAIL 与静态子项历史保留。LTR-10/LTR-01 不自动放行，替代依赖须 ER-03/G-09 两仓双审。
 
@@ -4555,3 +4555,59 @@ Libra交接实际证据（2026-10-26）：单文件main提交a4d84829，parent b
 > 本次MTR103真实post-C/D事实由MTR11既有六Mega治理/协议I承载，其自身C/D尚待；原Libra三治理仍仅本地、由LTR01承载。旧被测/已发布树不改写，MTR103原预算不重启；下方更早的当前/候选/待审措辞保留为历史，以本段、任务卡现行字段和H0现行列为准。
 原现行表格列： 当前状态（2026-10-26，实际收口01:54:13 UTC）：MTR-103已done/complete；C1完整21 targets、3140 PASS、0 failed、3原ignored，nightly fmt、all-target/all-feature严格Clippy及双build全部exit0/0warning；自己的本地Claude ER05与执行/发布审查均PASS，root在原3600秒内2298.567秒观察最终C。签名DCO提交5a2b93d9ca5a4071dbb5d1a1a6c7a403742a6102已推main，v0.42.75原生签名标注tag与手写Release已核；main CI40254455937、tag CI40254547920的amd64/arm64/Docker manifest全部attempt1实际success，未用Harbor例外。正式Mega23/118、Libra原计划0/26、联合23/144；外部资格1/4。 当前依赖与后续门（2026-10-26）：MTR102与103完整C/D已闭合；当前执行前沿MTR-11，pending/空，仅来源与开工核验，尚未准入实现或认领A/C。顺序11→40→13→39→92→12/H1→LTR10→11→12→LTR01/H2；各卡自身门与跨仓资格/WRITERS/LIVE前置不省略。Libra FIX04 C1仍FAIL/STOP，F1/F2 P1未修；实际Claude2891a30b来源PASS/发布次序FAIL。仅FIX-LTR-05一次release保留现有ingress两方法同一dead_code诊断的具名例外仍待用户明确答复；未准入新Libra实现/A/C/发布，PR636已满足旧Rustdoc下一提交要求。旧FIX3诊断3/3、B8失败及8/8 STOP、所有原失败和历史数据库根因未知均保留。
 ```
+
+- 2026-10-30 17:53:44 UTC SP-03 三模型整改已授权并启动，仍 in-progress；clean-combined 新回归实际 RED，输出语义修复与 GREEN 验证进行中。并发 AC 撤销完成勾选，全量触发登记 T-1；性能只按 SP-00 矩阵，clone 成本不阻断。旧 AC/VER 计数为历史结果，整改候选未验收，网站延期保留。
+
+- 2026-10-30 17:54:01 UTC SP-03 输出语义整改 GREEN：clean-combined 1/1，stat 前缀 6/6（含普通文件 clean→dirty）；其它整改及门禁继续待办，不改变 in-progress。
+
+- 2026-10-30 17:58:53 UTC SP-03 publication race 新回归实际 RED（等长保留 mtime 获错误 stat）；已实现发布后内容 hash 验证，GREEN/serial registry 待回执。整卡 in-progress，历史矩阵不覆盖修复后候选。
+
+- 2026-10-30 18:01:20 UTC SP-03 并发回归 GREEN 1/1（内部两个 restore 窗口），fmt check exit0；registry 终态待，size/API/workdir 优化及整套验证、最终矩阵待办。
+
+- 2026-10-30 18:03:11 UTC SP-03 registry 修正后 26/26 PASS；并发回归 1/1 PASS，仍 in-progress，继续 size/API/workdir 与最终验证。
+
+- 2026-10-30 18:09:22 UTC SP-03 无效 fallback blob 回归 RED→GREEN 1/1；旧 API 快照回归已 RED 并修复，restore lib 全组待验。workdir 按 worktree/index 各入口复用；保持 in-progress，最终矩阵与全门未完成。
+
+- 2026-10-30 18:11:12 UTC SP-03 restore lib 全组 12/12 GREEN，含新并发/size/API 回归；开始命令与 bridge 定向验证。仍 in-progress，最终矩阵/静态与全量门待。
+
+- 2026-10-30 18:15:00 UTC SP-03 restore 56/56、clone 43/43 PASS；worktree 60/65 五项 fixture vault 前置失败，局部禁签修复后重跑中；bridge 另启动，均待终态。nextest 本机 16GiB 禁止，网站/Claude 不可用，仍 in-progress。
+
+- 2026-10-30 18:15:25 UTC SP-03 worktree fixture 修正后 65/65 PASS；bridge 两 target 在跑，仍 in-progress。
+
+- 2026-10-30 18:16:37 UTC SP-03 checkpoint 3/3 PASS；bridge VCS fixture 签名隔离修正后待重跑终态（3253），Clippy 在跑（51316），未计最终绿。
+
+- 2026-10-30 18:22:33 UTC SP-03 bridge VCS 8/8、checkpoint 3/3、agent checkpoint 3/3、worktree isolation119/119及严格Clippy实际PASS；修复后release/最终矩阵待，仍in-progress。
+
+- 2026-10-30 18:25:01 UTC SP-03 final registry26/26 PASS；candidate release/doctor运行中，父基线已导出，完整矩阵尚未开始。
+
+- 2026-10-30 18:29:26 UTC SP-03 final static/doctor13/racy各1/stat6均PASS；candidate release已冻结f42f1316，父release88130在跑，三边完整矩阵未开始，仍in-progress。
+
+- 2026-10-30 18:49:50 UTC SP-03 两release已冻结，辅助root发现次数15334→13211（3次一致，非release计时）；有效计数通过SHA/固定夹具校验，正式三边矩阵36217在准备克隆。仍in-progress。
+
+- 2026-10-30 18:55:39 UTC SP-03 f42候选完整三边矩阵16/1200/960独立核验PASS，default下降29.77–51.79%、refreshed约持平；组合restore损坏源对象回归55894待验，尚不收口。
+
+- 2026-10-30 19:08:43 UTC SP-03 最终当前快照已统一至卡片 Verification18/19、AC7/8、生产1文件；三边完整矩阵表入计划，Issue准备同步；全量/网站门未完成，仍in-progress。
+
+- 2026-10-30 19:18:04 UTC SP-03 Issue642已同步/readback OPEN；补充非Unix smudge策略及平台测试/doc，Unix lib14263待回执。f42矩阵保留历史，不替代新增生产源码验收，仍in-progress。
+
+- 2026-10-30 19:27:22 UTC SP-03 新源跨平台补充：非Unix metadata无可靠ctime证据则smudge；共享stat比较零值拒绝回归40975待RED。写集增加stat_diff.rs（同一缓存失效行为轴），旧f42结果保留历史，不代表新源完成。
+
+- 2026-10-30 19:47:31 UTC SP-03 zero stat pure2/2 GREEN；LFS epoch size130→32768回归RED→GREEN，实际size保留且stat0不获信任。最终release35223及新9组检查在跑，f42矩阵仅历史，仍in-progress。
+
+- 2026-10-30 19:50:20 UTC SP-03 LFS epoch扩展实际RED（130 vs32768）→GREEN；零时间共享比较2/2 GREEN。当前表格已明确旧f42历史与新源待验，生产2文件，仍in-progress。
+
+- 2026-10-30 19:57:54 UTC SP-03 新源9组14741全PASS，最终releaseee59861已冻结；新三边矩阵71571/010cyo8g正在准备三份新完整克隆，未记性能完成，仍in-progress。
+
+- 2026-10-30 20:08:44 UTC SP-03 最终ee598三边矩阵16/1200/960独立审计PASS，最终源调用方全部重验通过；19/20 VER，AC7/8。T-1全量与网站门仍未完成，保持in-progress。
+
+- 2026-10-30 20:10:41 UTC SP-03 Issue642最终同步回读OPEN（2026-10-30T20:10:19Z）；最终源码/完整矩阵/调用方复验与fmt/diff检查均PASS。19/20是执行回执数，不表示G-03粒度分母，粒度待核对；全量nextest与网站延期门未完成，未提交/推送/发布。
+
+- 2026-10-30 20:12:48 UTC SP-03 G-03核对完成：指定验证门15（lib4/集成10/矩阵1），上限8，无具名例外，粒度不通过；15/8与执行回执19/20分开登记。EX-SP-03-VER-01仅为待用户审阅草案，未批准、不生效。Full Access不改变本机16GiB；计划既有CI例外不设32GiB门槛，但本候选尚无提交/推送/建PR授权。
+
+- 2026-10-30 20:13:39 UTC SP-03 G-03具体15/8计数与待审EX-SP-03-VER-01草案已同步Issue642并回读OPEN（2026-10-30T20:13:20Z）；fmt通过、生产manifest不变。例外未批准，全量途径待用户决定，整卡未完成。
+
+- 2026-10-31 01:12:32 UTC SP-03按用户1→3→2预登记：15/8验证例外批准；本地完成、最终PR CI待验。当前授权提交/推送/创建PR，不含合并与发布；不为CI成功回执单独提交，按v2.14随下次例行状态同步。
+
+- 2026-10-31 01:21:16 UTC SP-03首个提交bb8e2c3已PGP+DCO核验并推送origin，PR #661已创建；GitHub报告与main冲突且CI未触发。合入98aa6be，唯一registry追加冲突已保留双方解决，上游Result接口保留；版本随主线0.30.118。当前合并后验证在跑，不把合并前矩阵/定向绿记为新源通过；完成后必要冲突解决提交更新同一PR，不另建进度记账提交。
+
+- 2026-10-31 02:23:54 UTC SP-03合并98aa6be后的定向/静态/两release与全新SP-00三边16格矩阵独立核验完成；相对98aa6be审查PASS。必要冲突解决提交待创建并更新PR661，CI不预称通过，不追加成功记账提交。

@@ -22,11 +22,21 @@ A staged restore (`--staged`) removes an intent-to-add entry (`libra add -N`)
 from the index instead of leaving the empty-blob placeholder behind; the worktree
 file becomes untracked, matching Git.
 
-Index entries written by a staged restore record the source blob's decoded
+Index entries written by a staged-only restore record the source blob's decoded
 length as their size, including blobs stored as packed deltas (the conservative
 memory cost of rebuilding a delta chain is never written to the index). Their
-stat fields stay zeroed rather than copied from the worktree file, so the next
-`libra status` re-checks the worktree content instead of reporting it clean.
+stat fields stay zeroed, so the next `libra status` re-checks the worktree
+content. When `--staged` and `--worktree` are combined, Libra records a
+worktree stat only after the materialized path still hashes to the source blob
+and its metadata remains stable across the hash. This records the actual file
+length for LFS-smudged files, including verified payloads whose timestamps
+must remain untrusted; a changed or racy path keeps zeroed stat fields
+so status cannot trust a mismatched snapshot. Symlink metadata is read without
+following the link. Ordinary files are re-hashed after atomic publication;
+refreshing stat alone does not add paths to the reported restored-file list. On non-Unix platforms,
+volatile stat fields remain zeroed because creation time cannot prove that
+content stayed unchanged; the observed worktree size is retained and status
+compares content.
 
 The `<pathspec>` argument is required and accepts one or more file paths or directory paths. The special path `.` restores all files. Pathspecs use Libra's shared Git-style matcher: plain pathspecs match a file or directory prefix, wildcard pathspecs are supported, and the high-value magic forms `:(top)`, `:/`, `:(glob)`, `:(literal)`, `:(icase)`, `:(exclude)`, `:!`, and `:^` are honored. Exclude pathspecs subtract from the positive selection, pathspec matching follows `core.ignorecase` when enabled, and wildcard-looking pathspecs also match an exact path or directory prefix with the same literal text.
 

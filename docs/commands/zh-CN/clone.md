@@ -12,7 +12,7 @@ libra clone [OPTIONS] <REMOTE_REPO> [LOCAL_PATH]
 
 `libra clone` 通过获取对象、配置 `origin` 并检出工作树，创建远程仓库的本地副本。它会初始化一个由 vault 支撑的仓库，并透明复用 `run_init()` 完成本地元数据设置。
 
-克隆会从远程获取所有对象和 refs，创建带 SQLite 元数据存储的 `.libra` 目录，设置 `origin` 远程，并检出默认分支（或用 `-b` 指定的分支）。克隆期间始终会引导 vault 签名，与 `libra init` 的默认值一致。对于非裸克隆，检出的 `.gitignore` 文件会复制为对应的 `.libraignore` 文件，使 Libra 忽略规则立即生效。
+克隆会从远程获取所有对象和 refs，创建带 SQLite 元数据存储的 `.libra` 目录，设置 `origin` 远程，并检出默认分支（或用 `-b` 指定的分支）。克隆期间始终会引导 vault 签名，与 `libra init` 的默认值一致。对于非裸克隆，检出的 `.gitignore` 文件会复制为对应的 `.libraignore` 文件，使 Libra 忽略规则立即生效。检出工作树时，只有物化路径仍与源 blob 哈希一致且哈希前后的元数据稳定，index 才会记录其 stat；已变化或存在竞态的文件留给 `libra status` 做内容校验。普通文件在原子发布后重新计算 hash，再验证 stat 是否可信。非 Unix 平台的创建时间无法证明内容未被修改，因此保留实际工作树 size，但将可变 stat 字段清零，由 status 校验内容。
 
 对于裸克隆，不会执行工作树检出，仓库目录本身会直接成为对象存储。裸克隆不会创建 `.libraignore`。
 

@@ -198,7 +198,9 @@ async fn exec_worktree(args: &[&str]) -> libra::CliResult<()> {
 }
 
 async fn exec_commit(args: &[&str]) -> libra::CliResult<()> {
-    let argv = std::iter::once("commit")
+    // These commits seed worktree fixtures; signing must not depend on host vault keys.
+    let argv = ["commit", "--no-gpg-sign"]
+        .into_iter()
         .chain(args.iter().copied())
         .collect::<Vec<_>>();
     let parsed = CommitArgs::parse_from(argv);

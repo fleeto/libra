@@ -2,7 +2,8 @@
 
 use std::{
     collections::{BTreeSet, HashMap, HashSet},
-    env, fs, io,
+    env, fs,
+    io::{self, Write},
     path::{Path, PathBuf},
 };
 
@@ -433,6 +434,31 @@ fn invalid_pathspec(error: PathspecError) -> RestoreError {
     RestoreError::InvalidPathspec(error.to_string())
 }
 
+// Deterministic filesystem race injection, absent from production builds.
+#[cfg(test)]
+type RestoreRaceHook = Box<dyn FnOnce(&Path)>;
+#[cfg(test)]
+thread_local! {
+    static RESTORE_RACE_HOOK: std::cell::RefCell<Option<(&'static str, RestoreRaceHook)>> = const { std::cell::RefCell::new(None) };
+}
+#[cfg(test)]
+fn run_restore_race_hook(phase: &str, path: &Path) {
+    let hook = RESTORE_RACE_HOOK.with(|slot| {
+        let mut slot = slot.borrow_mut();
+        if slot
+            .as_ref()
+            .is_some_and(|(expected, _)| *expected == phase)
+        {
+            slot.take().map(|(_, hook)| hook)
+        } else {
+            None
+        }
+    });
+    if let Some(hook) = hook {
+        hook(path);
+    }
+}
+
 async fn run_restore(mut args: RestoreArgs) -> Result<RestoreOutput, RestoreError> {
     // `--pathspec-from-file` populates the pathspec list from a file (or stdin
     // for `-`) before the normal restore logic runs.
@@ -532,8 +558,8 @@ async fn run_restore(mut args: RestoreArgs) -> Result<RestoreOutput, RestoreErro
     // removes them so the target matches the source exactly.
     let overlay = args.overlay;
 
-    if worktree {
-        let (restored, deleted) = restore_worktree_tracked(
+    let stat_snapshots = if worktree {
+        let (restored, deleted, snapshots) = restore_worktree_tracked(
             &pathspecs,
             &target_blobs,
             overlay,
@@ -543,10 +569,20 @@ async fn run_restore(mut args: RestoreArgs) -> Result<RestoreOutput, RestoreErro
         .await?;
         restored_files.extend(restored);
         deleted_files.extend(deleted);
-    }
+        snapshots
+    } else {
+        HashMap::new()
+    };
     if staged {
-        let (restored, deleted) =
-            restore_index_tracked(&pathspecs, &target_blobs, overlay, &skipped_unmerged_paths)?;
+        let (restored, deleted) = restore_index_tracked(
+            &pathspecs,
+            &target_blobs,
+            overlay,
+            &skipped_unmerged_paths,
+            worktree,
+            None,
+            Some(&stat_snapshots),
+        )?;
         let mut restored_seen: HashSet<String> = restored_files.iter().cloned().collect();
         let mut deleted_seen: HashSet<String> = deleted_files.iter().cloned().collect();
 
@@ -651,7 +687,7 @@ async fn restore_worktree_tracked(
     overlay: bool,
     allowed_unmatched: &[PathBuf],
     destination_root: Option<&Path>,
-) -> Result<(Vec<String>, Vec<String>), RestoreError> {
+) -> Result<(Vec<String>, Vec<String>, HashMap<PathBuf, fs::Metadata>), RestoreError> {
     let target_map = preprocess_blobs(target_blobs);
     let index = Index::load(path::index()).map_err(|_| RestoreError::ReadIndex)?;
     let file_paths =
@@ -670,6 +706,11 @@ async fn restore_worktree_tracked(
     )?;
     let mut restored = Vec::new();
     let mut deleted = Vec::new();
+    let mut stat_snapshots = HashMap::new();
+    let workdir = match destination_root {
+        Some(root) => root.to_path_buf(),
+        None => util::try_working_dir().map_err(|_| RestoreError::ReadWorktree)?,
+    };
 
     for path_wd in &file_paths {
         if let Some(root) = destination_root {
@@ -677,12 +718,16 @@ async fn restore_worktree_tracked(
             // parent of this path, even if the initial preflight was safe.
             validate_explicit_destination_path(root, path_wd)?;
         }
-        let path_abs = restore_absolute_path(path_wd, destination_root);
+        let path_abs = workdir.join(path_wd);
         let path_wd_str = path_to_utf8_typed(path_wd)?;
         let tracked = index.tracked(path_wd_str, 0);
         if !worktree_path_exists(&path_abs) {
             if let Some(target) = target_map.get(path_wd) {
-                restore_target_to_file_typed(*target, path_wd, destination_root).await?;
+                if let Some(snapshot) =
+                    restore_target_to_file_typed(*target, path_wd, Some(&workdir)).await?
+                {
+                    stat_snapshots.insert(path_wd.clone(), snapshot);
+                }
                 restored.push(path_wd.display().to_string());
             } else if !tracked {
                 return Err(pathspec_not_matched(path_wd));
@@ -696,10 +741,24 @@ async fn restore_worktree_tracked(
             } else if !mode_matches {
                 false
             } else {
-                calc_file_blob_hash(&path_abs).map_err(|_| RestoreError::ReadObject)? == target.hash
+                let pre_hash =
+                    fs::symlink_metadata(&path_abs).map_err(|_| RestoreError::ReadWorktree)?;
+                let matches = calc_file_blob_hash(&path_abs)
+                    .map_err(|_| RestoreError::ReadObject)?
+                    == target.hash;
+                #[cfg(test)]
+                run_restore_race_hook("matched-hash", &path_abs);
+                if matches {
+                    stat_snapshots.insert(path_wd.clone(), pre_hash);
+                }
+                matches
             };
             if !content_matches || !mode_matches {
-                restore_target_to_file_typed(*target, path_wd, destination_root).await?;
+                if let Some(snapshot) =
+                    restore_target_to_file_typed(*target, path_wd, Some(&workdir)).await?
+                {
+                    stat_snapshots.insert(path_wd.clone(), snapshot);
+                }
                 restored.push(path_wd.display().to_string());
             }
         } else if !overlay && tracked {
@@ -709,7 +768,7 @@ async fn restore_worktree_tracked(
         }
     }
 
-    Ok((restored, deleted))
+    Ok((restored, deleted, stat_snapshots))
 }
 
 // ── Index restore (unified typed path) ───────────────────────────────
@@ -719,6 +778,9 @@ fn restore_index_tracked(
     target_blobs: &[(PathBuf, RestoreTarget)],
     overlay: bool,
     allowed_unmatched: &[PathBuf],
+    materialized_worktree: bool,
+    destination_root: Option<&Path>,
+    stat_snapshots: Option<&HashMap<PathBuf, fs::Metadata>>,
 ) -> Result<(Vec<String>, Vec<String>), RestoreError> {
     let target_map = preprocess_blobs(target_blobs);
 
@@ -736,6 +798,27 @@ fn restore_index_tracked(
     let mut file_paths = filter_paths(&index.tracked_files(), pathspecs);
     file_paths.extend(deleted_files_index);
 
+    // Resolve the destination once for the whole index pass, not per entry.
+    let workdir = match destination_root {
+        Some(root) => root.to_path_buf(),
+        None => util::try_working_dir().map_err(|_| RestoreError::ReadWorktree)?,
+    };
+    let mut verified_entries = HashMap::new();
+    if materialized_worktree {
+        for path in &file_paths {
+            if let Some(target) = target_map.get(path)
+                && let Some(entry) = restore_index_entry(
+                    path,
+                    *target,
+                    &workdir,
+                    stat_snapshots.and_then(|snapshots| snapshots.get(path)),
+                )
+            {
+                verified_entries.insert(path.clone(), entry);
+            }
+        }
+    }
+
     // Batch-resolve the blob lengths needed to author new or updated index entries.
     //
     // The helper below otherwise loads an entire blob just to read `data.len()`. On a
@@ -745,7 +828,7 @@ fn restore_index_tracked(
     // count or delta-chain memory budget; `decoded_object_sizes` answers them without
     // materializing any payload, in one storage-runtime round trip. Unique hashes are
     // deduplicated because one blob is commonly referenced by several paths.
-    let mut size_cache: Option<HashMap<ObjectHash, u32>> = None;
+    let mut size_cache: Option<HashMap<ObjectHash, u32>> = Some(HashMap::new());
     {
         let mut needed: Vec<ObjectHash> = Vec::new();
         let mut seen: HashSet<ObjectHash> = HashSet::new();
@@ -754,7 +837,9 @@ fn restore_index_tracked(
             let Some(target) = target_map.get(path) else {
                 continue;
             };
-            if matches!(target.mode, Some(TreeItemMode::Commit)) {
+            if verified_entries.contains_key(path)
+                || matches!(target.mode, Some(TreeItemMode::Commit))
+            {
                 continue;
             }
             let needs_size = match index.get(path_str, 0) {
@@ -762,6 +847,7 @@ fn restore_index_tracked(
                 Some(entry) => {
                     !index.verify_hash(path_str, 0, &target.hash)
                         || entry.mode != target.index_mode()
+                        || materialized_worktree
                 }
             };
             if needs_size && seen.insert(target.hash) {
@@ -798,11 +884,15 @@ fn restore_index_tracked(
             if let Some(target) = target_map.get(path) {
                 crate::utils::index_ext::update_preserving_flags(
                     &mut index,
-                    index_entry_from_target(
-                        path_str.to_string(),
-                        *target,
-                        restore_target_index_size(*target, size_cache.as_mut())?,
-                    ),
+                    if let Some(entry) = verified_entries.remove(path) {
+                        entry
+                    } else {
+                        index_entry_from_target(
+                            path_str.to_string(),
+                            *target,
+                            restore_target_index_size(*target, size_cache.as_mut())?,
+                        )
+                    },
                 );
                 restored.push(path.display().to_string());
             } else {
@@ -813,16 +903,26 @@ fn restore_index_tracked(
                 .get(path_str, 0)
                 .map(|entry| entry.mode == target.index_mode())
                 .unwrap_or(false);
-            if !index.verify_hash(path_str, 0, &target.hash) || !mode_matches {
+            let index_changed = !index.verify_hash(path_str, 0, &target.hash) || !mode_matches;
+            if index_changed
+                || (materialized_worktree && !matches!(target.mode, Some(TreeItemMode::Commit)))
+            {
                 crate::utils::index_ext::update_preserving_flags(
                     &mut index,
-                    index_entry_from_target(
-                        path_str.to_string(),
-                        *target,
-                        restore_target_index_size(*target, size_cache.as_mut())?,
-                    ),
+                    if let Some(entry) = verified_entries.remove(path) {
+                        entry
+                    } else {
+                        index_entry_from_target(
+                            path_str.to_string(),
+                            *target,
+                            restore_target_index_size(*target, size_cache.as_mut())?,
+                        )
+                    },
                 );
-                restored.push(path.display().to_string());
+                // Refreshing internal stat data is not a user-visible restore.
+                if index_changed {
+                    restored.push(path.display().to_string());
+                }
             }
         } else if !overlay {
             index.remove(path_str, 0);
@@ -835,6 +935,58 @@ fn restore_index_tracked(
         .map_err(|_| RestoreError::WriteWorktree)?;
 
     Ok((restored, deleted))
+}
+
+/// Build from verified worktree bytes, preserving observed size even when the
+/// metadata must be smudged. Hash/read failures use the batched size fallback.
+fn restore_index_entry(
+    path: &Path,
+    target: RestoreTarget,
+    workdir: &Path,
+    pre_hash: Option<&fs::Metadata>,
+) -> Option<IndexEntry> {
+    if matches!(target.mode, Some(TreeItemMode::Commit)) {
+        return None;
+    }
+    let absolute = workdir.join(path);
+    let owned_snapshot;
+    let before_hash = if let Some(snapshot) = pre_hash {
+        snapshot
+    } else {
+        owned_snapshot = fs::symlink_metadata(&absolute).ok()?;
+        &owned_snapshot
+    };
+    if before_hash.len() > u64::from(u32::MAX)
+        || (pre_hash.is_none() && restored_worktree_blob_hash(&absolute).ok() != Some(target.hash))
+    {
+        return None;
+    }
+    // Non-Unix metadata uses creation time rather than an edit-sensitive ctime.
+    // Keep the observed size, but force content comparison on the next status.
+    let verification_snapshot = cfg!(unix).then_some(before_hash);
+    let mut entry =
+        crate::command::verified_index_entry(path, target.hash, workdir, verification_snapshot)
+            .ok()?;
+    // Smudging must retain the payload size, rather than an LFS pointer length.
+    // The shared stat comparator never grants trust to zero timestamps.
+    entry.mode = target.index_mode();
+    Some(entry)
+}
+
+fn restored_worktree_blob_hash(path: &Path) -> io::Result<ObjectHash> {
+    #[cfg(test)]
+    run_restore_race_hook("fallback-hash", path);
+    let metadata = fs::symlink_metadata(path)?;
+    if metadata.file_type().is_symlink() {
+        return Ok(Blob::from_content_bytes(crate::command::read_symlink_blob_bytes(path)?).id);
+    }
+    if lfs::is_lfs_tracked(path) {
+        let (pointer, _) = lfs::generate_pointer_file_result(path)?;
+        return Ok(Blob::from_content(&pointer).id);
+    }
+    crate::command::stream_file_blob_hash_bounded(path, u64::from(u32::MAX))?
+        .0
+        .ok_or_else(|| io::Error::other("worktree file changed while hashing"))
 }
 
 // ── Legacy public API (used by worktree.rs and checkout) ─────────────
@@ -939,14 +1091,26 @@ pub async fn execute_checked(args: RestoreArgs) -> io::Result<()> {
         .await
         .map_err(|error| io::Error::other(error.to_string()))?;
 
-    if worktree {
-        restore_worktree_tracked(&pathspecs, &target_blobs, false, &[], None)
-            .await
-            .map_err(|error| io::Error::other(error.to_string()))?;
-    }
+    let stat_snapshots = if worktree {
+        let (_, _, snapshots) =
+            restore_worktree_tracked(&pathspecs, &target_blobs, false, &[], None)
+                .await
+                .map_err(|error| io::Error::other(error.to_string()))?;
+        snapshots
+    } else {
+        HashMap::new()
+    };
     if staged {
-        restore_index_tracked(&pathspecs, &target_blobs, false, &[])
-            .map_err(|error| io::Error::other(error.to_string()))?;
+        restore_index_tracked(
+            &pathspecs,
+            &target_blobs,
+            false,
+            &[],
+            worktree,
+            None,
+            Some(&stat_snapshots),
+        )
+        .map_err(|error| io::Error::other(error.to_string()))?;
     }
     Ok(())
 }
@@ -1037,11 +1201,24 @@ async fn execute_checked_typed_at(
         Some(root) => compile_restore_pathspecs_at(&args.pathspec, root).await?,
         None => compile_restore_pathspecs(&args.pathspec).await?,
     };
-    if worktree {
-        restore_worktree_tracked(&pathspecs, &target_blobs, false, &[], destination_root).await?;
-    }
+    let stat_snapshots = if worktree {
+        let (_, _, snapshots) =
+            restore_worktree_tracked(&pathspecs, &target_blobs, false, &[], destination_root)
+                .await?;
+        snapshots
+    } else {
+        HashMap::new()
+    };
     if staged {
-        restore_index_tracked(&pathspecs, &target_blobs, false, &[])?;
+        restore_index_tracked(
+            &pathspecs,
+            &target_blobs,
+            false,
+            &[],
+            worktree,
+            destination_root,
+            Some(&stat_snapshots),
+        )?;
     }
     Ok(())
 }
@@ -1641,20 +1818,20 @@ async fn restore_target_to_file_typed(
     target: RestoreTarget,
     path: &Path,
     destination_root: Option<&Path>,
-) -> Result<(), RestoreError> {
+) -> Result<Option<fs::Metadata>, RestoreError> {
     let path_abs = restore_absolute_path(path, destination_root);
 
     if matches!(target.mode, Some(TreeItemMode::Commit)) {
         match fs::symlink_metadata(&path_abs) {
             Ok(metadata) if metadata.is_dir() && !metadata.file_type().is_symlink() => {
-                return Ok(());
+                return Ok(None);
             }
             Ok(_) => fs::remove_file(&path_abs).map_err(|_| RestoreError::WriteWorktree)?,
             Err(error) if error.kind() == io::ErrorKind::NotFound => {}
             Err(_) => return Err(RestoreError::ReadWorktree),
         }
         fs::create_dir_all(&path_abs).map_err(|_| RestoreError::WriteWorktree)?;
-        return Ok(());
+        return Ok(None);
     }
 
     let blob = load_object::<Blob>(&target.hash).map_err(|_| RestoreError::ReadObject)?;
@@ -1665,7 +1842,8 @@ async fn restore_target_to_file_typed(
     remove_existing_empty_directory(&path_abs)?;
 
     if matches!(target.mode, Some(TreeItemMode::Link)) {
-        return write_restore_symlink(&path_abs, &blob.data);
+        write_restore_symlink(&path_abs, &blob.data)?;
+        return Ok(None);
     }
 
     let executable = matches!(target.mode, Some(TreeItemMode::BlobExecutable));
@@ -1692,14 +1870,54 @@ async fn restore_target_to_file_typed(
                     .map_err(|_| RestoreError::LfsDownload)?;
                 writer.finish().map_err(|_| RestoreError::WriteWorktree)?;
             }
+            // LFS payloads are external to the Git blob and must be re-hashed
+            // against the pointer before their worktree stat can be trusted.
         }
         None => {
-            write_worktree_blob(&path_abs, &blob.data, executable)
+            let mut writer = WorktreeFileWriter::create(&path_abs, executable)
                 .map_err(|_| RestoreError::WriteWorktree)?;
+            writer
+                .write_all(&blob.data)
+                .map_err(|_| RestoreError::WriteWorktree)?;
+            writer.flush().map_err(|_| RestoreError::WriteWorktree)?;
+            let snapshot = fs::symlink_metadata(writer.temp_path()).ok();
+            writer.finish().map_err(|_| RestoreError::WriteWorktree)?;
+            #[cfg(test)]
+            run_restore_race_hook("published", &path_abs);
+            return Ok(snapshot
+                .and_then(|before| stable_published_snapshot(&before, &path_abs, target.hash)));
         }
     }
 
-    Ok(())
+    Ok(None)
+}
+
+/// Verify the published bytes, returning the snapshot taken BEFORE that read.
+/// Rename may change ctime, so publication metadata alone cannot prove content
+/// identity. restore_index_entry re-stats against this pre-read snapshot and
+/// smudges any concurrent change rather than pairing new stat with an old hash.
+fn stable_published_snapshot(
+    before: &fs::Metadata,
+    path: &Path,
+    expected: ObjectHash,
+) -> Option<fs::Metadata> {
+    let after = fs::symlink_metadata(path).ok()?;
+    if before.len() != after.len() || before.modified().ok()? != after.modified().ok()? {
+        return None;
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::MetadataExt;
+        if before.dev() != after.dev() || before.ino() != after.ino() {
+            return None;
+        }
+    }
+    let (hash, _) =
+        crate::command::stream_file_blob_hash_bounded(path, u64::from(u32::MAX)).ok()?;
+    if hash != Some(expected) {
+        return None;
+    }
+    Some(after)
 }
 
 /// Refuse now exactly what a `restore --source <commit> --staged --worktree .`
@@ -1859,6 +2077,8 @@ fn restore_target_index_size(
     {
         return Ok(*size);
     }
+    #[cfg(test)]
+    run_restore_race_hook("fallback-size", Path::new("blob"));
     let blob = load_object::<Blob>(&target.hash).map_err(|_| RestoreError::ReadObject)?;
     let size = u32::try_from(blob.data.len()).map_err(|_| RestoreError::ReadObject)?;
     if let Some(cache) = size_cache {
@@ -2085,6 +2305,226 @@ mod tests {
             test::{ChangeDirGuard, setup_with_new_libra_in},
         },
     };
+
+    #[tokio::test]
+    #[serial(cwd, env)]
+    async fn restore_races_do_not_certify_modified_content_as_clean() {
+        for phase in ["published", "matched-hash"] {
+            let repo = tempdir().expect("isolated repository");
+            let _guard = ChangeDirGuard::new(repo.path());
+            setup_with_new_libra_in(repo.path()).await;
+            ConfigKv::set("user.name", "Restore Race", false)
+                .await
+                .expect("author");
+            ConfigKv::set("user.email", "race@example.invalid", false)
+                .await
+                .expect("email");
+            let output = OutputConfig {
+                quiet: true,
+                ..OutputConfig::default()
+            };
+            fs::write("tracked.txt", b"original\n").expect("original content");
+            add::execute_safe(add::AddArgs::parse_from(["add", "tracked.txt"]), &output)
+                .await
+                .expect("add");
+            commit::execute_safe(
+                commit::CommitArgs::parse_from([
+                    "commit",
+                    "--no-verify",
+                    "--no-gpg-sign",
+                    "-m",
+                    "race fixture",
+                ]),
+                &output,
+            )
+            .await
+            .expect("commit");
+            if phase == "published" {
+                fs::remove_file("tracked.txt").expect("force materialization");
+            }
+            RESTORE_RACE_HOOK.with(|slot| {
+                *slot.borrow_mut() = Some((
+                    phase,
+                    Box::new(|path| {
+                        let modified = fs::symlink_metadata(path)
+                            .expect("pre-edit metadata")
+                            .modified()
+                            .expect("mtime");
+                        fs::write(path, b"modified\n").expect("equal-length concurrent edit");
+                        fs::File::options()
+                            .write(true)
+                            .open(path)
+                            .expect("file")
+                            .set_times(fs::FileTimes::new().set_modified(modified))
+                            .expect("preserve mtime");
+                    }),
+                ))
+            });
+            execute_checked_typed(RestoreArgs {
+                source: Some("HEAD".into()),
+                staged: true,
+                worktree: true,
+                pathspec: vec!["tracked.txt".into()],
+                ..Default::default()
+            })
+            .await
+            .expect("restore");
+            assert!(
+                RESTORE_RACE_HOOK.with(|slot| slot.borrow().is_none()),
+                "hook must run"
+            );
+            let index = Index::load(path::index()).expect("index");
+            let entry = index.get("tracked.txt", 0).expect("entry");
+            assert_eq!(
+                entry.mtime.to_string(),
+                "0:0",
+                "{phase}: modified bytes must not earn trusted stat"
+            );
+            let mut status = Vec::new();
+            crate::command::status::execute_to(
+                crate::command::status::StatusArgs::parse_from(["status", "--porcelain"]),
+                &mut status,
+            )
+            .await
+            .expect("status");
+            assert_eq!(
+                String::from_utf8(status).expect("UTF-8"),
+                " M tracked.txt\n",
+                "{phase}"
+            );
+        }
+    }
+
+    #[tokio::test]
+    #[serial(cwd, env)]
+    async fn restore_trusted_stat_does_not_load_fallback_blob() {
+        let repo = tempdir().expect("isolated repository");
+        let _guard = ChangeDirGuard::new(repo.path());
+        setup_with_new_libra_in(repo.path()).await;
+        ConfigKv::set("user.name", "Restore Race", false)
+            .await
+            .expect("author");
+        ConfigKv::set("user.email", "race@example.invalid", false)
+            .await
+            .expect("email");
+        let output = OutputConfig {
+            quiet: true,
+            ..OutputConfig::default()
+        };
+        fs::write("tracked.txt", b"original\n").expect("original content");
+        add::execute_safe(add::AddArgs::parse_from(["add", "tracked.txt"]), &output)
+            .await
+            .expect("add");
+        commit::execute_safe(
+            commit::CommitArgs::parse_from([
+                "commit",
+                "--no-verify",
+                "--no-gpg-sign",
+                "-m",
+                "race fixture",
+            ]),
+            &output,
+        )
+        .await
+        .expect("commit");
+        RESTORE_RACE_HOOK.with(|slot| {
+            *slot.borrow_mut() = Some((
+                "fallback-size",
+                Box::new(|_| panic!("trusted stat must not load fallback blob")),
+            ))
+        });
+        execute_checked_typed(RestoreArgs {
+            source: Some("HEAD".into()),
+            staged: true,
+            worktree: true,
+            pathspec: vec!["tracked.txt".into()],
+            ..Default::default()
+        })
+        .await
+        .expect("restore");
+        RESTORE_RACE_HOOK.with(|slot| {
+            slot.borrow_mut().take();
+        });
+        let index = Index::load(path::index()).expect("index");
+        assert_eq!(
+            index
+                .get("tracked.txt", 0)
+                .expect("entry")
+                .mtime
+                .to_string()
+                == "0:0",
+            !cfg!(unix),
+            "metadata trust follows the platform's ctime evidence"
+        );
+    }
+
+    #[tokio::test]
+    #[serial(cwd, env)]
+    async fn restore_legacy_api_reuses_published_snapshot() {
+        let repo = tempdir().expect("isolated repository");
+        let _guard = ChangeDirGuard::new(repo.path());
+        setup_with_new_libra_in(repo.path()).await;
+        ConfigKv::set("user.name", "Restore Race", false)
+            .await
+            .expect("author");
+        ConfigKv::set("user.email", "race@example.invalid", false)
+            .await
+            .expect("email");
+        let output = OutputConfig {
+            quiet: true,
+            ..OutputConfig::default()
+        };
+        fs::write("tracked.txt", b"original\n").expect("original content");
+        add::execute_safe(add::AddArgs::parse_from(["add", "tracked.txt"]), &output)
+            .await
+            .expect("add");
+        commit::execute_safe(
+            commit::CommitArgs::parse_from([
+                "commit",
+                "--no-verify",
+                "--no-gpg-sign",
+                "-m",
+                "race fixture",
+            ]),
+            &output,
+        )
+        .await
+        .expect("commit");
+        fs::remove_file("tracked.txt").expect("force new materialization");
+        RESTORE_RACE_HOOK.with(|slot| {
+            *slot.borrow_mut() = Some((
+                "fallback-hash",
+                Box::new(|_| panic!("legacy API discarded verified publication snapshot")),
+            ))
+        });
+        execute_checked(RestoreArgs {
+            source: Some("HEAD".into()),
+            staged: true,
+            worktree: true,
+            pathspec: vec!["tracked.txt".into()],
+            ..Default::default()
+        })
+        .await
+        .expect("legacy restore");
+        RESTORE_RACE_HOOK.with(|slot| {
+            slot.borrow_mut().take();
+        });
+        assert_eq!(
+            fs::read("tracked.txt").expect("restored bytes"),
+            b"original\n"
+        );
+        let index = Index::load(path::index()).expect("index");
+        assert_eq!(
+            index
+                .get("tracked.txt", 0)
+                .expect("entry")
+                .mtime
+                .to_string()
+                == "0:0",
+            !cfg!(unix),
+            "metadata trust follows the platform's ctime evidence"
+        );
+    }
 
     struct UnreadableCommit(ObjectHash);
 

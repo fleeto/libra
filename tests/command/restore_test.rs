@@ -165,6 +165,338 @@ fn test_restore_worktree_overwrites_modification_with_committed_blob() {
 }
 
 #[test]
+fn restore_stat_snapshot_clean_combined_does_not_report_restored_paths() {
+    let repo = create_committed_repo_via_cli();
+    let root = repo.path();
+    let args = [
+        "restore",
+        "--source",
+        "HEAD",
+        "--staged",
+        "--worktree",
+        "tracked.txt",
+    ];
+    let output = run_libra_command(&args, root);
+    assert_cli_success(&output, "restore clean path");
+    assert!(
+        output.stdout.is_empty(),
+        "{}",
+        String::from_utf8_lossy(&output.stdout)
+    );
+    let output = run_libra_command(
+        &[
+            "--json",
+            "restore",
+            "--source",
+            "HEAD",
+            "--staged",
+            "--worktree",
+            "tracked.txt",
+        ],
+        root,
+    );
+    assert_cli_success(&output, "restore clean path as JSON");
+    let json: serde_json::Value = serde_json::from_slice(&output.stdout).expect("JSON output");
+    assert_eq!(json["data"]["restored_files"], serde_json::json!([]));
+}
+
+#[test]
+fn restore_stat_snapshot_matching_worktree_updates_different_index() {
+    let repo = create_committed_repo_via_cli();
+    let root = repo.path();
+    let original = fs::read(root.join("tracked.txt")).expect("HEAD bytes");
+    fs::write(root.join("tracked.txt"), b"different staged version\n").expect("stage other bytes");
+    assert_cli_success(
+        &run_libra_command(&["add", "tracked.txt"], root),
+        "stage other version",
+    );
+    fs::write(root.join("tracked.txt"), &original).expect("worktree already matches HEAD");
+    let output = run_libra_command(
+        &[
+            "--json",
+            "restore",
+            "--source",
+            "HEAD",
+            "--staged",
+            "--worktree",
+            "tracked.txt",
+        ],
+        root,
+    );
+    assert_cli_success(&output, "restore only mismatched index");
+    let json: serde_json::Value = serde_json::from_slice(&output.stdout).expect("JSON output");
+    assert_eq!(
+        json["data"]["restored_files"],
+        serde_json::json!(["tracked.txt"])
+    );
+    assert_eq!(
+        fs::read(root.join("tracked.txt")).expect("preserved bytes"),
+        original
+    );
+    use git_internal::{hash::HashKind, internal::index::Index};
+    let index =
+        Index::load_with_hash_kind(HashKind::Sha1, root.join(".libra/index")).expect("index");
+    let entry = index.get("tracked.txt", 0).expect("entry");
+    assert_eq!(entry.size as usize, original.len());
+    assert_eq!(entry.mtime.to_string() == "0:0", !cfg!(unix));
+    assert!(!skip_worktree_set(root, "tracked.txt"));
+    assert_eq!(libra_stdout(&["status", "--porcelain"], root), "");
+}
+
+#[test]
+fn restore_stat_snapshot_combined_worktree_and_index_records_real_stat() {
+    let repo = create_committed_repo_via_cli();
+    let root = repo.path();
+    fs::write(
+        root.join("tracked.txt"),
+        "dirty content with a different length\n",
+    )
+    .expect("write dirty tracked file");
+    mark_skip_worktree(root, "tracked.txt");
+
+    assert_cli_success(
+        &run_libra_command(
+            &[
+                "restore",
+                "--source",
+                "HEAD",
+                "--staged",
+                "--worktree",
+                "tracked.txt",
+            ],
+            root,
+        ),
+        "restore worktree and index",
+    );
+
+    use git_internal::{hash::HashKind, internal::index::Index};
+    let index =
+        Index::load_with_hash_kind(HashKind::Sha1, root.join(".libra/index")).expect("load index");
+    let entry = index.get("tracked.txt", 0).expect("restored stage-0 entry");
+    let metadata = fs::symlink_metadata(root.join("tracked.txt")).expect("worktree stat");
+    assert_eq!(entry.size as u64, metadata.len());
+    assert_eq!(entry.ctime.to_string() == "0:0", !cfg!(unix));
+    assert_eq!(entry.mtime.to_string() == "0:0", !cfg!(unix));
+    assert!(
+        skip_worktree_set(root, "tracked.txt"),
+        "skip-worktree flag is preserved"
+    );
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::MetadataExt;
+        assert_eq!(entry.ino, metadata.ino() as u32);
+        assert_eq!(entry.dev, metadata.dev() as u32);
+    }
+
+    assert_eq!(
+        libra_stdout(&["status", "--porcelain"], root),
+        "",
+        "skip-worktree path remains hidden from status"
+    );
+}
+
+#[test]
+fn restore_stat_snapshot_ordinary_path_remains_clean_then_detects_edit() {
+    let repo = create_committed_repo_via_cli();
+    let root = repo.path();
+    fs::write(root.join("tracked.txt"), "dirty before restore\n").expect("dirty file");
+    assert_cli_success(
+        &run_libra_command(
+            &[
+                "restore",
+                "--source",
+                "HEAD",
+                "--staged",
+                "--worktree",
+                "tracked.txt",
+            ],
+            root,
+        ),
+        "restore ordinary path",
+    );
+    assert!(!skip_worktree_set(root, "tracked.txt"));
+    assert_eq!(libra_stdout(&["status", "--porcelain"], root), "");
+    fs::write(root.join("tracked.txt"), "edited after restore\n").expect("edit file");
+    assert_eq!(
+        libra_stdout(&["status", "--porcelain"], root),
+        " M tracked.txt\n"
+    );
+}
+
+#[test]
+fn restore_stat_snapshot_staged_only_keeps_worktree_edit_visible() {
+    let repo = create_committed_repo_via_cli();
+    let root = repo.path();
+    fs::write(root.join("tracked.txt"), "changed\n").expect("edit worktree file");
+
+    assert_cli_success(
+        &run_libra_command(&["restore", "--staged", "tracked.txt"], root),
+        "restore index only",
+    );
+
+    use git_internal::{hash::HashKind, internal::index::Index};
+    let index =
+        Index::load_with_hash_kind(HashKind::Sha1, root.join(".libra/index")).expect("load index");
+    assert!(index.get("tracked.txt", 0).is_some());
+    let status = libra_stdout(&["status", "--porcelain"], root);
+    assert!(
+        status.lines().any(|line| line == " M tracked.txt"),
+        "staged-only restore must keep an unstaged edit visible: {status:?}"
+    );
+}
+
+#[test]
+fn restore_stat_snapshot_lfs_uses_smudged_worktree_length() {
+    let repo = create_committed_repo_via_cli();
+    let root = repo.path();
+    let content = vec![b'x'; 32 * 1024];
+    fs::write(
+        root.join(".libra_attributes"),
+        "*.bin filter=lfs diff=lfs merge=lfs -text\n",
+    )
+    .expect("write LFS attributes");
+    fs::write(root.join("payload.bin"), &content).expect("write LFS payload");
+    let (_, oid) = libra::utils::lfs::generate_pointer_file_result(root.join("payload.bin"))
+        .expect("compute LFS object id");
+    let lfs_object = root
+        .join(".libra/lfs/objects")
+        .join(&oid[..2])
+        .join(&oid[2..4])
+        .join(&oid);
+    fs::create_dir_all(lfs_object.parent().expect("LFS object parent"))
+        .expect("create local LFS object directory");
+    fs::write(lfs_object, &content).expect("cache local LFS object");
+    assert_cli_success(
+        &run_libra_command(&["add", "payload.bin"], root),
+        "stage LFS payload",
+    );
+    assert_cli_success(
+        &run_libra_command(&["commit", "-m", "add LFS payload", "--no-verify"], root),
+        "commit LFS payload",
+    );
+    fs::write(root.join("payload.bin"), b"dirty\n").expect("dirty LFS worktree file");
+
+    assert_cli_success(
+        &run_libra_command(
+            &[
+                "restore",
+                "--source",
+                "HEAD",
+                "--staged",
+                "--worktree",
+                "payload.bin",
+            ],
+            root,
+        ),
+        "restore LFS worktree and index",
+    );
+
+    use git_internal::{hash::HashKind, internal::index::Index};
+    let index =
+        Index::load_with_hash_kind(HashKind::Sha1, root.join(".libra/index")).expect("load index");
+    let entry = index.get("payload.bin", 0).expect("restored LFS entry");
+    let metadata = fs::symlink_metadata(root.join("payload.bin")).expect("LFS stat");
+    assert_eq!(metadata.len(), content.len() as u64);
+    assert_eq!(u64::from(entry.size), metadata.len());
+    assert_eq!(entry.mtime.to_string() == "0:0", !cfg!(unix));
+    assert_eq!(
+        fs::read(root.join("payload.bin")).expect("read smudged file"),
+        content
+    );
+    drop(index);
+    // A legitimate epoch mtime must invalidate stat trust without replacing
+    // the smudged payload length with the pointer blob's decoded length.
+    fs::File::options()
+        .write(true)
+        .open(root.join("payload.bin"))
+        .expect("payload file")
+        .set_times(fs::FileTimes::new().set_modified(std::time::UNIX_EPOCH))
+        .expect("epoch mtime");
+    assert_cli_success(
+        &run_libra_command(
+            &[
+                "restore",
+                "--source",
+                "HEAD",
+                "--staged",
+                "--worktree",
+                "payload.bin",
+            ],
+            root,
+        ),
+        "restore matching LFS payload with untrusted timestamps",
+    );
+    let index = Index::load_with_hash_kind(HashKind::Sha1, root.join(".libra/index"))
+        .expect("reloaded index");
+    let entry = index.get("payload.bin", 0).expect("LFS entry");
+    assert_eq!(
+        u64::from(entry.size),
+        content.len() as u64,
+        "smudging timestamps must retain actual payload size"
+    );
+    assert_eq!(entry.mtime.to_string(), "0:0");
+}
+
+#[cfg(unix)]
+#[test]
+fn restore_stat_snapshot_symlink_uses_link_metadata() {
+    use std::os::unix::fs::{MetadataExt, symlink};
+
+    let repo = create_committed_repo_via_cli();
+    let root = repo.path();
+    symlink("first-target", root.join("tracked-link")).expect("create tracked symlink");
+    assert_cli_success(
+        &run_libra_command(&["add", "tracked-link"], root),
+        "stage symlink",
+    );
+    assert_cli_success(
+        &run_libra_command(&["commit", "-m", "add symlink", "--no-verify"], root),
+        "commit symlink",
+    );
+    symlink(
+        "dirty-target-with-other-length",
+        root.join("replacement-link"),
+    )
+    .expect("create replacement symlink");
+    fs::remove_file(root.join("tracked-link")).expect("remove tracked symlink");
+    fs::rename(root.join("replacement-link"), root.join("tracked-link"))
+        .expect("replace tracked symlink");
+
+    assert_cli_success(
+        &run_libra_command(
+            &[
+                "restore",
+                "--source",
+                "HEAD",
+                "--staged",
+                "--worktree",
+                "tracked-link",
+            ],
+            root,
+        ),
+        "restore symlink worktree and index",
+    );
+
+    use git_internal::{hash::HashKind, internal::index::Index};
+    let index =
+        Index::load_with_hash_kind(HashKind::Sha1, root.join(".libra/index")).expect("load index");
+    let entry = index
+        .get("tracked-link", 0)
+        .expect("restored symlink entry");
+    let metadata = fs::symlink_metadata(root.join("tracked-link")).expect("link metadata");
+    assert!(metadata.file_type().is_symlink());
+    assert_eq!(entry.mode, 0o120000);
+    assert_eq!(entry.size as u64, metadata.len());
+    assert_eq!(entry.ino, metadata.ino() as u32);
+    assert_eq!(entry.dev, metadata.dev() as u32);
+    assert_ne!(entry.ctime.to_string(), "0:0");
+    assert_eq!(
+        fs::read_link(root.join("tracked-link")).expect("read link"),
+        std::path::Path::new("first-target")
+    );
+}
+
+#[test]
 fn test_restore_staged_resets_index_entry_to_head() {
     let repo = create_committed_repo_via_cli();
 
@@ -1792,6 +2124,40 @@ fn restore_delta_index_size_unreadable_object_keeps_read_error() {
     assert!(
         index_entry_snapshot(root, "fresh.txt").is_none(),
         "a failed size lookup must not author a partial index entry"
+    );
+}
+
+#[test]
+fn restore_stat_snapshot_unreadable_source_keeps_read_error() {
+    let repo = create_committed_repo_via_cli();
+    let root = repo.path();
+    fs::write(root.join("fresh.txt"), "fresh content\n").expect("write fresh file");
+    assert_cli_success(&run_libra_command(&["add", "fresh.txt"], root), "add fresh");
+    assert_cli_success(
+        &run_libra_command(&["commit", "-m", "fresh", "--no-verify"], root),
+        "commit fresh",
+    );
+    let blob = libra_stdout(&["hash-object", "fresh.txt"], root)
+        .trim()
+        .to_string();
+    assert_cli_success(
+        &run_libra_command(&["rm", "--cached", "fresh.txt"], root),
+        "unstage fresh.txt",
+    );
+    assert_eq!(
+        fs::read(root.join("fresh.txt")).expect("matching worktree file survives cached removal"),
+        b"fresh content\n",
+    );
+    let loose = loose_object_path(root, &blob);
+    let bytes = fs::read(&loose).expect("read loose blob");
+    fs::write(&loose, &bytes[..bytes.len() / 2]).expect("truncate loose blob");
+    let output = run_libra_command(&["restore", "--staged", "--worktree", "fresh.txt"], root);
+    assert_eq!(output.status.code(), Some(128), "{output:?}");
+    let (_, report) = parse_cli_error_stderr(&output.stderr);
+    assert_eq!(report.error_code, "LBR-IO-001");
+    assert!(
+        index_entry_snapshot(root, "fresh.txt").is_none(),
+        "a failed restore must not author a partial index entry"
     );
 }
 

@@ -7124,3 +7124,746 @@ fn pi_v3_only_user_messages_open_turns() {
     assert!(no_user.turns.is_empty());
     assert_eq!(no_user.preamble, 0..2);
 }
+
+// ---- PI-11: Pi v3 message content projection ----
+
+fn pi_project(
+    file: &PiV3File,
+) -> libra::internal::ai::observed_agents::builtin::pi::PiContentProjection {
+    let bytes = file.bytes();
+    let branch = libra::internal::ai::observed_agents::builtin::pi::normalize_pi_session(
+        &bytes,
+        Default::default(),
+    )
+    .expect("normalize");
+    libra::internal::ai::observed_agents::builtin::pi::project_pi_content(&bytes, &branch)
+        .expect("project")
+}
+
+/// The records of every turn and the preamble, in branch order.
+fn pi_records(
+    projection: &libra::internal::ai::observed_agents::builtin::pi::PiContentProjection,
+) -> Vec<libra::internal::ai::observed_agents::builtin::pi::PiContentRecord> {
+    projection
+        .preamble
+        .iter()
+        .chain(projection.turns.iter().flat_map(|turn| turn.records.iter()))
+        .cloned()
+        .collect()
+}
+
+/// An assistant `thinking` block written with odd spacing, key order, an
+/// unknown field, and a signature.
+const PI_THINKING_BLOCK: &str = r#"{ "thinkingSignature":"sig==" ,"type":"thinking","thinking":"weigh the options","extra":{"n":1.50,"k":[true,null]},"redacted":false }"#;
+
+/// PI-11 AC1: a thinking block is kept as its exact JSON text, every field
+/// included, readable or redacted; projecting other bytes than the branch
+/// was normalized from fails.
+#[test]
+fn pi_content_projection_keeps_thinking_blocks_whole() {
+    use libra::internal::ai::observed_agents::builtin::pi::{
+        PiContentRecord, PiProjectionError, normalize_pi_session, project_pi_content,
+    };
+
+    let redacted =
+        r#"{"type":"thinking","thinking":"","thinkingSignature":"opaque-payload","redacted":true}"#;
+    let file = PiV3File::new()
+        .message("u1", None, "user")
+        .raw(&format!(
+            r#"{{"type":"message","id":"a1","parentId":"u1","message":{{"role":"assistant","content":[{PI_THINKING_BLOCK},{redacted},{{"type":"text","text":"done"}}]}}}}"#
+        ));
+    let projection = pi_project(&file);
+    let blocks: Vec<String> = pi_records(&projection)
+        .into_iter()
+        .filter_map(|record| match record {
+            PiContentRecord::Reasoning { block, .. } => Some(block.get().to_string()),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(
+        blocks,
+        vec![PI_THINKING_BLOCK.to_string(), redacted.to_string()]
+    );
+    assert!(!projection.partial(), "{:?}", projection.partial_reasons);
+
+    // Under a repeated `message` or `content` key the last value is kept,
+    // still byte for byte.
+    let repeated = PiV3File::new().message("u1", None, "user").raw(&format!(
+        r#"{{"type":"message","id":"a1","parentId":"u1","message":{{"role":"assistant","content":[{{"type":"text","text":"stale"}}]}},"message":{{"role":"assistant","content":[{{"type":"text","text":"also stale"}}],"content":[{PI_THINKING_BLOCK}]}}}}"#
+    ));
+    let records = pi_records(&pi_project(&repeated));
+    assert_eq!(
+        records
+            .iter()
+            .filter_map(|record| match record {
+                PiContentRecord::Reasoning { block, .. } => Some(block.get().to_string()),
+                _ => None,
+            })
+            .collect::<Vec<_>>(),
+        vec![PI_THINKING_BLOCK.to_string()]
+    );
+    assert!(!format!("{records:?}").contains("stale"));
+
+    let bytes = file.bytes();
+    let branch = normalize_pi_session(&bytes, Default::default()).expect("normalize");
+    let other = PiV3File::new()
+        .message("x1", None, "user")
+        .message("x2", Some("x1"), "assistant")
+        .bytes();
+    assert_eq!(
+        project_pi_content(&other, &branch),
+        Err(PiProjectionError::BranchMismatch)
+    );
+    assert_eq!(
+        project_pi_content(b"", &branch),
+        Err(PiProjectionError::BranchMismatch)
+    );
+}
+
+/// PI-11 AC2: a toolCall block's `thoughtSignature` is kept exactly as
+/// written, in the field and in the whole block.
+#[test]
+fn pi_content_projection_keeps_tool_call_thought_signature() {
+    use libra::internal::ai::observed_agents::builtin::pi::PiContentRecord;
+
+    let call = r#"{"type":"toolCall","id":"call-1","name":"read","arguments":{"path":"a.rs"},"thoughtSignature": {"v" :2,"blob":"Q0FGRQ=="} }"#;
+    let plain = r#"{"type":"toolCall","id":"call-2","name":"ls","arguments":{}}"#;
+    let repeated = r#"{"type":"toolCall","id":"call-3","name":"ls","arguments":{},"thoughtSignature":"first","thoughtSignature": [ "last",1.0 ] }"#;
+    let file = PiV3File::new().message("u1", None, "user").raw(&format!(
+        r#"{{"type":"message","id":"a1","parentId":"u1","message":{{"role":"assistant","content":[{call},{plain},{repeated}]}}}}"#
+    ));
+    let calls: Vec<_> = pi_records(&pi_project(&file))
+        .into_iter()
+        .filter_map(|record| match record {
+            PiContentRecord::ToolCall {
+                call_id,
+                name,
+                arguments,
+                thought_signature,
+                block,
+            } => Some((
+                call_id,
+                name,
+                arguments,
+                thought_signature.map(|signature| signature.get().to_string()),
+                block.get().to_string(),
+            )),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(
+        calls,
+        vec![
+            (
+                Some("call-1".to_string()),
+                Some("read".to_string()),
+                Some(json!({"path": "a.rs"})),
+                Some(r#"{"v" :2,"blob":"Q0FGRQ=="}"#.to_string()),
+                call.to_string(),
+            ),
+            (
+                Some("call-2".to_string()),
+                Some("ls".to_string()),
+                Some(json!({})),
+                None,
+                plain.to_string(),
+            ),
+            (
+                Some("call-3".to_string()),
+                Some("ls".to_string()),
+                Some(json!({})),
+                Some(r#"[ "last",1.0 ]"#.to_string()),
+                repeated.to_string(),
+            ),
+        ]
+    );
+}
+
+/// PI-11 AC3: readable thinking (a non-empty `thinking` that is not
+/// `redacted`) maps to a reasoning record; an empty or redacted block keeps
+/// its block with no readable text. The text never shows in `Debug`.
+#[test]
+fn pi_content_projection_maps_readable_thinking_to_reasoning() {
+    use libra::internal::ai::observed_agents::builtin::pi::PiContentRecord;
+
+    let file = PiV3File::new().message("u1", None, "user").raw(&format!(
+        r#"{{"type":"message","id":"a1","parentId":"u1","message":{{"role":"assistant","content":[{PI_THINKING_BLOCK},{{"type":"thinking","thinking":""}},{{"type":"thinking","thinking":"hidden","redacted":true}}]}}}}"#
+    ));
+    let projection = pi_project(&file);
+    let readable: Vec<Option<String>> = pi_records(&projection)
+        .into_iter()
+        .filter_map(|record| match record {
+            PiContentRecord::Reasoning { readable, .. } => {
+                Some(readable.map(|text| text.as_str().to_string()))
+            }
+            _ => None,
+        })
+        .collect();
+    assert_eq!(
+        readable,
+        vec![Some("weigh the options".to_string()), None, None]
+    );
+    let debug = format!("{projection:?}");
+    assert!(!debug.contains("weigh the options"), "{debug}");
+    assert!(!debug.contains("sig=="), "{debug}");
+    assert!(!projection.partial(), "{:?}", projection.partial_reasons);
+
+    // An ill-typed redaction state or thinking text is not readable and is
+    // partial; the block is still kept.
+    for block in [
+        r#"{"type":"thinking","thinking":"leak","redacted":"true"}"#,
+        r#"{"type":"thinking","thinking":"leak","redacted":1}"#,
+        r#"{"type":"thinking","thinking":"leak","redacted":null}"#,
+        r#"{"type":"thinking"}"#,
+        r#"{"type":"thinking","thinking":7}"#,
+    ] {
+        let file = PiV3File::new().message("u1", None, "user").raw(&format!(
+            r#"{{"type":"message","id":"a1","parentId":"u1","message":{{"role":"assistant","content":[{block}]}}}}"#
+        ));
+        let projection = pi_project(&file);
+        assert_eq!(
+            projection.partial_reasons,
+            BTreeSet::from([
+                libra::internal::ai::observed_agents::builtin::pi::PiContentPartialReason::MalformedField
+            ]),
+            "{block}"
+        );
+        assert_eq!(
+            pi_records(&projection)
+                .into_iter()
+                .filter_map(|record| match record {
+                    PiContentRecord::Reasoning { readable, block } =>
+                        Some((readable.is_some(), block.get().to_string())),
+                    _ => None,
+                })
+                .collect::<Vec<_>>(),
+            vec![(false, block.to_string())],
+            "{block}"
+        );
+    }
+}
+
+/// PI-11 AC4: readable thinking never joins the assistant answer: the
+/// answer records hold only `text` blocks.
+#[test]
+fn pi_content_projection_keeps_thinking_out_of_the_answer() {
+    use libra::internal::ai::observed_agents::builtin::pi::PiContentRecord;
+
+    let file = PiV3File::new().message("u1", None, "user").raw(
+        r#"{"type":"message","id":"a1","parentId":"u1","message":{"role":"assistant","content":[{"type":"thinking","thinking":"secret plan"},{"type":"text","text":"the answer"},{"type":"thinking","thinking":"second thought"},{"type":"text","text":"more"}]}}"#,
+    );
+    let records = pi_records(&pi_project(&file));
+    let answers: Vec<&str> = records
+        .iter()
+        .filter_map(|record| match record {
+            PiContentRecord::Assistant { text } => Some(text.as_str()),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(answers, vec!["the answer", "more"]);
+    let reasoning: Vec<&str> = records
+        .iter()
+        .filter_map(|record| match record {
+            PiContentRecord::Reasoning {
+                readable: Some(text),
+                ..
+            } => Some(text.as_str()),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(reasoning, vec!["secret plan", "second thought"]);
+}
+
+/// PI-11 AC5: a `context_edit` changes only Pi's later model context: the
+/// target's recorded text is projected unchanged, whether the edit
+/// replaces it or omits it (`replacement: null`).
+#[test]
+fn pi_content_projection_does_not_apply_context_edit() {
+    use libra::internal::ai::observed_agents::builtin::pi::PiContentRecord;
+
+    let file = PiV3File::new()
+        .entry(
+            "message",
+            "u1",
+            None,
+            json!({"message": {"role": "user", "content": "original question"}}),
+        )
+        .entry(
+            "message",
+            "a1",
+            Some("u1"),
+            json!({"message": {"role": "assistant", "content": [{"type": "text", "text": "original answer"}]}}),
+        )
+        .entry(
+            "context_edit",
+            "e1",
+            Some("a1"),
+            json!({"targetId": "a1", "replacement": {"content": "rewritten answer"}}),
+        )
+        .entry(
+            "context_edit",
+            "e2",
+            Some("e1"),
+            json!({"targetId": "u1", "replacement": null}),
+        )
+        .message("u2", Some("e2"), "user");
+    let records = pi_records(&pi_project(&file));
+    assert!(records.contains(&PiContentRecord::User {
+        text: "original question".to_string()
+    }));
+    assert!(records.contains(&PiContentRecord::Assistant {
+        text: "original answer".to_string()
+    }));
+    assert!(!format!("{records:?}").contains("rewritten answer"));
+}
+
+/// PI-11 AC6: a tool result whose `toolCallId` matches no tool call
+/// earlier on the branch is partial: an unknown id, no id, and a call that
+/// only an abandoned branch made.
+#[test]
+fn pi_content_projection_marks_orphan_tool_results_partial() {
+    use libra::internal::ai::observed_agents::builtin::pi::PiContentPartialReason;
+
+    let call = |id: &str, parent: Option<&str>, call: &str| {
+        (
+            id.to_string(),
+            parent.map(str::to_string),
+            json!({"message": {"role": "assistant", "content": [{"type": "toolCall", "id": call, "name": "read", "arguments": {}}]}}),
+        )
+    };
+    let result = |call: Option<&str>| {
+        let mut message = json!({"role": "toolResult", "toolName": "read", "content": [{"type": "text", "text": "ok"}], "isError": false});
+        if let Some(call) = call {
+            message["toolCallId"] = json!(call);
+        }
+        json!({ "message": message })
+    };
+    let (id, parent, body) = call("a1", Some("u1"), "call-1");
+    let matched = PiV3File::new()
+        .message("u1", None, "user")
+        .entry("message", &id, parent.as_deref(), body)
+        .entry("message", "r1", Some("a1"), result(Some("call-1")));
+    assert!(!pi_project(&matched).partial());
+
+    for orphan in [
+        PiV3File::new().message("u1", None, "user").entry(
+            "message",
+            "r1",
+            Some("u1"),
+            result(Some("call-9")),
+        ),
+        PiV3File::new().message("u1", None, "user").entry(
+            "message",
+            "r1",
+            Some("u1"),
+            result(None),
+        ),
+        {
+            let (id, parent, body) = call("a1", Some("u1"), "call-1");
+            PiV3File::new()
+                .message("u1", None, "user")
+                .entry("message", &id, parent.as_deref(), body)
+                .message("u2", Some("u1"), "user")
+                .entry("message", "r1", Some("u2"), result(Some("call-1")))
+        },
+    ] {
+        assert_eq!(
+            pi_project(&orphan).partial_reasons,
+            BTreeSet::from([PiContentPartialReason::OrphanToolResult]),
+            "{:?}",
+            orphan.lines
+        );
+    }
+
+    // A `null` `details` is kept as written.
+    let mut body = result(Some("call-1"));
+    body["message"]["details"] = Value::Null;
+    let (id, parent, call_body) = call("a1", Some("u1"), "call-1");
+    let with_null_details = PiV3File::new()
+        .message("u1", None, "user")
+        .entry("message", &id, parent.as_deref(), call_body)
+        .entry("message", "r1", Some("a1"), body);
+    let projection = pi_project(&with_null_details);
+    assert!(!projection.partial(), "{:?}", projection.partial_reasons);
+    assert!(pi_records(&projection).iter().any(|record| matches!(
+        record,
+        libra::internal::ai::observed_agents::builtin::pi::PiContentRecord::ToolResult {
+            details: Some(details),
+            ..
+        } if details.get() == "null"
+    )));
+
+    // A missing or ill-typed `isError` is unknown, not success.
+    for is_error in [None, Some(json!("yes"))] {
+        let mut body = result(Some("call-1"));
+        match &is_error {
+            Some(value) => body["message"]["isError"] = value.clone(),
+            None => {
+                if let Some(message) = body["message"].as_object_mut() {
+                    message.remove("isError");
+                }
+            }
+        }
+        let (id, parent, call_body) = call("a1", Some("u1"), "call-1");
+        let file = PiV3File::new()
+            .message("u1", None, "user")
+            .entry("message", &id, parent.as_deref(), call_body)
+            .entry("message", "r1", Some("a1"), body);
+        let projection = pi_project(&file);
+        assert_eq!(
+            projection.partial_reasons,
+            BTreeSet::from([PiContentPartialReason::MalformedField]),
+            "{is_error:?}"
+        );
+        assert!(pi_records(&projection).iter().any(|record| matches!(
+            record,
+            libra::internal::ai::observed_agents::builtin::pi::PiContentRecord::ToolResult {
+                is_error: None,
+                ..
+            }
+        )));
+    }
+}
+
+/// PI-11 AC7: `nestedCalls` stays bounded metadata of its tool result: it
+/// adds no tool call or result of its own; past the call or byte bound only
+/// its count is kept.
+#[test]
+fn pi_content_projection_keeps_nested_calls_as_bounded_metadata() {
+    use libra::internal::ai::observed_agents::builtin::pi::{
+        PI_NESTED_CALLS_MAX_BYTES, PI_NESTED_CALLS_MAX_CALLS, PiContentPartialReason,
+        PiContentRecord,
+    };
+
+    let with_nested = |nested: &str| {
+        PiV3File::new()
+            .message("u1", None, "user")
+            .entry(
+                "message",
+                "a1",
+                Some("u1"),
+                json!({"message": {"role": "assistant", "content": [{"type": "toolCall", "id": "call-1", "name": "codemode", "arguments": {}}]}}),
+            )
+            .raw(&format!(
+                r#"{{"type":"message","id":"r1","parentId":"a1","message":{{"role":"toolResult","toolCallId":"call-1","toolName":"codemode","content":[{{"type":"text","text":"ran"}}],"isError":false,"nestedCalls":{nested}}}}}"#
+            ))
+    };
+    let nested = r#"{"calls":[{"id":"n1","name":"read","status":"ok","arguments":{"path":"x"},"durationMs":3},{"id":"n2","name":"bash","status":"error","error":"boom"}],"complete":true}"#;
+    let projection = pi_project(&with_nested(nested));
+    assert!(!projection.partial(), "{:?}", projection.partial_reasons);
+    let records = pi_records(&projection);
+    assert_eq!(
+        records
+            .iter()
+            .filter(|record| matches!(record, PiContentRecord::ToolCall { .. }))
+            .count(),
+        1,
+        "nested calls are not tool calls of the turn"
+    );
+    let results: Vec<_> = records
+        .iter()
+        .filter_map(|record| match record {
+            PiContentRecord::ToolResult {
+                call_id,
+                text,
+                nested_calls,
+                ..
+            } => Some((call_id.clone(), text.clone(), nested_calls.clone())),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(results.len(), 1);
+    let (call_id, text, nested_calls) = &results[0];
+    assert_eq!(call_id.as_deref(), Some("call-1"));
+    assert_eq!(text, &vec!["ran".to_string()]);
+    let nested_calls = nested_calls.as_ref().expect("nested calls");
+    assert_eq!(nested_calls.calls, 2);
+    assert_eq!(nested_calls.complete, Some(true));
+    assert_eq!(nested_calls.raw.as_ref().map(|raw| raw.get()), Some(nested));
+
+    let many = format!(
+        r#"{{"calls":[{}],"complete":true}}"#,
+        vec![r#"{"id":"n","name":"read","status":"ok"}"#; PI_NESTED_CALLS_MAX_CALLS + 1].join(",")
+    );
+    let large = format!(
+        r#"{{"calls":[{{"id":"n","name":"read","status":"error","error":"{}"}}],"complete":true}}"#,
+        "e".repeat(PI_NESTED_CALLS_MAX_BYTES)
+    );
+    // Near the session byte bound: a million short calls are counted
+    // without being kept.
+    let huge = format!(
+        r#"{{"calls":[{}],"complete":true}}"#,
+        vec!["0"; 1_000_000].join(",")
+    );
+    for (nested, count) in [
+        (many.as_str(), PI_NESTED_CALLS_MAX_CALLS + 1),
+        (large.as_str(), 1),
+        (huge.as_str(), 1_000_000),
+        (r#"{"complete":true}"#, 0),
+    ] {
+        let projection = pi_project(&with_nested(nested));
+        assert_eq!(
+            projection.partial_reasons,
+            BTreeSet::from([PiContentPartialReason::NestedCallsOverBound])
+        );
+        let kept = pi_records(&projection)
+            .into_iter()
+            .find_map(|record| match record {
+                PiContentRecord::ToolResult { nested_calls, .. } => nested_calls,
+                _ => None,
+            })
+            .expect("nested calls");
+        assert_eq!(kept.calls, count);
+        assert_eq!(kept.raw, None);
+    }
+}
+
+/// PI-11 AC8: `nestedCalls.complete: false` (or a `complete` that is not a
+/// boolean) is partial.
+#[test]
+fn pi_content_projection_marks_incomplete_nested_calls_partial() {
+    use libra::internal::ai::observed_agents::builtin::pi::PiContentPartialReason;
+
+    for nested in [
+        r#"{"calls":[{"id":"n1","name":"read","status":"unfinished"}],"complete":false}"#,
+        r#"{"calls":[{"id":"n1","name":"read","status":"ok","argumentsBytes":9000}],"complete":false}"#,
+        r#"{"calls":[]}"#,
+        r#"{"calls":[],"complete":"yes"}"#,
+    ] {
+        let file = PiV3File::new()
+            .message("u1", None, "user")
+            .entry(
+                "message",
+                "a1",
+                Some("u1"),
+                json!({"message": {"role": "assistant", "content": [{"type": "toolCall", "id": "c1", "name": "codemode", "arguments": {}}]}}),
+            )
+            .raw(&format!(
+                r#"{{"type":"message","id":"r1","parentId":"a1","message":{{"role":"toolResult","toolCallId":"c1","toolName":"codemode","content":[],"isError":false,"nestedCalls":{nested}}}}}"#
+            ));
+        assert_eq!(
+            pi_project(&file).partial_reasons,
+            BTreeSet::from([PiContentPartialReason::NestedCallsIncomplete]),
+            "{nested}"
+        );
+    }
+}
+
+/// PI-11 scope: readable entries that open no turn are projected as
+/// context records with their source kept as written: system content and
+/// sections (in JavaScript enumeration order, removed ones skipped), a bash
+/// execution's command and output, an extension message, branch and
+/// compaction summaries, and a compaction's `systemMessage`. Records keep
+/// block order, and a large `sections` object is read in linear time.
+#[test]
+fn pi_content_projection_keeps_readable_context_entries() {
+    use libra::internal::ai::observed_agents::builtin::pi::{
+        PiContentPartialReason, PiContentRecord, PiContextKind,
+    };
+
+    let system = r#"{"type":"message","id":"s1","parentId":null,"message":{"role":"system","content":"base prompt","sections":{"zeta":"first section","alpha":null,"mid":"second section"},"toolsAdded":[{"name":"read"}]}}"#;
+    let file = PiV3File::new()
+        .raw(system)
+        .message("u1", Some("s1"), "user")
+        .entry(
+            "message",
+            "b1",
+            Some("u1"),
+            json!({"message": {"role": "bashExecution", "command": "ls", "output": "a.rs", "exitCode": 0, "cancelled": false, "truncated": false}}),
+        )
+        .entry(
+            "custom_message",
+            "c1",
+            Some("b1"),
+            json!({"customType": "note", "content": [{"type": "text", "text": "from an extension"}], "display": false}),
+        )
+        .entry(
+            "branch_summary",
+            "bs",
+            Some("c1"),
+            json!({"fromId": "u1", "summary": "tried another way"}),
+        )
+        .raw(r#"{"type":"compaction","id":"co","parentId":"bs","summary":"earlier work","firstKeptEntryId":"co","tokensBefore":5,"systemMessage":{"role":"system","content":"checkpoint prompt","sections":{"10":"ten","b":"bee","2":"two","a":null,"b":"bee again"}}}"#);
+    let projection = pi_project(&file);
+    assert!(!projection.partial(), "{:?}", projection.partial_reasons);
+    let contexts: Vec<(PiContextKind, Vec<String>)> = pi_records(&projection)
+        .into_iter()
+        .filter_map(|record| match record {
+            PiContentRecord::Context { kind, text, .. } => Some((kind, text)),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(
+        contexts,
+        vec![
+            (
+                PiContextKind::System,
+                vec![
+                    "base prompt".to_string(),
+                    "first section".to_string(),
+                    "second section".to_string()
+                ]
+            ),
+            (
+                PiContextKind::BashExecution,
+                vec!["ls".to_string(), "a.rs".to_string()]
+            ),
+            (
+                PiContextKind::CustomMessage,
+                vec!["from an extension".to_string()]
+            ),
+            (
+                PiContextKind::BranchSummary,
+                vec!["tried another way".to_string()]
+            ),
+            // The compaction's `systemMessage` comes before its summary, its
+            // sections in JavaScript order: array-index names ascending,
+            // then the rest in file order, a repeated name keeping its first
+            // position and last value.
+            (
+                PiContextKind::System,
+                vec![
+                    "checkpoint prompt".to_string(),
+                    "two".to_string(),
+                    "ten".to_string(),
+                    "bee again".to_string()
+                ]
+            ),
+            (
+                PiContextKind::CompactionSummary,
+                vec!["earlier work".to_string()]
+            ),
+        ]
+    );
+    // The system message sits in the preamble and keeps its whole entry.
+    assert!(matches!(
+        projection.preamble.as_slice(),
+        [PiContentRecord::Context { kind: PiContextKind::System, entry, .. }] if entry.get() == system
+    ));
+
+    let broken = PiV3File::new()
+        .message("u1", None, "user")
+        .entry(
+            "message",
+            "b1",
+            Some("u1"),
+            json!({"message": {"role": "bashExecution", "command": 3}}),
+        )
+        .entry("branch_summary", "bs", Some("b1"), json!({"fromId": "u1"}))
+        .entry(
+            "compaction",
+            "co",
+            Some("bs"),
+            json!({"summary": "s", "firstKeptEntryId": "co", "tokensBefore": 1, "systemMessage": "not an object"}),
+        );
+    assert_eq!(
+        pi_project(&broken).partial_reasons,
+        BTreeSet::from([PiContentPartialReason::MalformedField])
+    );
+
+    // A `content` of a JSON type the message does not allow is kept whole.
+    let ill_typed = PiV3File::new()
+        .raw(r#"{"type":"message","id":"u1","parentId":null,"message":{"role":"user","content":7}}"#)
+        .raw(r#"{"type":"message","id":"a1","parentId":"u1","message":{"role":"assistant","content":"plain answer"}}"#)
+        .raw(r#"{"type":"message","id":"a2","parentId":"a1","message":{"role":"assistant","content":[{"type":"toolCall","id":"c1","name":"read","arguments":{}}]}}"#)
+        .raw(r#"{"type":"message","id":"r1","parentId":"a2","message":{"role":"toolResult","toolCallId":"c1","toolName":"read","content":{"x" : 1},"isError":false}}"#);
+    let projection = pi_project(&ill_typed);
+    assert_eq!(
+        projection.partial_reasons,
+        BTreeSet::from([PiContentPartialReason::UnknownBlock])
+    );
+    assert_eq!(
+        pi_records(&projection)
+            .into_iter()
+            .filter_map(|record| match record {
+                PiContentRecord::Unprojected { block } => Some(block.get().to_string()),
+                _ => None,
+            })
+            .collect::<Vec<_>>(),
+        vec![
+            "7".to_string(),
+            r#""plain answer""#.to_string(),
+            r#"{"x" : 1}"#.to_string()
+        ]
+    );
+
+    // User text and a kept image block stay in block order.
+    let interleaved = PiV3File::new().raw(
+        r#"{"type":"message","id":"u1","parentId":null,"message":{"role":"user","content":[{"type":"text","text":"before"},{"type":"image","data":"AAAA","mimeType":"image/png"},{"type":"text","text":"after"}]}}"#,
+    );
+    let projection = pi_project(&interleaved);
+    assert_eq!(
+        projection.partial_reasons,
+        BTreeSet::from([PiContentPartialReason::UnsupportedBlock])
+    );
+    assert_eq!(
+        pi_records(&projection)
+            .into_iter()
+            .map(|record| match record {
+                PiContentRecord::User { text } => text,
+                PiContentRecord::Unprojected { block } => format!("kept {}", block.get().len()),
+                other => panic!("unexpected record {other:?}"),
+            })
+            .collect::<Vec<_>>(),
+        vec![
+            "before".to_string(),
+            format!(
+                "kept {}",
+                r#"{"type":"image","data":"AAAA","mimeType":"image/png"}"#.len()
+            ),
+            "after".to_string()
+        ]
+    );
+
+    // Many distinct section names are read in one pass.
+    let names = 200_000;
+    let sections = (0..names)
+        .map(|index| format!("\"s{index}\":\"v\""))
+        .collect::<Vec<_>>()
+        .join(",");
+    let large = PiV3File::new().raw(&format!(
+        r#"{{"type":"message","id":"s1","parentId":null,"message":{{"role":"system","content":"p","sections":{{{sections}}}}}}}"#
+    ));
+    let started = Instant::now();
+    let projection = pi_project(&large);
+    assert!(
+        started.elapsed() < Duration::from_secs(30),
+        "{:?}",
+        started.elapsed()
+    );
+    assert!(matches!(
+        projection.preamble.as_slice(),
+        [PiContentRecord::Context { text, .. }] if text.len() == names + 1
+    ));
+
+    // An entry that may hold content but cannot be projected is kept whole
+    // and is partial: a message without a `message` object, one with an
+    // unknown role, and an unknown entry type.
+    let no_message = r#"{"type":"message","id":"m1","parentId":"u1","content":"stray"}"#;
+    let custom_role = r#"{"type":"message","id":"m2","parentId":"m1","message":{"role":"custom","content":"hi"}}"#;
+    let future = r#"{"type":"future_entry","id":"m3","parentId":"m2","text":"new"}"#;
+    let file = PiV3File::new()
+        .message("u1", None, "user")
+        .raw(no_message)
+        .raw(custom_role)
+        .raw(future);
+    let projection = pi_project(&file);
+    assert_eq!(
+        projection.partial_reasons,
+        BTreeSet::from([PiContentPartialReason::UnprojectedEntry])
+    );
+    assert_eq!(
+        pi_records(&projection)
+            .into_iter()
+            .filter_map(|record| match record {
+                PiContentRecord::Unprojected { block } => Some(block.get().to_string()),
+                _ => None,
+            })
+            .collect::<Vec<_>>(),
+        vec![
+            no_message.to_string(),
+            custom_role.to_string(),
+            future.to_string()
+        ]
+    );
+}

@@ -5,7 +5,9 @@
 //! discovery of session files; PI-15 keeps the discovered sessions of one
 //! repository, by header `cwd`, with the session id from the header `id`;
 //! PI-03 normalizes one v3 session file into its tree, disk leaf, active
-//! branch, and user turns, without keeping content. Pi stays unsupported:
+//! branch, and user turns, without keeping content; PI-11 projects that
+//! branch's message content, keeping thinking and tool-call blocks exactly
+//! as written. Pi stays unsupported:
 //! nothing here imports a session, installs hooks, or reads a transcript for
 //! capture.
 //!
@@ -881,6 +883,810 @@ fn reject_parent_cycles(parents: &[Option<usize>]) -> std::result::Result<(), Pi
         }
     }
     Ok(())
+}
+
+/// Bound on the calls kept from one tool result's `nestedCalls`, Pi's own
+/// `NESTED_CALL_LIMITS.maxCalls` (`nested-tool-calls.ts:26-31`).
+pub const PI_NESTED_CALLS_MAX_CALLS: usize = 256;
+/// Bound on the raw bytes kept from one tool result's `nestedCalls`. This is
+/// a Libra limit on top of Pi's: Pi caps arguments at 32 KiB in total but
+/// each of up to 256 errors only at 500 characters, so a record Pi wrote can
+/// exceed it; past it only the count is kept, and the result is partial.
+pub const PI_NESTED_CALLS_MAX_BYTES: usize = 256 * 1024;
+
+/// A JSON value kept exactly as the session file holds it. Its `Debug`
+/// shows only the length: a thinking block or signature is not echoed.
+#[derive(Clone)]
+pub struct PiRawJson(Box<serde_json::value::RawValue>);
+
+/// Two raw values are equal when their text is.
+impl PartialEq for PiRawJson {
+    fn eq(&self, other: &Self) -> bool {
+        self.0.get() == other.0.get()
+    }
+}
+
+impl Eq for PiRawJson {}
+
+impl PiRawJson {
+    /// The value's JSON text, byte for byte as in the file.
+    pub fn get(&self) -> &str {
+        self.0.get()
+    }
+}
+
+impl std::fmt::Debug for PiRawJson {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("PiRawJson")
+            .field("len", &self.0.get().len())
+            .finish()
+    }
+}
+
+/// Readable thinking text. Its `Debug` shows only the length.
+#[derive(Clone, PartialEq, Eq)]
+pub struct PiReasoningText(String);
+
+impl PiReasoningText {
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+impl std::fmt::Debug for PiReasoningText {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("PiReasoningText")
+            .field("len", &self.0.len())
+            .finish()
+    }
+}
+
+/// A tool result's `nestedCalls`: calls a tool made while it ran. Kept only
+/// as bounded metadata of that result; they never become tool calls of the
+/// turn.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct PiNestedCalls {
+    /// Entries in `calls`.
+    pub calls: usize,
+    /// `complete`, when it is a boolean.
+    pub complete: Option<bool>,
+    /// The value as written, when within [`PI_NESTED_CALLS_MAX_CALLS`] and
+    /// [`PI_NESTED_CALLS_MAX_BYTES`].
+    pub raw: Option<PiRawJson>,
+}
+
+/// One projected piece of message content (PI-21 frozen table).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum PiContentRecord {
+    /// User text: a string `content` or a `text` block.
+    User { text: String },
+    /// An assistant `text` block: the answer. Thinking never joins it.
+    Assistant { text: String },
+    /// An assistant `thinking` block, kept whole as written. `readable` is
+    /// its `thinking` text when that is non-empty and the block is not
+    /// `redacted`.
+    Reasoning {
+        readable: Option<PiReasoningText>,
+        block: PiRawJson,
+    },
+    /// An assistant `toolCall` block. `block` is kept whole, so
+    /// `thoughtSignature` stays exactly as written; `thought_signature` is
+    /// that field alone.
+    ToolCall {
+        call_id: Option<String>,
+        name: Option<String>,
+        arguments: Option<serde_json::Value>,
+        thought_signature: Option<PiRawJson>,
+        block: PiRawJson,
+    },
+    /// A `toolResult` message: its text blocks in order, `isError` (`None`
+    /// when missing or not a boolean, which is partial), `details` as
+    /// written, and `nestedCalls` as bounded metadata.
+    ToolResult {
+        call_id: Option<String>,
+        tool_name: Option<String>,
+        text: Vec<String>,
+        is_error: Option<bool>,
+        details: Option<PiRawJson>,
+        nested_calls: Option<PiNestedCalls>,
+    },
+    /// Readable text that opens no turn (PI-20/PI-21): a system message's
+    /// content and sections, a `!` bash execution's command and output, an
+    /// extension message's content, a branch or compaction summary, or a
+    /// compaction's `systemMessage`. `entry` is what the text comes from, as
+    /// written: the whole entry, or the compaction's `systemMessage` object.
+    Context {
+        kind: PiContextKind,
+        text: Vec<String>,
+        entry: PiRawJson,
+    },
+    /// Kept as written but not projected: an `image` block (unsupported in
+    /// PI-20/PI-21), a block type outside the table, a whole `content` of a
+    /// JSON type the message does not allow, or a whole entry
+    /// ([`PiContentPartialReason::UnprojectedEntry`]).
+    Unprojected { block: PiRawJson },
+}
+
+/// The entry a [`PiContentRecord::Context`] comes from.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum PiContextKind {
+    /// A `system` role message (`ai/src/types.ts:554-570`).
+    System,
+    /// A `bashExecution` role message (`messages.ts:29-41`).
+    BashExecution,
+    /// A `custom_message` entry (`session-manager.ts:150-166`).
+    CustomMessage,
+    /// A `branch_summary` entry's `summary`.
+    BranchSummary,
+    /// A `compaction` entry's `summary`.
+    CompactionSummary,
+}
+
+/// Why a projection may not show all of the branch's content.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
+pub enum PiContentPartialReason {
+    /// A `toolResult` whose `toolCallId` matches no `toolCall` earlier on
+    /// the branch.
+    OrphanToolResult,
+    /// A `nestedCalls` whose `complete` is `false` or not a boolean: Pi
+    /// dropped calls, omitted arguments, or saw calls unfinished
+    /// (`ai/src/types.ts:627-631`).
+    NestedCallsIncomplete,
+    /// A `nestedCalls` over [`PI_NESTED_CALLS_MAX_CALLS`] or
+    /// [`PI_NESTED_CALLS_MAX_BYTES`], or without a `calls` array; only its
+    /// count is kept.
+    NestedCallsOverBound,
+    /// An `image` block, unsupported in PI-20/PI-21; kept unprojected.
+    UnsupportedBlock,
+    /// A block type outside the table, a block that is not an object or
+    /// has an ill-typed `text`, or a `content` of a JSON type the message
+    /// does not allow; the block, or the whole `content`, is kept
+    /// unprojected.
+    UnknownBlock,
+    /// A `message` entry with an unknown role or without a `message`
+    /// object, or an entry type outside the PI-20 table: kept whole as
+    /// [`PiContentRecord::Unprojected`].
+    UnprojectedEntry,
+    /// A field of a projected record is missing, `null`, or of the wrong JSON
+    /// type:
+    /// a thinking block's `thinking` or `redacted` (its text is then not
+    /// readable), a tool call's `id`, `name`, or `arguments`, a tool
+    /// result's `toolCallId`, `toolName`, or `isError`, a bash execution's
+    /// `command` or `output`, a summary, system `sections`, a compaction's
+    /// `systemMessage`, or a `null` `nestedCalls`.
+    MalformedField,
+}
+
+/// The projected content of one turn.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct PiProjectedTurn {
+    pub ordinal: usize,
+    pub completeness: super::super::coverage::Completeness,
+    pub records: Vec<PiContentRecord>,
+}
+
+/// The projected content of an active branch.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct PiContentProjection {
+    /// Content before the first user message, which opens no turn.
+    pub preamble: Vec<PiContentRecord>,
+    pub turns: Vec<PiProjectedTurn>,
+    /// Reasons of this projection; the branch's own
+    /// [`PiActiveBranch::partial_reasons`] apply too.
+    pub partial_reasons: BTreeSet<PiContentPartialReason>,
+}
+
+impl PiContentProjection {
+    pub fn partial(&self) -> bool {
+        !self.partial_reasons.is_empty()
+    }
+}
+
+/// Why `bytes` cannot be projected over a branch.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum PiProjectionError {
+    /// A branch entry's line is missing from `bytes` or holds another
+    /// entry: the bytes are not the ones the branch was normalized from.
+    BranchMismatch,
+}
+
+/// One JSON object's members as written: each key's last value (as
+/// `JSON.parse` keeps it), borrowed byte for byte from the line.
+type RawFields<'a> = BTreeMap<String, &'a serde_json::value::RawValue>;
+
+fn raw_fields(text: &str) -> Option<RawFields<'_>> {
+    serde_json::from_str(text).ok()
+}
+
+/// A member as written, `null` included.
+fn member<'a>(fields: &RawFields<'a>, name: &str) -> Option<&'a serde_json::value::RawValue> {
+    fields.get(name).copied()
+}
+
+/// A message's `content`. Pi reads a `null` content as empty
+/// (`sessionEntryToContextMessages`, `session-manager.ts:439-453`).
+fn content_member<'a>(fields: &RawFields<'a>) -> Option<&'a serde_json::value::RawValue> {
+    member(fields, "content").filter(|raw| raw.get() != "null")
+}
+
+/// A member's value of type `T`: `Ok(None)` when absent, `Err(())` when it
+/// is `null` or another JSON type.
+fn typed_field<T: serde::de::DeserializeOwned>(
+    fields: &RawFields<'_>,
+    name: &str,
+) -> std::result::Result<Option<T>, ()> {
+    member(fields, name)
+        .map(|raw| serde_json::from_str::<T>(raw.get()).map_err(|_| ()))
+        .transpose()
+}
+
+/// A required string member; a missing or ill-typed one is partial.
+fn required_string(
+    fields: &RawFields<'_>,
+    name: &str,
+    partial: &mut BTreeSet<PiContentPartialReason>,
+) -> Option<String> {
+    match typed_field::<String>(fields, name) {
+        Ok(Some(value)) => Some(value),
+        Ok(None) | Err(()) => {
+            partial.insert(PiContentPartialReason::MalformedField);
+            None
+        }
+    }
+}
+
+/// Project the content of `branch`, read from the same `bytes` it was
+/// normalized from. Messages: user text; assistant answers; each thinking
+/// block as reasoning, kept whole and apart from the answer; tool calls,
+/// kept whole; tool results with `nestedCalls` as bounded metadata. Readable
+/// entries that open no turn (system and bash-execution messages, extension
+/// messages, branch and compaction summaries) become
+/// [`PiContentRecord::Context`]. Every kept value is the file's own bytes,
+/// under a repeated key too (the last value, as `JSON.parse` keeps it).
+/// `context_edit` is not applied: Pi's replacement changes only later model
+/// context, never the target's recorded text
+/// (`session-manager.ts:519-541,549-553`).
+pub fn project_pi_content(
+    bytes: &[u8],
+    branch: &PiActiveBranch,
+) -> std::result::Result<PiContentProjection, PiProjectionError> {
+    let lines: Vec<&[u8]> = bytes.split(|byte| *byte == b'\n').collect();
+    let mut projection = PiContentProjection {
+        preamble: Vec::new(),
+        turns: branch
+            .turns
+            .iter()
+            .map(|turn| PiProjectedTurn {
+                ordinal: turn.ordinal,
+                completeness: turn.completeness,
+                records: Vec::new(),
+            })
+            .collect(),
+        partial_reasons: BTreeSet::new(),
+    };
+    // The turn of each branch entry; `None` for the preamble.
+    let mut owner = vec![None; branch.entries.len()];
+    for (ordinal, turn) in branch.turns.iter().enumerate() {
+        for slot in owner.get_mut(turn.entries.clone()).into_iter().flatten() {
+            *slot = Some(ordinal);
+        }
+    }
+    let mut call_ids = BTreeSet::new();
+    for (index, entry) in branch.entries.iter().enumerate() {
+        let text = entry
+            .line
+            .checked_sub(1)
+            .and_then(|line| lines.get(line))
+            .and_then(|line| std::str::from_utf8(line).ok())
+            .ok_or(PiProjectionError::BranchMismatch)?;
+        let fields = raw_fields(text).ok_or(PiProjectionError::BranchMismatch)?;
+        if typed_field::<String>(&fields, "id")
+            .ok()
+            .flatten()
+            .as_deref()
+            != Some(entry.id.as_str())
+        {
+            return Err(PiProjectionError::BranchMismatch);
+        }
+        let whole = || {
+            serde_json::from_str::<Box<serde_json::value::RawValue>>(text)
+                .map(PiRawJson)
+                .map_err(|_| PiProjectionError::BranchMismatch)
+        };
+        let partial = &mut projection.partial_reasons;
+        let mut records = Vec::new();
+        match entry.kind {
+            PiEntryKind::Message(role) => {
+                let message = member(&fields, "message").and_then(|raw| raw_fields(raw.get()));
+                match (role, message) {
+                    // An unknown role, or no `message` object: kept whole and
+                    // unprojected.
+                    (PiMessageRole::Unknown, _) | (_, None) => {
+                        partial.insert(PiContentPartialReason::UnprojectedEntry);
+                        records.push(PiContentRecord::Unprojected { block: whole()? });
+                    }
+                    (PiMessageRole::User, Some(message)) => {
+                        // Text and kept blocks stay in block order.
+                        records.extend(
+                            content_pieces(content_member(&message), partial)
+                                .into_iter()
+                                .map(|piece| match piece {
+                                    ContentPiece::Text(text) => PiContentRecord::User { text },
+                                    ContentPiece::Kept(record) => record,
+                                }),
+                        );
+                    }
+                    (PiMessageRole::Assistant, Some(message)) => project_assistant(
+                        content_member(&message),
+                        &mut records,
+                        &mut call_ids,
+                        partial,
+                    ),
+                    (PiMessageRole::ToolResult, Some(message)) => {
+                        project_tool_result(&message, &mut records, &call_ids, partial)
+                    }
+                    (PiMessageRole::System, Some(message)) => {
+                        system_context(&message, whole()?, &mut records, partial)
+                    }
+                    (PiMessageRole::BashExecution, Some(message)) => {
+                        let text = ["command", "output"]
+                            .into_iter()
+                            .filter_map(|name| required_string(&message, name, partial))
+                            .collect();
+                        records.push(PiContentRecord::Context {
+                            kind: PiContextKind::BashExecution,
+                            text,
+                            entry: whole()?,
+                        });
+                    }
+                }
+            }
+            PiEntryKind::CustomMessage => {
+                let mut trailing = Vec::new();
+                let text = content_text(content_member(&fields), &mut trailing, partial);
+                records.push(PiContentRecord::Context {
+                    kind: PiContextKind::CustomMessage,
+                    text,
+                    entry: whole()?,
+                });
+                records.extend(trailing);
+            }
+            PiEntryKind::BranchSummary | PiEntryKind::Compaction => {
+                let kind = if entry.kind == PiEntryKind::Compaction {
+                    // Pi puts a compaction's `systemMessage` before its summary
+                    // (`session-manager.ts:461-464`).
+                    match member(&fields, "systemMessage") {
+                        None => {}
+                        Some(system) => match raw_fields(system.get()) {
+                            Some(system_fields) => system_context(
+                                &system_fields,
+                                PiRawJson(system.to_owned()),
+                                &mut records,
+                                partial,
+                            ),
+                            None => {
+                                partial.insert(PiContentPartialReason::MalformedField);
+                            }
+                        },
+                    }
+                    PiContextKind::CompactionSummary
+                } else {
+                    PiContextKind::BranchSummary
+                };
+                let text = required_string(&fields, "summary", partial)
+                    .into_iter()
+                    .collect();
+                records.push(PiContentRecord::Context {
+                    kind,
+                    text,
+                    entry: whole()?,
+                });
+            }
+            // A type outside the PI-20 table may hold content: kept whole.
+            PiEntryKind::Unknown => {
+                partial.insert(PiContentPartialReason::UnprojectedEntry);
+                records.push(PiContentRecord::Unprojected { block: whole()? });
+            }
+            // Metadata entries (PI-20): no readable content.
+            PiEntryKind::Custom
+            | PiEntryKind::ModelChange
+            | PiEntryKind::ThinkingLevelChange
+            | PiEntryKind::Usage
+            | PiEntryKind::ContextEdit
+            | PiEntryKind::Label
+            | PiEntryKind::SessionInfo => continue,
+        }
+        match owner.get(index).copied().flatten() {
+            Some(turn) => projection.turns[turn].records.extend(records),
+            None => projection.preamble.extend(records),
+        }
+    }
+    Ok(projection)
+}
+
+/// A system message's content and sections as one context record.
+fn system_context(
+    message: &RawFields<'_>,
+    entry: PiRawJson,
+    records: &mut Vec<PiContentRecord>,
+    partial: &mut BTreeSet<PiContentPartialReason>,
+) {
+    let mut trailing = Vec::new();
+    let mut text = content_text(content_member(message), &mut trailing, partial);
+    text.extend(system_sections(member(message, "sections"), partial));
+    records.push(PiContentRecord::Context {
+        kind: PiContextKind::System,
+        text,
+        entry,
+    });
+    records.extend(trailing);
+}
+
+/// The blocks of a `content` array, each kept as written; `None` when the
+/// content is not an array.
+fn content_blocks(
+    content: &serde_json::value::RawValue,
+) -> Option<Vec<&serde_json::value::RawValue>> {
+    serde_json::from_str(content.get()).ok()
+}
+
+/// A `content` of a JSON type the message does not allow, kept whole.
+fn unsupported_content(
+    content: &serde_json::value::RawValue,
+    partial: &mut BTreeSet<PiContentPartialReason>,
+) -> PiContentRecord {
+    partial.insert(PiContentPartialReason::UnknownBlock);
+    PiContentRecord::Unprojected {
+        block: PiRawJson(content.to_owned()),
+    }
+}
+
+fn block_type(block: &RawFields<'_>) -> Option<String> {
+    typed_field::<String>(block, "type").ok().flatten()
+}
+
+/// Keep a block that is not projected, with the reason.
+fn unprojected(
+    block: &serde_json::value::RawValue,
+    fields: Option<&RawFields<'_>>,
+    records: &mut Vec<PiContentRecord>,
+    partial: &mut BTreeSet<PiContentPartialReason>,
+) {
+    partial.insert(if fields.and_then(block_type).as_deref() == Some("image") {
+        PiContentPartialReason::UnsupportedBlock
+    } else {
+        PiContentPartialReason::UnknownBlock
+    });
+    records.push(PiContentRecord::Unprojected {
+        block: PiRawJson(block.to_owned()),
+    });
+}
+
+/// One piece of a `string | (TextContent | ImageContent)[]` content, in
+/// block order: a text, or a block kept unprojected.
+enum ContentPiece {
+    Text(String),
+    Kept(PiContentRecord),
+}
+
+fn content_pieces(
+    content: Option<&serde_json::value::RawValue>,
+    partial: &mut BTreeSet<PiContentPartialReason>,
+) -> Vec<ContentPiece> {
+    let Some(content) = content else {
+        return Vec::new();
+    };
+    if let Ok(text) = serde_json::from_str::<String>(content.get()) {
+        return vec![ContentPiece::Text(text)];
+    }
+    let Some(blocks) = content_blocks(content) else {
+        return vec![ContentPiece::Kept(unsupported_content(content, partial))];
+    };
+    let mut pieces = Vec::new();
+    for block in blocks {
+        let fields = raw_fields(block.get());
+        match fields.as_ref().map(|fields| {
+            (
+                block_type(fields),
+                typed_field::<String>(fields, "text").ok().flatten(),
+            )
+        }) {
+            Some((Some(kind), Some(part))) if kind == "text" => {
+                pieces.push(ContentPiece::Text(part))
+            }
+            _ => {
+                let mut kept = Vec::new();
+                unprojected(block, fields.as_ref(), &mut kept, partial);
+                pieces.extend(kept.into_iter().map(ContentPiece::Kept));
+            }
+        }
+    }
+    pieces
+}
+
+/// The texts of a content, in order, for a record that holds them all;
+/// the blocks kept unprojected go to `trailing`, which the caller appends
+/// after that record.
+fn content_text(
+    content: Option<&serde_json::value::RawValue>,
+    trailing: &mut Vec<PiContentRecord>,
+    partial: &mut BTreeSet<PiContentPartialReason>,
+) -> Vec<String> {
+    let mut text = Vec::new();
+    for piece in content_pieces(content, partial) {
+        match piece {
+            ContentPiece::Text(part) => text.push(part),
+            ContentPiece::Kept(record) => trailing.push(record),
+        }
+    }
+    text
+}
+
+/// A system message's section texts, in JavaScript enumeration order; a
+/// section set to `null` (removed) contributes none.
+fn system_sections(
+    sections: Option<&serde_json::value::RawValue>,
+    partial: &mut BTreeSet<PiContentPartialReason>,
+) -> Vec<String> {
+    let Some(sections) = sections else {
+        return Vec::new();
+    };
+    if sections.get() == "null" {
+        partial.insert(PiContentPartialReason::MalformedField);
+        return Vec::new();
+    }
+    match serde_json::from_str::<OrderedStringSections>(sections.get()) {
+        Ok(OrderedStringSections(values)) => values.into_iter().flatten().collect(),
+        Err(_) => {
+            partial.insert(PiContentPartialReason::MalformedField);
+            Vec::new()
+        }
+    }
+}
+
+/// A name JavaScript enumerates as an array index: a canonical decimal
+/// below `2^32 - 1`.
+fn js_array_index(name: &str) -> Option<u32> {
+    if name != "0" && (name.starts_with('0') || name.is_empty()) {
+        return None;
+    }
+    if !name.bytes().all(|byte| byte.is_ascii_digit()) {
+        return None;
+    }
+    name.parse::<u32>().ok().filter(|index| *index != u32::MAX)
+}
+
+/// `Record<string, string | null>` in the order `JSON.parse` then
+/// enumerates it: array-index names ascending, then the others in file
+/// order, a repeated name keeping its first position and last value.
+struct OrderedStringSections(Vec<Option<String>>);
+
+impl<'de> serde::Deserialize<'de> for OrderedStringSections {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        struct Sections;
+
+        impl<'de> serde::de::Visitor<'de> for Sections {
+            type Value = OrderedStringSections;
+
+            fn expecting(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+                formatter.write_str("an object of string or null sections")
+            }
+
+            fn visit_map<A: serde::de::MapAccess<'de>>(
+                self,
+                mut map: A,
+            ) -> Result<Self::Value, A::Error> {
+                let mut names: Vec<String> = Vec::new();
+                let mut values: Vec<Option<String>> = Vec::new();
+                let mut positions = std::collections::HashMap::new();
+                while let Some((name, value)) = map.next_entry::<String, Option<String>>()? {
+                    match positions.get(&name) {
+                        Some(&position) => values[position] = value,
+                        None => {
+                            positions.insert(name.clone(), names.len());
+                            names.push(name);
+                            values.push(value);
+                        }
+                    }
+                }
+                // JavaScript enumerates array-index names first, ascending,
+                // then the other names in insertion order.
+                let mut order: Vec<usize> = (0..names.len()).collect();
+                order.sort_by_key(|&position| match js_array_index(&names[position]) {
+                    Some(index) => (0, u64::from(index)),
+                    None => (1, position as u64),
+                });
+                Ok(OrderedStringSections(
+                    order
+                        .into_iter()
+                        .map(|position| values[position].take())
+                        .collect(),
+                ))
+            }
+        }
+
+        deserializer.deserialize_map(Sections)
+    }
+}
+
+fn project_assistant(
+    content: Option<&serde_json::value::RawValue>,
+    records: &mut Vec<PiContentRecord>,
+    call_ids: &mut BTreeSet<String>,
+    partial: &mut BTreeSet<PiContentPartialReason>,
+) {
+    let Some(content) = content else {
+        return;
+    };
+    let Some(blocks) = content_blocks(content) else {
+        records.push(unsupported_content(content, partial));
+        return;
+    };
+    for block in blocks {
+        let Some(fields) = raw_fields(block.get()) else {
+            unprojected(block, None, records, partial);
+            continue;
+        };
+        match block_type(&fields).as_deref() {
+            Some("text") => match typed_field::<String>(&fields, "text") {
+                Ok(Some(text)) => records.push(PiContentRecord::Assistant { text }),
+                _ => unprojected(block, Some(&fields), records, partial),
+            },
+            Some("thinking") => {
+                // Readable only when `thinking` is a string and the
+                // redaction state is a valid `false` or absent.
+                let thinking = typed_field::<String>(&fields, "thinking");
+                let redacted = typed_field::<bool>(&fields, "redacted");
+                let readable = match (thinking, redacted) {
+                    (Ok(Some(text)), Ok(redacted)) => (!text.is_empty() && redacted != Some(true))
+                        .then_some(PiReasoningText(text)),
+                    _ => {
+                        partial.insert(PiContentPartialReason::MalformedField);
+                        None
+                    }
+                };
+                records.push(PiContentRecord::Reasoning {
+                    readable,
+                    block: PiRawJson(block.to_owned()),
+                });
+            }
+            Some("toolCall") => {
+                let call_id = required_string(&fields, "id", partial);
+                if let Some(id) = &call_id {
+                    call_ids.insert(id.clone());
+                }
+                let name = required_string(&fields, "name", partial);
+                let arguments = match typed_field::<serde_json::Map<String, serde_json::Value>>(
+                    &fields,
+                    "arguments",
+                ) {
+                    Ok(Some(arguments)) => Some(serde_json::Value::Object(arguments)),
+                    Ok(None) | Err(()) => {
+                        partial.insert(PiContentPartialReason::MalformedField);
+                        None
+                    }
+                };
+                records.push(PiContentRecord::ToolCall {
+                    call_id,
+                    name,
+                    arguments,
+                    thought_signature: member(&fields, "thoughtSignature")
+                        .map(|raw| PiRawJson(raw.to_owned())),
+                    block: PiRawJson(block.to_owned()),
+                });
+            }
+            _ => unprojected(block, Some(&fields), records, partial),
+        }
+    }
+}
+
+/// A `toolResult` message: the result record first, then any of its blocks
+/// that are kept unprojected.
+fn project_tool_result(
+    message: &RawFields<'_>,
+    records: &mut Vec<PiContentRecord>,
+    call_ids: &BTreeSet<String>,
+    partial: &mut BTreeSet<PiContentPartialReason>,
+) {
+    let call_id = match typed_field::<String>(message, "toolCallId") {
+        Ok(call_id) => call_id,
+        Err(()) => {
+            partial.insert(PiContentPartialReason::MalformedField);
+            None
+        }
+    };
+    if !call_id.as_ref().is_some_and(|id| call_ids.contains(id)) {
+        partial.insert(PiContentPartialReason::OrphanToolResult);
+    }
+    let tool_name = required_string(message, "toolName", partial);
+    let is_error = match typed_field::<bool>(message, "isError") {
+        Ok(Some(is_error)) => Some(is_error),
+        Ok(None) | Err(()) => {
+            partial.insert(PiContentPartialReason::MalformedField);
+            None
+        }
+    };
+    let mut blocks = Vec::new();
+    let text = content_text(content_member(message), &mut blocks, partial);
+    let nested_calls = match member(message, "nestedCalls") {
+        Some(nested) if nested.get() == "null" => {
+            partial.insert(PiContentPartialReason::MalformedField);
+            None
+        }
+        nested => nested.map(|nested| bound_nested_calls(nested, partial)),
+    };
+    records.push(PiContentRecord::ToolResult {
+        call_id,
+        tool_name,
+        text,
+        is_error,
+        details: member(message, "details").map(|raw| PiRawJson(raw.to_owned())),
+        nested_calls,
+    });
+    records.extend(blocks);
+}
+
+/// The number of elements of a JSON array, counted without keeping them.
+struct CountedArray(usize);
+
+impl<'de> serde::Deserialize<'de> for CountedArray {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        struct Count;
+
+        impl<'de> serde::de::Visitor<'de> for Count {
+            type Value = CountedArray;
+
+            fn expecting(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+                formatter.write_str("an array")
+            }
+
+            fn visit_seq<A: serde::de::SeqAccess<'de>>(
+                self,
+                mut seq: A,
+            ) -> Result<Self::Value, A::Error> {
+                let mut count = 0usize;
+                while seq.next_element::<serde::de::IgnoredAny>()?.is_some() {
+                    count += 1;
+                }
+                Ok(CountedArray(count))
+            }
+        }
+
+        deserializer.deserialize_seq(Count)
+    }
+}
+
+/// Keep `nestedCalls` as bounded metadata of its tool result. Its calls are
+/// counted in constant memory, and its raw value is kept only within both
+/// bounds.
+fn bound_nested_calls(
+    nested: &serde_json::value::RawValue,
+    partial: &mut BTreeSet<PiContentPartialReason>,
+) -> PiNestedCalls {
+    let fields = raw_fields(nested.get());
+    let complete = fields
+        .as_ref()
+        .and_then(|fields| typed_field::<bool>(fields, "complete").ok().flatten());
+    if complete != Some(true) {
+        partial.insert(PiContentPartialReason::NestedCallsIncomplete);
+    }
+    let calls = fields.as_ref().and_then(|fields| {
+        member(fields, "calls")
+            .and_then(|calls| serde_json::from_str::<CountedArray>(calls.get()).ok())
+            .map(|CountedArray(count)| count)
+    });
+    let within = nested.get().len() <= PI_NESTED_CALLS_MAX_BYTES
+        && calls.is_some_and(|count| count <= PI_NESTED_CALLS_MAX_CALLS);
+    if !within {
+        partial.insert(PiContentPartialReason::NestedCallsOverBound);
+    }
+    PiNestedCalls {
+        calls: calls.unwrap_or(0),
+        complete,
+        raw: within.then(|| PiRawJson(nested.to_owned())),
+    }
 }
 
 #[cfg(any(unix, windows))]

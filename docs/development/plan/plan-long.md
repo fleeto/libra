@@ -1,3 +1,71 @@
+> **2026-10-31 15:28 UTC GOV C3 长期索引：** f9 同树唯一 C3 的 focused1/1 与原双 env full11083/11083、25原 ignored、0失败/FLAKY/TRY 均自然 exit0；后检源/DB/stash同一、owned survivors0，full 原件 `d52f56fb…`、terminal `09b87ad5…`。审计 v1 解析成功 Summary 假阴性 exit1 保留，v2 exit0且 ignored 逐名同一；39个既有条件跳过不计功能覆盖。七文档结果回填后的 B/VER7/fmt 已按最终字节 exit0（仓外 `governance-final-docs-c3/final-3/` 原件）；fresh upstream、签名DCO、push 和适用 main D 仍待，GOV 0/1、LTR 0/26、资格/H1/旧 D FAIL 不变；C1/P1/C2 STOP 与 R4 OAuth 无判词仍保留，用户只豁免本 GOV 后续 Claude Review。详见日期计划 GOV 卡。
+
+> **2026-10-31 14:35 UTC GOV C2 STOP 长期索引：** P2 两相完整前检 PASS、11083默认/11108扩展/25原 ignored，fmt/Clippy/build 均exit0；C2唯一claim `89ccfdb5…`，focused1/1 PASS，full仅6539/11083运行、6469 PASS/70 FAIL/1 FLAKY/25原 ignored，4544因进程扫描竞态触发的SIGTERM未运行。child umask0002 令本地 `.libra` group-writable 与 Pi UnsafeDirectory/模式断言失败；full自然退出码未知、controller exit1/STOP，源/DB/stash后检同一、owned零存活。原件 full stderr `5aede707…`、terminal `4aecb6d4…` 见日期计划；C1/P1/C2原失败与已耗窗口保留。C3候选仅修子进程0022和`/proc`消失竞态，原完整覆盖/重试/超时不改，未claim。用户仅本GOV本轮免Claude，旧R4无PASS；GOV 0/1、LTR 0/26、资格/H1/旧D FAIL、未签推/D不变。
+
+> **2026-10-31 13:41:01 UTC GOV P1 STOP 历史索引：** 用户限 GOV 本轮免后续 Claude Review，R4 OAuth exit1 无 PASS 原件保留。f9 静态 B/env/迁移前检三门 exit0，原默认 nextest list 达1800.076秒上限/exit -15、0列表，P1 STOP；无第二 list、safety、fmt/Clippy/build，C2 当时0 claim。合成孤儿探针1 adopted reap/cleanup clean，仅机制证明；退出后七路径/stage0/stash9/全库 DB 与 list 会话清理均核同。原件 digest 与恢复 P2 合同见日期计划本卡；当时拟限编译 jobs=4 而不改 selector/断言/单门1800或 C2 7200。GOV 0/1、LTR 0/26、资格/H1/旧 D FAIL 保留，无签推/D。
+
+> **2026-10-31 13:02:44 UTC GOV 控制器静态 R3 长期索引：** R2 旧脚本静态 PASS/P0P1=0 不覆盖新 producer；R3 当前 f9 冻结四文件实际 FAIL/P0=0/P1×3/P2×10，子收割器及时 reap、迁移最大值/数据库前检及 VER-2 原件待修后本机 Claude 重审。C2 仍未 claim；C1 STOP、资格/H1/旧 D FAIL 保留，GOV 0/1、LTR 0/26，无签推/D。
+
+> **2026-10-31 12:27:28 UTC GOV 静态 R1 FAIL / f9 长期索引：** C2 控制器本机 Claude 静态审给 P1×2/P2×8、总 FAIL；缺后代清理及退出后完整输入复核，仍非最终执行审。七文件保护后独立 clone 原生 rebase 至 `f9afd41627be53482f0d24a6931cf0b6b74962d4`，仅其它日期计划一行上游变更；本卡七文档精确恢复、stage 空、九 stash 保留。C2 未 claim，C1 STOP、资格/H1/旧 D FAIL 保留，GOV 0/1、LTR 0/26，无签推/D。
+
+> **2026-10-31 12:14:50 UTC GOV b8b 前滚长期索引：** 独立 clone 原生 rebase 至 `b8b76a6979d132bbf58acc73b8e55259ebd69dcf`，七 GOV 文档上游原件未变，stash 应用错误后从已校验 SHA/mode 备份精确恢复；stage 空、八 stash 保留。R9 计划审 PASS 只绑定旧 97f，b8b 执行审/C2/最终 Review 与提交 D 待；C1 STOP、资格/H1/旧 D FAIL 保留，GOV 0/1、LTR 0/26。
+
+> **2026-10-31 12:12:14 UTC GOV R9 计划 PASS 长期索引：** 本机 Claude R9 五项 PASS/P0P1=0/P2×3，仅对原冻结计划；三 P2 已在新字节处理，执行器/七文件仍须新本机 Claude 执行审。C1 STOP、R7/R8 FAIL 与旧资格 D FAIL 保留，C2 未 claim，GOV 0/1、LTR 0/26，资格/H1 阻塞，无签推/D。
+
+> **2026-10-31 12:05:30 UTC GOV R8 FAIL / R9 长期索引：** R8 本机 Claude 计划审 ER03/HISTORY/SCOPE PASS、ER10/VERDICT FAIL/P1×1/P2×6；`DEFER-PI01-01` 为 C1 DB 迁移高概率既有来源，缺进程级证据仍不证明唯一写者。R9 具名 owner、claim 前迁移 parity、全库/stash 摘要、AC17/VER19 和六项 P2 处置，当前七文件待新本机 Claude 计划审；97f release build exit0 是离线候选。C1 STOP、R7/R8 FAIL、资格/H1/旧 D FAIL 保留，GOV 0/1、LTR 0/26，C2/提交/推送/D 均未发生。
+
+> **2026-10-31 11:54:15 UTC GOV R7 FAIL / R8 恢复长期索引：** 本机 Claude R7 计划审 ER03/ER10/VERDICT 实际 FAIL，P1×2/P2×7；原 VER20 多项低计与 C1 DB 写者/后检缺口具名关闭方向已入 R8 候选。延后只读收据 `ffee33a4…` 只核 97f 当前 env/配置及已变化树，不能追认 C1；DB 写者 unknown，C2 前后语义摘要漂移即 STOP。AC18/VER19、PI-15/PI-03 status 写者、阶段预算和资格索引已同步；R8 计划审/执行审与 C2 都未通过或认领。GOV 0/1、LTR 0/26、资格/H1/旧 D FAIL 原样，未提交/推送/D。
+
+> **2026-10-31 11:42:15 UTC GOV R6 C1 失败及 R7 候选长期索引：** e3d 本机 Claude R6 准入 PASS/P0P1=0，VER-7 1/1 PASS；原双 env full 实际 exit100，11075 run/11060 PASS/15 FAIL/25 filtered skipped，三次尝试仍失败、C1 STOP。仓外执行器 umask 077 影响模式断言，旧全局 Libra CLI 对测试升级的仓库 schema 不能后检；原失败/收据保留。上游 97f8b9e 已经七文件备份、原生 stash/fetch/rebase、status 三向保全，七份 stash 保留；e3d 全量/审查不覆盖 97f 新 Pi 测试。ER-10 同卡恢复提案增 AC18/VER20 与仅一次 C2/7200 秒，计划/执行器本机 Claude 明确 PASS 前不认领；未签推、无 D，GOV 0/1、LTR 0/26、资格/H1/旧 D FAIL 不变。
+
+> **2026-10-31 10:35 UTC 前 GOV R5 长期索引：** e3d 本机 Claude 执行准入 R5 对冻结七文档给出 PASS/P0P1=0/P2×14，原 manifest/stream 有 SHA 收据；首次 VER-7 控制器因启动环境摘要错配在 source 与测试 spawn 前 exit1，未形成 focused 测试收据。保留 R5 PASS 限旧输入与前检失败，R6 按直接 Python 启动形态重冻宿主指纹和最终七文档，须本机 Claude 增量 PASS 才能运行。完整 C、提交/推送/D、资格/H1/LTR 均待。
+
+> **2026-10-31 10:21:26 UTC GOV e3d 离线门长期索引：** nightly fmt exit0/4.99s、严格全目标 Clippy exit0/138.15s、release build exit0/207.48s，只有用户已排除的第三方 future-incompat 尾注；HEAD/命令/七文档当时 SHA 与日志已保存，文档回填后的最终字节另核。R5 安全审、VER-7/full、最终 ER-05/提交/D 均待，GOV 0/1、LTR 0/26、资格/H1/旧 D FAIL 不变。
+
+> **2026-10-31 10:15:13 UTC GOV e3d 新清单长期索引：** 无 env 的默认/含 ignored/focused 三条 list 均 exit0，默认 11075/总 11100，含 ignored 11100，25 差集未变，focused 1/65。相对 b24 仅新增 IFP-01 一项只读 AST 守卫、零移除；十五外部写源 SHA 与 56 skip-site 源 SHA 同字节。R5 e3d 安全审及 VER-7/full/最终 C/提交/D 仍待，GOV 0/1、LTR 0/26、资格/H1/旧 D FAIL 不变。
+
+> **2026-10-31 10:05:46 UTC GOV e3d 上游长期索引：** main 从 b24 前滚 e3d，`issues/664.md`、IFP-01 共享 status 两行及兼容 AST 守卫测试变化；GOV 七文件原生备份/stash/fetch/rebase，status 三向 diff3 exit0、无冲突，双方行保全、stage 空、六 stash 保留。b24 旧 list/fmt/Clippy/build 不覆盖 e3d，现重列并审查新测试；root 待协调完整 C 的串行 main 窗口。无 source/VER-7/full/最终 Claude/提交/D，GOV 0/1、LTR 0/26、资格/H1/旧 D FAIL 不变。
+
+> **2026-10-31 09:55:35 UTC GOV b24 离线 C 候选长期索引：** nightly fmt exit0/4.91s、严格 Clippy exit0/81.51s、release build exit0/213.84s，只有用户已排除的第三方 future-incompat 尾注；各有 b24 HEAD/日志收据，本次索引回填后最终七文档字节仍待重核。无 source/VER-7/full/最终 Claude/提交/D，GOV 0/1、LTR 0/26、资格/H1/旧 D FAIL 不变。
+
+> **2026-10-31 09:50:07 UTC GOV b24 新选集长期索引：** b24 两条无 source list 均 exit0，默认选中 11074/总 11099、含 ignored 11099/11099、25 差集未变；focused 守卫 1/65。PI-15 新增四项 TempDir 本地测试、零移除，原十二处外部写源 SHA 未变、Pi attribution 新源码只解析本地 header；旧两处 skip 行移各 +1 已按函数重核，56 处基线仍具名。静态证据待 b24 本机 Claude 实际审，未 source/VER-7/full/C/提交/D；GOV 0/1、LTR 0/26、资格/H1/旧 D FAIL 不变。
+
+> **2026-10-31 09:37:23 UTC GOV b24 上游与长期索引：** GOV R5 尚未冻结时上游到 b24f6bb，PI-15 源码/测试、版本面与共享 status 三行已落；七文件先备份与原生 stash，fetch/rebase fast-forward 后以 0f5/本地/b24 三向 diff3 exit0 保全双方 status，六文件确认上游未改后恢复，stage 空、stash 五份保留。旧 0f5 准入/列表/Clippy/build 均不能覆盖 b24 源树，当前正重列选集并核新增 Pi 调用链；不 source/focused/full、不提交/推送，GOV 0/1、LTR 0/26、资格/H1/旧 D FAIL 不变。
+
+> **2026-10-31 09:33:33 UTC GOV 执行审 R4 长期索引：** R4 本机 Claude 对 0f5 冻结输入实际 FAIL/P0=0/P1×2/P2×10，stream SHA256 `e0d855b8c1ba7a92e42104fa0b5885e06003fc8ac4bfbb69a3bbf06a6d8e6bf3`；旧 R3 两 P1 已实质修复，新 P1 为 focused 后置 guard SHA 指错路径导致无收据，以及 Python `splitlines()` 与 Bash 行界不一致。R5 候选在 spawn 前固定真 guard SHA、预写失败收据，env 用字节/LF/注释与赋值分类核；R1～R4 FAIL 不倒改，P2 具名待审。无 source/focused/full/最终 Claude/提交/推送/D；GOV 0/1、LTR 0/26、资格/H1/旧 D FAIL 不变。
+
+> **2026-10-31 09:23:35 UTC GOV 执行审 R3 长期索引：** R3 本机 Claude 对 0f5 冻结输入实际 FAIL/P0=0/P1×2/P2×10，stream SHA256 `94b658f752f5442767fd9d9e489704bf5e5ec00fd07a678e19990c4d4d0fd344`；旧 R2 sourcepath P1 已关闭，新 P1 是单选 focused 过滤 64 例被误记运行时 skip 与 env 宽松赋值可漏额外变量。R4 候选已区分过滤/运行时 skip 并收紧为一行单赋值；R1～R3 FAIL 保留、P2 具名待审，无 source/focused/full/最终 Claude/提交/推送/D。GOV 0/1、LTR 0/26、资格/H1/旧 D FAIL 不变。
+
+> **2026-10-31 09:13:39 UTC GOV 执行审 R2 与长期索引：** R2 本机 Claude 对冻结 0f5 七文件/执行器真实 FAIL/P0=0/P1×1/P2×7，stream SHA256 `c9dffc9bba67f0b3d2636697429929b883898dbd24b2d34fc8d03ebbab6fd4b1`，R1 两项 P1 已核关闭；新 P1 是 Bash `sourcepath` 对同名 env 的 `$PATH` 优先读取。R3 候选修复 PATH/sourcepath、配置 view、重列选集与 focused 收据并复审；R1/R2 FAIL 原件均保留。无 source/真实 full/最终 Claude/提交/推送/D，GOV 0/1、LTR 0/26、来源资格/H1/旧 D FAIL 不变。
+
+> **2026-10-31 08:53:36 UTC GOV R1 安全审失败长期索引：** 本机 Claude 执行准入 R1 FAIL/P0=0/P1×2/P2×6，配置库远端键与宿主 live/flags/untracked 前检两处未闭合；旧 R5 仅治理准入 PASS 保留其原输入。新仓外 runner/只读 DB key 原件待 R2，未 source/focused/full、未提交/推送/D；GOV 0/1、LTR 0/26、资格/H1/旧 D FAIL 不变。
+
+> **2026-10-31 08:41:16 UTC GOV R5 与长期索引：** 0f5 旧七文件准入 Claude 五轴 PASS/P0P1=0/P2×7，七项 P2 已在新字节逐项具名处理；0f5 两条 nextest 清单 exit0、11070 默认匹配/11095 含 ignored/25 差集，严格 Clippy exit0，release build 仍执行。当前七文件与安全执行合同待独立 Claude，未 source/full/提交/PR-main D；PI-02/IFP-01 status 写者需串行，GOV 0/1、LTR 0/26、资格/H1/旧 D FAIL 不变。
+
+> **2026-10-31 08:23:14 UTC GOV 最新上游与长期索引：** 608efc3 的两条测试清单 exit0 只属旧树选集，0f5f715 上游 Pi/版本面更新后已原生保护七文件并快进，`plan-status.md` 三向保全新 PI-02 行；新树 list 正重验。外部目标未 source/写入，完整 C/最终 Claude/精确提交/PR-main D 均待；GOV 0/1、LTR 0/26、资格/H1/旧 D FAIL 不变。
+
+> **2026-10-31 07:54:50 UTC GOV R4 长期索引前滚：** R4 对 608efc3 旧七文件准入 PASS/P0P1=0/P2×7，七项 P2 当前新字节已逐项修订、待真实本地 C 与最终本机 Claude；旧 R1/R2 FAIL、R3 旧 cfa PASS 各保留。GOV 0/1、LTR 0/26、资格/H1/旧 D FAIL 不变；IFP-01 status 写者须串行，无 source/full/提交/push。
+
+> **2026-10-31 07:43:04 UTC GOV R3 与上游前滚长期索引：** R3 旧 cfa 七文件准入 PASS/P0P1=0/P2×9；608efc3 上游 IFP-01 索引两行已与本地治理三向无冲突保全，九项 P2 新字节及最终验收待复审。R1/R2 失败保留，GOV 0/1、LTR 0/26、资格/H1/旧 D FAIL 不变；无 full/C/提交/push。
+
+> **2026-10-31 07:30:54 UTC GOV 准入 R2 后长期索引前滚：** R2 本机 Claude 真实 FAIL/P0=0/P1=1/P2=9；P1 逐门计数已修为 AC=17/20、VER=17/20，七文件本轮再审待。R2 审查期间仓外静态 env 前检文件被本执行 Agent 写入原审查证据目录，R2 输入冻结门亦 FAIL；仓库七文件/HEAD/diff 未漂移。R1/R2 失败保留，GOV 0/1、LTR 0/26、资格/H1/旧 D FAIL 不变；无 full/提交/推送。
+
+> **2026-10-31 07:15:00 UTC GOV 准入失败后索引前滚：** 本机 Claude 准入 R1 FAIL/P0×1/P1×4 原件保留；未审的旧 cargo-test 额外必过门撤回，治理卡仍须 T-5 双环境完整 nextest 与自身全 C/Review/D。用户具名指令允许 GOV 在 v2.16 生效前交付，适用 main D 通过才供 26 张 LTR 产品卡及 qualification 待闭合部分消费；GOV 0/1、LTR 0/26、资格/H1/旧 D FAIL 均未改变。
+
+> **2026-10-31 07:06:18 UTC 治理卡索引前滚：** 独立 `GOV-LTR-CO-01` 为 0/1、in-progress/空，七文件合同启用须双环境完整 nextest、旧 CLAUDE 字面全量、最终本机 Claude 与 self C/D；R9 旧输入 PASS、执行门 R1 FAIL 均保留，最终门待。LTR 产品 0/26、资格/H1 与旧 D FAIL 不变。
+
+> **2026-10-31 06:36:15 UTC 索引前滚：** 七文档治理 R8 本机 Claude 实际 `VERDICT: PASS`、P0/P1=0、P2×6；本行待 R9 最终输入审查。真实原生 rebase 是 05:21:28 UTC 到 `cfa86fa54cf82ea77d4a1d18dd567b7b0426bb8d`，05:22:01 UTC 才改号 v2.16；旧 06:19:29 行“rebase 后”仅表达先后。旧标签时间与 incoming 简写只属原时点，现行 producer outgoing/consumer incoming、资格/H1 阻塞、LTR 0/26、旧 D FAIL 均保留，无提交/push。
+
+> **2026-10-31 06:29:12 UTC 索引前滚：** R7 本机 Claude 实际 FAIL/P1×1，计划 06:09 旧行精确恢复；签名工具 `-S` 事实修正待 R8 审查。资格/H1、正式 0/26 与旧 D FAIL 不变。
+
+> **2026-10-31 06:19:29 UTC 索引前滚：** R6 本机 Claude 实际 FAIL/P1×1；06:09 撞号说明误混入 05:54:24 旧行，本轮精确恢复 R5 原字节。05:18:55 初稿原用 v2.15，05:22:01 原生 rebase 后因与上游 v2.15 waiver 撞号更名 v2.16；05:54:24 行原本已是更名后的 v2.16 草稿，并非回填。改号披露由本行承载，R7 待审；资格/H1/正式 0/26 不变。
+
+> **2026-10-31 06:09:09 UTC 索引前滚：** 本机 Claude R5 `VERDICT: FAIL`/P1×1（06:08:06 UTC），初稿误用 v2.15 与 05:22:01 UTC 更名 v2.16 的回填时序已具名登记；R6 待审。旧 D FAIL、资格/H1 前驱和 0/26 不变。
+
+> **2026-10-31 05:54:24 UTC 现行索引补记：** Libra v2.16 code-only 受限草稿本机 Claude R3/R4 实际 FAIL，修订后 R5 待；仅计划治理，不解除 qualification/H1/LTR 产品卡前驱，不记新发布。
+
+> **2026-10-31 05:18:55 UTC 当前来源与交付索引（待本机 Claude 审查/提交）：** `plan-20261015.md` 的未完成活动 LTR 卡转入模板 v2.16 受限 `code-only` 合同；原能力目标、H0～H6、家族 child→唯一集成点、网站同步与最终全量不变。每次提交前最新 origin/main fetch+rebase 并重核最终树与 Claude，精确 signed+DCO 串行推代码，核适用 PR/main CI D；不 bump/tag/Release/Docker tag D。`plan-20261025-qualification.md` 的 v0.30.92 已发布事实与同 SHA release-branch base run `40995496573` 失败并存，最终资格仍未取得；LTR-10/H1 前驱不因发布模式变更解锁。旧索引快照保留在下方，当前正式 LTR 0/26。
+
 > **Libra来源资格消费（2026-10-27现场，origin/main `380c262257c5b4eae0725898444bb092bb86919e`）：** 只读核验已发布 qualification 交付，未重做修复卡，本提交 diff 只含 `docs/development/plan/plan-20261015.md`、`plan-status.md`、`plan-long.md`。tag 解引用均在该 origin/main 祖先内，提交含 gpgsig 头与 Signed-off-by（未做签名校验）：`v0.30.87`=`f33be958dcc3266df3a6ab796ed90d1766f3cd93`，`v0.30.88`=`e85470a05aa205737adef09e4da430778881fe51`，`v0.30.89`=`ff30d4ad28517d77d44f10e4753734b30a0b3677`，`v0.30.90`=`98852b791d553e72277230dde5bc23377e2ed089`，`v0.30.91`=`e24c88bb4c6b61b228d40f4505b6096064826829`。main D 经 `gh run view` 均为 success 且 headSha 与 tag 一致：v0.30.87 base 40156941519、CodeQL 40156941508、release 40157032761；v0.30.88 base 40349034162、CodeQL 40349034316、release 40349204443；v0.30.89 base 40391580491、CodeQL 40391580303、release 40391698253；v0.30.90 base 40406196457、CodeQL 40406196519、release 40406331881；v0.30.91 base 40426098305、CodeQL 40426098171、release 40426201816。终态窗口登记 `e5424c5114331612cb2f02206b18aafe112a2afb` 的 base 40433225564 与 CodeQL 40433225610 success；`380c262` 登记该 D，其 base 40439060976 与 CodeQL 40439060996 success。窗口通过范围只取 e5424c5 提交说明中的 fmt、clippy、默认套件、doc 与 network 三例，本轮没有重跑，也不补造未写入说明的计数。F2 仍 unknown，不能由人工 SQL 或无关 PASS 关闭。`DEP-TR-QUAL-REPAIRS` 因此有可追溯的五张实现卡发布与终态文档 D，但 FIX03 实际 Claude 资格 PASS 本轮未重放，该依赖仍保持 incoming；H0、H1、WRITERS、LIVE 未闭合，LTR-10 与 LTR-01 未完成，Libra 原计划仍 0/26。root 未推送提交 `692464ea35acd20dac269a732a2f54cec9081dcf` 不在本工作区历史中，本段不覆盖该副本。下方旧资格 1/4、1/5 与 FIX04 未发布文字按原时点保留。
 
 > **MTR11自身ER-05通过、独立版本C待启动（2026-10-26）：** A1原SHA-256标准Git v0 fetch HTTP400/exit101/STOP保留；A2在1345.015/3600秒内全部本地门exit0且root于1377.665秒内核原件接受，HTTP Git2/2、关闭态3/3、完整模块7/4/15、普通Git/LFS smoke19/0/0、接近1GiB推送HTTP200且连续采样峰值1,150,152,704字节、最终VmHWM1,147,342,848字节，均≤4GiB。MTR11自身本机Claude ER-05 session`90fa13a9-e493-454f-99fc-ed6db1b2de62`实际ER05/H0/VERDICT三PASS，P0/P1=0；root具名P2：新增两unit由最终C全量逐名执行，版本bump后重建新bin，仓库只留脱敏摘要。任务卡现`in-progress/locally-accepted`，8AC/7VER本地勾选；版本后完整C、签名DCO提交、main/tag/手写Release及实际D均未开始，不标done/complete。正式Mega23/118、Libra原计划0/26、联合23/144；Libra交接a4d84829已在远端main且资格产品由另一机器负责，旧FIX3失败预算/STOP不变。

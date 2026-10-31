@@ -71,8 +71,11 @@ env RUST_MIN_STACK=33554432 RUSTUP_TOOLCHAIN=1.99.0 \
 # Faster full suite via cargo-nextest (one process per test; external-resource
 # mutual exclusion comes from the generated .config/nextest.toml — regenerate
 # with `sh tests/NEXTEST_GROUPS.sh` after touching tests/SERIAL_REGISTRY.tsv).
-# The authoritative acceptance gate remains `cargo test --all` (plan-20260827
-# ADR-NP-04); nextest is the additional fast execution face. Pinned install:
+# Outside a task-card plan, `cargo test --all` remains the literal third gate.
+# For plan-driven work, ER-13/ER-14 make dual-env nextest the authoritative
+# full-suite gate; `cargo test --all` is diagnostic unless a named card adds it.
+# GOV-LTR-CO-01 requires dual-env nextest; the recorded in-process
+# cargo-test deferral stays diagnostic and cannot replace nextest. Pinned install:
 cargo install cargo-nextest --version 0.9.143 --locked   # verify: cargo nextest --version
 cargo nextest run --all
 
@@ -117,7 +120,7 @@ cargo run -- <command>          # e.g. cargo run -- status
 
 ### CI Pipeline (`.github/workflows/base.yml`)
 
-`base.yml` runs on pull requests and pushes to `main`. Applicable checks include the jobs below (job ids: `format`, `clippy`, `redundancy`, `test`, `network-remotes`, `owner-liveness-macos`, `scoped-input-windows`, `opencode-export-sandbox-linux`). The self-hosted jobs run format, Clippy, redundancy, offline tests and network remotes; platform-specific safety jobs use GitHub-hosted runners:
+`base.yml` runs on pull requests and pushes to `main` or `release/**` (verify the live workflow before each D mapping). Applicable checks include the jobs below (job ids: `format`, `clippy`, `redundancy`, `test`, `network-remotes`, `owner-liveness-macos`, `scoped-input-windows`, `opencode-export-sandbox-linux`). The self-hosted jobs run format, Clippy, redundancy, offline tests and network remotes; platform-specific safety jobs use GitHub-hosted runners:
 1. **compat-rustfmt** — `cargo +nightly fmt --all --check`
 2. **compat-clippy** — `cargo clippy --all-targets --all-features -- -D warnings`, then `RUSTDOCFLAGS="-D rustdoc::broken_intra_doc_links" cargo doc --no-deps --all-features`
 3. **compat-redundancy** — directory-shape check on `third-party/rust/crates` (passes trivially when the directory is absent, as it is today)
@@ -195,18 +198,18 @@ A change is considered done only when all three of the following pass locally wi
 
 1. **Formatting** — `cargo +nightly fmt --all --check` reports no formatting differences.
 2. **Lint** — `cargo clippy --all-targets --all-features -- -D warnings` reports no warnings.
-3. **Tests** — `source .env.test && cargo test --all` passes in full (L1 always runs; L2/L3 print "skipped" rather than fail when their env vars are unset — that is acceptable, an actual failure is not).
+3. **Tests for work outside a task-card plan** — `source .env.test && cargo test --all` passes in full (L1 always runs; L2/L3 print "skipped" rather than fail when their env vars are unset — that is acceptable, an actual failure is not). Plan-driven cards use ER-13/ER-14 nextest below; `GOV-LTR-CO-01` explicitly requires the dual-env full suite, while the recorded in-process deferral remains diagnostic.
 
-These mirror the `compat-rustfmt`, `compat-clippy`, and `compat-offline-core` CI jobs, so passing them locally is the precondition for opening a PR. Run all three before reporting work as complete.
+These are the local gates for work outside a task-card plan. For plan-driven work, run the actual ER-04 A/B/C gates and ER-13/ER-14 executor below before a PR; formatting and strict Clippy still apply to every pushed card.
 
 ### Layered test execution for plan-driven work (ER-13)
 
-When the work is driven by a task-card plan under `docs/development/plan/`, the **test** gate above is layered per [`plan-template.md`](docs/development/plan/plan-template.md) **ER-13**. Formatting and lint are *not* layered — every card that gets pushed still runs both.
+When the work is driven by a task-card plan under `docs/development/plan/`, the **test** gate above is layered per [`plan-template.md`](docs/development/plan/plan-template.md) **ER-13**. Formatting and lint are *not* layered — every card that gets pushed still runs both. The named `plan-20261015.md` and pending qualification work use template v2.16 code-only delivery: local Claude review and `cargo build --release` still apply, with no version bump, tag, Release, or Docker tag D. Subsequent cards may consume v2.16 only after GOV-LTR-CO-01 has applicable main D success; GOV itself runs under the user’s direct 2026-10-31 instruction.
 
-- **Task-card execution phase** — run only the tests related to that card: the ER-04 A-group focused commands for the surfaces the card actually touched, plus the card's own `Verification` cases. A full `source .env.test && cargo test --all` is required on a card only when it hits an ER-13 trigger: `T-1` cross-cutting surfaces (`sql/**`, `src/cli.rs` command registration or global flags, stable error codes and `docs/error-codes.md`, shared single-source-of-truth helpers, `build.rs`, non-version `Cargo.toml` lines, `rustfmt.toml`, `.github/workflows/**`, `install.sh` / `install.ps1`), `T-2` release / aggregation cards, `T-3` removals or renames of public surfaces, `T-4` shared test infrastructure (`tests/harness/`, `tests/helpers/`, `tests/command/mod.rs`), `T-5` an explicit request to run the full suite, `T-6` focused failures that cannot be attributed.
-- **Closeout phase (after every task card is done)** — the full three-gate run above is **mandatory**, and every bug it exposes must be fixed: forward-fix (already-pushed commits and published artifacts are never rolled back), then **re-run the full suite to green**. A failure judged pre-existing needs reproduction evidence on the plan's baseline commit plus a `FIX-*` / `DEFER-*` entry — "it was already red" is not an accepted disposition.
+- **Task-card execution phase** — run the ER-04 A-group focused commands for the surfaces the card actually touched, plus its own `Verification` cases. A full `source .env.test && source .env.live-test && cargo nextest run --all --no-fail-fast --retries 2` is required when the card hits an ER-13 trigger: `T-1` cross-cutting surfaces (`sql/**`, `src/cli.rs` command registration or global flags, stable error codes and `docs/error-codes.md`, shared single-source-of-truth helpers, `build.rs`, non-version `Cargo.toml` lines, `rustfmt.toml`, `.github/workflows/**`, `install.sh` / `install.ps1`), `T-2` release / aggregation cards (including a named code-only integration point), `T-3` removals or renames of public surfaces, `T-4` shared test infrastructure (`tests/harness/`, `tests/helpers/`, `tests/command/mod.rs`), `T-5` an explicit request to run the full suite, `T-6` focused failures that cannot be attributed. `cargo test --all` is diagnostic only for plan-driven full-suite acceptance.
+- **Closeout phase (after every task card is done)** — formatting, strict Clippy and the dual-environment nextest full suite above are **mandatory**, and every bug they expose must be fixed: forward-fix already-pushed commits, then **re-run the full suite to green**. A failure judged pre-existing needs reproduction evidence on the plan's baseline commit plus a `FIX-*` / `DEFER-*` entry — "it was already red" is not an accepted disposition.
 
-Tradeoff to be aware of: `.github/workflows/base.yml` runs on `pull_request` only, so a direct push to `main` has no remote full-suite safety net; the closeout gate is the only backstop.
+`.github/workflows/base.yml` currently runs on pull requests and pushes to `main` / `release/**`; actual event, ref, path filters and job conditions determine the remote D gate. Remote CI does not replace local ER-13 acceptance or the plan's final full-suite closeout.
 
 Changes made outside a plan (one-off fixes, ad-hoc work) still run all three gates before being reported complete.
 
@@ -231,7 +234,7 @@ docs(readme): update provider table
 - Keep changes small and cohesive
 - Update README/CLI docs when adding flags or altering behavior
 - Version bumps must update all three version faces together — `Cargo.toml`, `install.sh` `DEFAULT_VERSION`, `install.ps1` `$DefaultVersion` — or `compat_version_surface_sync` fails; never hand-edit `Cargo.lock`. Releases are cut by pushing a `v<version>` tag (`release.yml`)
-- Commit with `libra commit -s` (DCO `Signed-off-by` trailer). GPG signing comes from the repository vault key by default (`vault.signing` / `commit.gpgSign`); `libra commit` exposes no `-S`, only `--no-gpg-sign`
+- Commit with `libra commit -s` (DCO `Signed-off-by` trailer). GPG signing comes from the repository vault key by default (`vault.signing` / `commit.gpgSign`); `libra commit` also accepts `-S` / `--gpg-sign` to force the same repository vault signature (the optional key ID is ignored; the last explicit `-S` / `--no-gpg-sign` flag wins)
 
 ## Database Schema
 

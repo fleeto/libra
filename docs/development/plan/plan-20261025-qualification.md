@@ -1,4 +1,44 @@
+> **2026-10-31 15:28 UTC GOV C3 本地结果对资格入口：** GOV-LTR-CO-01 在 f9 同树的唯一 C3 focused1/1、原双 env full11083/11083（25原 ignored、0失败/FLAKY/retry）实际 exit0；原 terminal `09b87ad5…`、full `d52f56fb…`，源/全库 DB/stash 后检同一。成功 Summary 解析审计 v1 假阴性 exit1 原件保留，v2 exit0/25 ignored 逐名同一；39个既有条件性运行时跳过不计相应功能覆盖。回填后七文档 B/VER7/fmt 已按最终字节 exit0（仓外 `governance-final-docs-c3/final-3/` 原件）；fresh upstream 差异、精确签名提交/推送及适用 main D 待，故 `DEP-QUAL-CODEONLY-GOV` 仍 incoming；本资格计划来源最终窗口、H1 和旧 v0.30.92 base D FAIL 均未通过。C1/P1/C2 STOP 与 R4 OAuth 无判词保留；用户仅 GOV 后续 Claude Review 豁免，不构成资格审查 PASS。精确哈希/计数见 `plan-20261015.md` GOV 卡。
+
+> **2026-10-31 14:35 UTC GOV C2 STOP 对资格入口：** P2 两相完整前检 exit0，唯一 C2 claim 后 focused1/1 PASS，但 full 仅6539/11083运行、6469 PASS/70 FAIL/1 FLAKY/25原 ignored，4544因控制器进程扫描竞态发出的 SIGTERM 未运行；child umask0002 造成组可写 `.libra`/Pi UnsafeDirectory/模式断言失败。C2 controller exit1/STOP，原件 raw `5aede707…`、terminal `4aecb6d4…`，源/DB/stash后检同一；C3 尚属一次新恢复候选、未claim。旧 C1/P1/C2 STOP 保留，用户仅 GOV 本轮免 Claude、R4 OAuth 无 PASS，`DEP-QUAL-CODEONLY-GOV` 仍 incoming；本资格计划、H1、旧 base D FAIL 均未通过。精确收据见 `plan-20261015.md` GOV 卡。
+
+> **2026-10-31 13:41:01 UTC GOV P1 前检 STOP 历史资格入口：** 用户限 GOV 本轮免后续 Claude Review，不将 R4 OAuth exit1 记为 PASS；f9 静态三门 exit0 后，第一条完整 nextest list 超时1800.076秒/exit -15/零清单，P1 STOP、C2 当时0 claim。新 P2 当时仅拟限编译 jobs=4，旧 P1 原件与 C1 STOP 保留。故 `DEP-QUAL-CODEONLY-GOV` 仍 incoming，本资格计划与 H1、旧 base D FAIL 均未通过；详细退出/哈希/后检见 `plan-20261015.md` GOV 卡。
+
+> **2026-10-31 13:02:44 UTC GOV R3 静态失败对资格的影响：** 上游 f9 的 GOV 控制器 R2 旧字节静态 PASS 不等于执行准入；R3 四文件真实 FAIL/P1×3，恢复脚本另修后重审，C2 未 claim。故 `DEP-QUAL-CODEONLY-GOV` 仍 incoming，来源资格/H1、旧 base D FAIL 和 C1 STOP 不变；本资格计划未借 GOV 修复取得任何 PASS。
+
+> **2026-10-31 12:27:28 UTC GOV 静态控制器 R1 FAIL / f9 来源索引：** 仓外控制器本机 Claude R1 为 P1×2/P2×8、`VERDICT: FAIL`，不能执行 C2；后代清理和退出后输入重核待修。独立 clone 已原生整合 `f9afd41627be53482f0d24a6931cf0b6b74962d4`，仅另一日期计划一行上游变更，七 GOV 文档已按私有 SHA/mode 清单恢复，stage 空、九 stash 留存。C2 未 claim，旧 C1 STOP、资格 base D FAIL 与 `DEP-QUAL-CODEONLY-GOV`/H1 均不变。
+
+> **2026-10-31 12:14:50 UTC GOV b8b 来源前滚资格索引：** 独立 clone 已原生 fast-forward 至 `b8b76a6979d132bbf58acc73b8e55259ebd69dcf`；上游仅改另一日期计划一行，本卡七文档与 97f 上游原件同字节，stash 应用报错后依私有 SHA/mode 清单精确恢复本地七文件，stage 空、八份 stash 保留。R9 恢复计划 PASS 只限 97f 旧输入；b8b 执行审、C2、签名提交及适用 main D 仍待，`DEP-QUAL-CODEONLY-GOV`、来源资格、H1 与旧 D FAIL 均未解除。
+
+> **2026-10-31 12:12:14 UTC GOV R9 计划 PASS 后资格索引：** GOV 恢复计划 R9 对冻结输入五 PASS/P0P1=0，仅为同卡 ER10 计划准入；三 P2 新字节与执行器仍须本机 Claude 执行审，C2 未认领。旧 C1 STOP、v0.30.92 base D FAIL 保留，GOV 未提交/推送/取得 main D，`DEP-QUAL-CODEONLY-GOV`、来源资格与 H1 仍 incoming。
+
+> **2026-10-31 12:05:30 UTC GOV R8 FAIL / R9 资格索引：** GOV R8 计划审 ER10/VERDICT FAIL/P1×1；R7 G03 问题已关闭，但 C1 DB 迁移遗漏上游 `DEFER-PI01-01` 高概率来源。R9 已具名该缺陷与 owner、未证唯一写者限制和 C2 claim 前迁移 parity，AC17/VER19，待本机 Claude 新计划审；C1 STOP、旧 v0.30.92 D FAIL 保留。GOV 尚无 C2/签名提交/适用 main D，`DEP-QUAL-CODEONLY-GOV`、本计划最终资格及 H1 仍 incoming。
+
+> **2026-10-31 11:54:15 UTC GOV R6 C1 / R7 审查资格索引：** GOV e3d R6 准入 Claude PASS、VER-7 1/1 PASS，但原双 env full 真 exit100/15 FAIL，C1 STOP；97f 上游重基后旧 C 不承接。R7 恢复计划审 ER03/ER10/VERDICT FAIL/P1×2，R8 修订 AC18/VER19 与 DB unknown/后检保护待本机 Claude 再审，一次 C2 尚未 claim。GOV 当前无签名提交/PR/main D，`DEP-QUAL-CODEONLY-GOV` 仍 incoming；本计划来源资格最终窗口、旧 v0.30.92 base D FAIL、H1 阻塞均不因此改变。
+
+> **2026-10-31 07:54:50 UTC GOV R4 准入后资格索引：** R4 对 608efc3 旧输入真实 PASS/P0P1=0/P2×7，仅准入；资格 07:43 行已补其 07:30 修正的原件归属，新 GOV 字节待最终 C/Claude。`DEP-QUAL-CODEONLY-GOV` 和 `DEP-QUAL-HANDOFF` 未解除，旧 v0.30.92 base D FAIL/H1 不变；无 source/full/提交/push。
+
+> **2026-10-31 07:43:04 UTC GOV R3/上游整合后资格索引：** R3 仅对 cfa 七文件准入 PASS/P0P1=0，后续 608efc3 三向整合及 P2 新字节待审；`DEP-QUAL-CODEONLY-GOV` 仍 incoming。旧 v0.30.92 base D FAIL、来源完整窗口、H1 阻塞不变；无 source/full/提交/push。
+
+> **2026-10-31 07:30:54 UTC GOV 准入 R2 后资格前滚：** 本机 Claude R2 实际 FAIL/P0=0/P1=1/P2=9；GOV 本轮逐门计数/入口/D 补强待 R3 审查，`DEP-QUAL-CODEONLY-GOV` 仍 incoming。旧 v0.30.92 base D FAIL、完整来源资格窗口与 H1 阻塞原样保留；未运行 full、未提交/推送。
+
+> **2026-10-31 07:15:00 UTC GOV 准入失败后来源资格前滚：** 治理卡准入 R1 实际 FAIL/P0×1/P1×4，未审候选误加的进程内 `cargo test --all` 必过门已撤回，资格计划 `DEFER-QUAL-INPROCESS-ISOLATION` 原失败保留；本计划待闭合 code-only 收口增加 `DEP-QUAL-CODEONLY-GOV`，只有 GOV 实际 main D 全绿后可交付，不追认已发布 FIX 卡。最终来源资格双环境窗口、本机 Claude、旧 v0.30.92 base D FAIL 与 H1 阻塞不变；本轮治理新字节待审，无提交/push。
+
+> **2026-10-31 07:06:18 UTC code-only 治理前置：** `GOV-LTR-CO-01` 独立治理卡已起草、执行门 R1 实际 FAIL/P1×1 后前滚；本机七文件最终 Review、两项全量、签名提交和适用 PR/main D 均待。本资格来源的已发布 v0.30.92、同 SHA 旧 base D FAIL、最终来源双环境窗口与 H1 阻塞原样保留；本行不把治理卡验收当作资格 PASS。
+
+> **2026-10-31 06:36:15 UTC R8 治理审查后来源资格状态：** 本机 Claude 对七份治理草稿 R8 实际 `VERDICT: PASS`、P0/P1=0，不代表本来源资格 PASS。旧文中“待 R5 审查采纳”为该时点快照；R5 实际 FAIL，R8 只审治理合同，最终来源资格需新树双环境完整窗口与其自身本机 Claude 审查。v0.30.92 同 SHA 旧 base D FAIL、producer outgoing/consumer incoming 与 H1 阻塞均保留；本行新增字节待 R9 终态审查，无提交或推送。
+
+> **2026-10-31 06:29:12 UTC R7 后前滚：** R7 本机 Claude 实际 FAIL/P1×1（计划 06:09 旧修订行误改），旧行已在本次精确恢复；签名工具 `-S` 事实随模板/AGENTS/CLAUDE 修正，R8 待审。本 qualification 产品/来源资格未 claim，`DEP-QUAL-HANDOFF` 仍未解除。
+
+> **2026-10-31 06:19:29 UTC 来源资格治理审查：** R6 本机 Claude 实际 FAIL/P1×1，旧时点误写已在 status/long 精确恢复；R7 待审。来源资格与 `DEP-QUAL-HANDOFF` 未解除，旧 v0.30.92 base D FAIL 保留。
+
+> **2026-10-31 06:09:09 UTC 来源资格前滚草稿：** 本机 Claude R5 实际 FAIL/P1×1（版本改号时间线），本轮已补真实初稿 v2.15 与 05:22:01 UTC 更名 v2.16 的记录；R6 待审。`DEP-QUAL-HANDOFF` producer outgoing 未解除 / consumer incoming 保持，旧 D FAIL 不变。
+
 # Libra 2026-10-25 来源资格前滚修复
+
+> **2026-10-31 现行前滚恢复边界（隔离 clone 初稿 `8c8986d76f13f2d3c6d8eff8caf641faee2a334f`，现已原生前滚 `cfa86fa54cf82ea77d4a1d18dd567b7b0426bb8d`，本机 Claude 审查待）：** 用户指定后续 Libra 代码交付不再发布新版本。此前 FIX-LTR-01/05/04/02/03/06/07/08 的实际提交、版本、tag、Release、A/B/C 及 FAIL/STOP 均保留原时点；v0.30.92 的 Release 工作流 `40915183029` success 只证明该工作流，`release/v0.30.92` 同源 SHA `7c4b68c9f3237e915423dd3c6a240426bf6526b6` 的 `base.yml` run `40995496573`/job `123867538989` 实际 failure（Linux opencode-export sandbox 外层取消后 marker 1→2），未找到同 SHA/同 ref 后续成功，不能把五卡来源资格或 `DEP-QUAL-HANDOFF` 倒记完成。失败原因尚未证明；旧本机 Bubblewrap 0.9.0 与 CI 0.13.0 不同，单机诊断不归因代码。
+>
+> **后续执行：** 仅在现行 ER-03 归属及本机 Claude 审查 PASS 后，以独立 `FIX-*` 前滚卡处理实际代码缺陷或具名 runner 恢复；新代码卡按模板 v2.16 的受限 `code-only` 模式完整 A/B/C、signed+DCO、提交前最新上游 fetch+rebase、实际 PR/main D，不 bump/tag/Release。既有发布卡历史合同不改写。最终来源资格仍须在纳入最新上游的冻结最终树上新开受审窗口，执行原 nightly fmt、strict Clippy、双 env 完整 nextest、doc 与三例 network，以及本机 Claude 来源资格审查；旧 10800 秒窗口和 v0.30.92 C 不自动复用。终态文档需记录本次实际窗口、最终 SHA、适用 branch D 与旧 D FAIL 的归属；未取得这些证据前 `DEP-QUAL-HANDOFF` 尚未解除（本 producer 侧 outgoing、LTR consumer 侧 incoming），LTR-10 不开正式验收。现行远端前滚、并发写者及窗口预算须在新卡开工前复核，本段不预授验收 claim。
 
 ## 2026-10-27 来源资格交接复核（当前要求）
 
@@ -1426,13 +1466,14 @@ R1真实ER03/RECOVERY PASS、H0/VERDICT FAIL（sessionbb82411c-1e59-4e52-a7f1-93
 | ID | direction | 类型 | 对象 | Owner | 产物与可用性判据 | 证据 | 超时与失败策略 |
 |---|---|---|---|---|---|---|---|
 | DEP-QUAL-SOURCE | incoming | 上游revision | libra-tools/libra@b73e98a77ecc7c3db1ea905ab55478785d76c041（初始0ca47cc保留为历史） | root | 独立clone的实际远端来源、允许差异及签名工具链已核；变化先重审 | 本文来源与精确比较记录 | 不追写原工作区，不用旧资格冒充新树 |
+| DEP-QUAL-CODEONLY-GOV | incoming（仅待闭合交付） | 治理交付前置 | plan-20261015 GOV-LTR-CO-01 | root（唯一交付者） | GOV 七文件治理卡自身文档 B、T-5 双环境完整 nextest、fmt、严格 Clippy、release build、用户仅对本 GOV 卡后续 Claude Review 的具名豁免记录、签名+DCO 与适用 PR/main D 均实际取得，才可让本计划尚未闭合的来源资格及其终态登记采用 v2.16 code-only 交付；不作为旧已发布 FIX 卡的追溯前驱，也不妨碍独立来源诊断和源码准备 | GOV 最终 tree、七文件 manifest、commit/PR/main SHA、run/job/ref 与实际结论；R4 OAuth 失败不记 PASS；当前无交付终态 | main D pending/FAIL 时保持 incoming，`DEP-QUAL-HANDOFF` 不解除；不把 GOV 的验收代替来源资格 |
 | DEP-QUAL-F2-ATTRIB | incoming | 只读归属 | reset真实stderr缺口与当前源码 | Libra接收Agent | Claude审定same/separate/unknown决定；unknown不代表关闭；不写源码不跑Cargo | 当前待审 | FIX05前置，无新诊断窗口 |
 | DEP-QUAL-F2-CLOSE | incoming | P1关闭 | reset失败真实机制 | Libra接收Agent | 同轴则FIX05实际C/D+关闭审查，另轴则新FIX实际C/D；unknown不关闭。依 2026-10-26T19:12:37Z 例外，FIX04 对 CLOSE=unknown 豁免，只加两行 cfg | 当前未解决 | FIX04 的关闭前提被该例外豁免；不作为FIX05前驱；新FIX不自动继承warning例外 |
 | DEC-QUAL-05-RELEASE-WARNING | incoming | 用户决定 | FIX05唯一版本的两方法dead_code例外 | 用户；Libra接收Agent记录 | 用户原话已记录：UTC 2026-10-26T05:40:46Z；范围只有 from_payload 与 from_payload_with_hint_policy；期限到下一个 patch 标签；v0.30.88 可以带上这两条诊断。session 4042079a RELEASE_ORDER_VERDICT PASS 且 VERDICT PASS | 2891a30b 仍是当时的 FAIL；现行决定是 GRANT-ONE-VERSION | 不扩大例外；不把 cfg 放进 FIX05；F2 unknown 仍不关闭 |
 | DEP-QUAL-SECURITY | incoming | 跨仓前置 | Mega2 plan-20261015 FIX-MTR-11 | root | 既定安全卡完整C/D及两个告警实际fixed；不改变其不自行延期条款 | FIX11已done/complete，932731d/v0.42.70；23/24实际fixed于2026-10-24 20:16:51/52 UTC，见文首真实D收据（此前open保留为历史） | 未满足不实施本计划；只做恢复治理与审查 |
-| DEP-QUAL-PUBLISH | incoming | 发布前置 | 独立clone与实际GitHub工作流 | root | 发布branch不包含原未发布治理祖先/文件；vault签名与DCO、版本面、PR/Release权限与artifact门实际可用 | 开工逐项原生核对，不能用gh浏览器登录互代 | 分叉/缺凭据/来源变化先停止归属，不force |
-| DEP-QUAL-HANDOFF | outgoing | 来源资格 | plan-20261015 LTR-10 / LTR-01 | root | 五张实现卡独立C/D完成、FIX03 bump后C及发布后最终资格窗口全量/doc/network与本地Claude明确PASS（绑定实际merge树）、终态登记提交实际PR/main D通过并具名例行补记，再核受控整合树、原工作区受控整合/受影响门通过 | 后续真实提交/版本/远端ref/原件，当前无 | 来源资格未闭合不得解除LTR-10前置；不更改H1或替代LTR各卡门 |
-| DEP-QUAL-F2-GATE | incoming | 用户决定 | `完成判据与交接`「全部P0/P1关闭」与 `DEP-QUAL-F2-CLOSE`「未知时保持P1」对 F2 的适用 | 用户；Claude执行Agent记录 | 2026-10-28T06:03:22Z 用户决定已记录（文首 2026-10-27 段原文）：F2 历史根因永久 unknown；FIX-LTR-06 完整 C/D、F2 用例诊断与本地 Claude 关闭审查 PASS 后 F2 P1 关闭；仅限 F2；以 2026-10-28T06:03:22Z 当日接受 FIX04/02/03 已在 CLOSE=unknown 下发布的事实，这不是对 19:12:37Z 例外的历史批准。DEP-QUAL-HANDOFF 因此另需 FIX-LTR-06 C/D 与该关闭审查。关闭审查须绑定：FIX-LTR-06 发布 SHA、tag、Release 与 D 收据；发布树中 AC-5 诊断存在的源码与测试证据；`user-decisions.json` 的 SHA256；本段与 F2 分析原件。输出键 `F2_CLOSE: CLOSED|OPEN` 与 `VERDICT: PASS|FAIL` | 用户决定已取得；执行方案审查见 Claude review log 中标为 2026-10-28 的各行；关闭审查尚未进行 | 关闭审查 PASS 前 F2 P1 不关闭，DEP-QUAL-HANDOFF 不闭合；不扩大到其它 P0/P1 |
+| DEP-QUAL-PUBLISH | incoming | 发布前置 | 独立clone与实际GitHub工作流 | root | 发布branch不包含原未发布治理祖先/文件；vault签名与DCO、版本面、PR/Release权限与artifact门实际可用。现行未闭合 code-only 前滚只要求来源/签名/DCO、PR/main 与适用 branch D；Release/artifact 门仅用于旧版本化提交的历史归属，不为新卡建 tag | 开工逐项原生核对，不能用gh浏览器登录互代 | 分叉/缺凭据/来源变化先停止归属，不force |
+| DEP-QUAL-HANDOFF | outgoing | 来源资格 | plan-20261015 LTR-10 / LTR-01 | root | 历史五张实现卡实际版本化 C/D 逐项归属且旧同 SHA base D FAIL 保留；现行需对该 FAIL 做受审归属及必要 code-only 前滚，冻结最新上游整合树后重新执行完整双 env nextest/doc/network、本机 Claude 来源资格明确 PASS（绑定实际最终树），终态登记提交实际 PR/main D 通过并具名例行补记，再核受控整合树、原工作区受控整合/受影响门通过 | 后续真实提交/远端ref/原件，当前无；历史版本 C/D 按原 SHA 单独核 | 本生产计划 direction=outgoing、状态未解除；接收计划 direction=incoming，保持阻塞。来源资格未闭合不得解除LTR-10前置；不更改H1或替代LTR各卡门 |
+| DEP-QUAL-F2-GATE | incoming | 用户决定 | `完成判据与交接`「全部P0/P1关闭」与 `DEP-QUAL-F2-CLOSE`「未知时保持P1」对 F2 的适用 | 用户；Claude执行Agent记录 | 2026-10-28T06:03:22Z 用户决定已记录（文首 2026-10-27 段原文）：F2 历史根因永久 unknown；FIX-LTR-06 完整 C/D、F2 用例诊断与本地 Claude 关闭审查 PASS 后 F2 P1 关闭；仅限 F2；以 2026-10-28T06:03:22Z 当日接受 FIX04/02/03 已在 CLOSE=unknown 下发布的事实，这不是对 19:12:37Z 例外的历史批准。DEP-QUAL-HANDOFF 因此另需 FIX-LTR-06 C/D 与该关闭审查。关闭审查须绑定：FIX-LTR-06 发布 SHA、tag、Release 与 D 收据；发布树中 AC-5 诊断存在的源码与测试证据；`user-decisions.json` 的 SHA256；本段与 F2 分析原件。输出键 `F2_CLOSE: CLOSED|OPEN` 与 `VERDICT: PASS|FAIL` | 用户决定已取得；执行方案审查见 Claude review log 中标为 2026-10-28 的各行；关闭审查尚未进行 | 现行归属：FIX-LTR-06 已发生的版本化 SHA/tag/Release 与 D 逐项按原 ref 核，旧 base D failure 不被 Release success 抵消；仅同 SHA/同 ref 受控重跑实际成功可作为新 D 收据并经 Claude 归属，代码缺陷则另立前滚 FIX 卡按 code-only C/D 与最终来源资格重审，不借新卡倒补旧 tag。关闭审查 PASS 前 F2 P1 不关闭，DEP-QUAL-HANDOFF 不闭合；不扩大到其它 P0/P1 |
 | DEP-QUAL-SIGNING-KEY | incoming | 公钥 | `3F5F84D5E79CEF6C414339F20005024EAF59B8E4` | 用户/另一机器 | 可核来源的公钥及对 e85470a、ff30d4a、98852b7、e24c88b、e5424c5、380c262 与四个附注 tag 的实际 VALIDSIG | 本机 NO_PUBKEY；GitHub 提交 unknown_key、tag unverified_email；keys.openpgp.org 与 keyserver.ubuntu.com 404；2026-10-28T06:03:22Z 用户确认取不到 | 保持未验证（RISK-QUAL-SIGNING-UNVERIFIED），不改写历史、不移动 tag |
 | DEP-QUAL-CARGO-WINDOW | incoming | 本机共享执行环境 | `DEP-TR-ENV-DIAG-CARGO` 的 Libra 侧消费 | root | root 明确交接，前一窗口实际终态、owned 进程与资源关闭已核 | 2026-10-28T06:03:22Z 用户决定 root A3 结束后交给 Libra；root 05:59:20Z 协调收据写明尚未发放；root 于 07:49:04Z 发出授权 `coordination/root-grant-20261028T074904Z.json`（DOC-LTR-03 3600 秒、FIX-LTR-06 A/C 各 10800 秒、最终资格 10800 秒，各自先经准入；结束须由 Libra 明确归还） | 未取得不编译、不测试、不发布 |
 | DEP-QUAL-REMOTE-ORIGINALS | incoming | 原件 | 另一机器上 FIX05/04/02/03 的 C、e24c88b 最终资格窗口、bde085f1 审查 | 用户/另一机器 | 原件及 SHA256 可核 | 本机不可得；2026-10-28T06:03:22Z 用户确认取不到 | 保持缺失登记（RISK-QUAL-ORIGINALS-MISSING），以最终树新窗口作新证据，不补造旧 PASS |
@@ -1444,6 +1485,8 @@ R1真实ER03/RECOVERY PASS、H0/VERDICT FAIL（sessionbb82411c-1e59-4e52-a7f1-93
 **2026-10-28 追加顺序（不改上一段历史）：** `FIX-LTR-03 -> FIX-LTR-06 -> DEP-QUAL-F2-CLOSE（依 DEP-QUAL-F2-GATE 的关闭审查）-> 计划最终资格（FIX-LTR-06 发布树）-> 来源资格 Claude 审查 -> 终态登记 -> DEP-QUAL-HANDOFF`；`DOC-LTR-03` 为 no-release 文档卡，产品 C 覆盖来自 FIX-LTR-06。每个本地窗口另依 `DEP-QUAL-CARGO-WINDOW`。
 
 **2026-10-29 追加顺序（不改上两段）：** `FIX-LTR-07 -> FIX-LTR-06`、`FIX-LTR-08 -> FIX-LTR-06`；FIX-LTR-06 的 A 全量在三卡合并树上执行，C/D 一次覆盖三卡并发布 v0.30.92；其后仍为 `DEP-QUAL-F2-CLOSE -> 计划最终资格（v0.30.92 发布树）-> 来源资格 Claude 审查 -> 终态登记 -> DEP-QUAL-HANDOFF`。root 窗口已于 2026-10-28T14:48:41Z 归还、未重新授予，此后各窗口依用户指令并先发协调通知。
+
+**2026-10-31 现行交付前置（不改历史顺序）：** `GOV-LTR-CO-01 main D PASS -> DEP-QUAL-CODEONLY-GOV -> 本计划待闭合 code-only 交付/终态登记 -> DEP-QUAL-HANDOFF`。GOV 与来源资格是两个独立门；治理可先完成，来源诊断可并行准备，最终交接仍须满足本计划所有真实验收和旧 D 失败归属。
 
 ### 实际 D 映射与现场复核
 
@@ -1741,6 +1784,8 @@ R1真实ER03/RECOVERY PASS、H0/VERDICT FAIL（sessionbb82411c-1e59-4e52-a7f1-93
 
 ## 完成判据与交接
 
+> **现行 v2.16 补充判据（2026-10-31 05:54:24 UTC；R3/R4 均 FAIL，待 R5 审查采纳）：** 下段五张旧卡的版本化 C/D 要求仅用于历史已发布事实归属，不倒改原发布结果。新的来源资格须在 fetch+rebase 最新上游后的冻结最终树上，另开受审窗口完整运行双 env nextest、doc、原三例 network、nightly fmt、严格 Clippy，并取得本机 Claude 来源资格 PASS；适用 PR/main D 与旧 `release/v0.30.92` 同 SHA base D failure 的归属都须闭合。必要的新 FIX 卡只提交代码，不 bump/tag/Release；失败/STOP、F2 关闭条件与 H1 等独立前驱保持。以下 2026-10-26/28 的版本化段落按其原时点保留。
+
 五张实现卡分别实际A/B、Claude ER-05 PASS、精确signed/DCO提交、独立patch/PR/merge/tag/人工Release、实际CI与发布artifact D完成；全部P0/P1关闭，P2具名处置。FIX-LTR-03 的C④在bump后树执行完整默认套件、`cargo test --doc`及原3例network；merge树与被测树不等即STOP。五张实现卡各自实际D完成后，在与FIX03发布merge树相同的冻结来源执行上述一次10800秒计划最终资格窗口（fmt、strict Clippy、双env完整默认套件、doc、原3例network），核全部身份/退出/ignored/flake/runtime skip与owned资源；根因未知的缺口不得改成已证。最终实际本地Claude来源资格PASS后，才把五个具体发布SHA/版本及适用覆盖交给原scoped-traces计划；其H1、原merge签名政策、LTR自身A/B/C/D仍独立。
 
 当前（2026-10-28）：来源资格**未闭合**。F2 P1 未关闭（用户已于 2026-10-28T06:03:22Z 决定限定关闭条件，尚未满足）；FIX05–FIX03 的 C 与 e24c88b 最终资格窗口原件取不到；最终源树（现为 29eaa97 之上）已不同于 e24c88b，须重新执行最终资格窗口；没有来源资格 Claude 审查原件；六个提交与四个附注 tag 签名未验证；当前 main 的 D 尚未由本 Agent 提交取得。详见文首 2026-10-27 段。下一句为 2026-10-26 时点记录。
@@ -1753,6 +1798,15 @@ R1真实ER03/RECOVERY PASS、H0/VERDICT FAIL（sessionbb82411c-1e59-4e52-a7f1-93
 
 | 日期 | 触发 | 变更 | 实际状态 |
 |---|---|---|---|
+| 2026-10-31 07:54:50 UTC | GOV R4 对 608efc3 旧输入准入 PASS/P0P1=0/P2×7 | 本计划 07:43 行已依 R4 P2-6 补 07:30 行修正事实与 R3 原 diff SHA；新 GOV P2 字节待最终验收/Claude | 来源交接和 H1 仍 blocked；旧 D FAIL 保留，无 C/提交/push |
+| 2026-10-31 07:43:04 UTC | GOV R3 对 cfa 旧输入准入 PASS/P0P1=0/P2×9；远端前滚 608efc3 | 七文件仓外备份、原生 fetch/rebase、plan-status 三向保留上游 IFP-01 与本地治理；P2 前滚修订待新输入审查；本计划 07:30 行按 R3 P2-4 更正“DEP 已于 07:15 登记”，原字节由 R3 输入 diff SHA256 `22ee7528009d7efa2ab1716284768cf1527055753d5e56cbadc09d35806c3415` 保全 | DEP-QUAL-CODEONLY-GOV/HANDOFF 均 incoming，旧 D FAIL/H1 保留，无 C/提交/push |
+| 2026-10-31 07:30:54 UTC | GOV 准入 R2 实际 FAIL/P0=0/P1=1/P2=9；R1 FAIL/P0=1/P1=4 保留 | GOV 本轮把 VER 拆为 17 门、AC 修为 17 项、scope=M，保持 07:15 已登记的 DEP-QUAL-CODEONLY-GOV 为 incoming，并处置 R2 P2；七治理文件待 R3 准入，资格原门不减 | DEP-QUAL-CODEONLY-GOV 与 DEP-QUAL-HANDOFF 均未解除；旧 D FAIL/H1 保留，无提交/推送 |
+| 2026-10-31 07:15:00 UTC | GOV 准入 R1 实际 FAIL/P0=1/P1=4 | 撤回未准入额外 cargo test 必过门，保留 T-5 双环境 nextest 与旧 DEFER；登记本计划 code-only 交付 DEP | 来源资格未取得，旧 D FAIL/H1 不变 |
+| 2026-10-31 07:06:18 UTC | GOV 执行门 R1 实际 FAIL/P1=1 | 起草独立治理卡，旧 R9 PASS 只覆盖其原输入，后续全 C/Review/D 待 | 无提交/推送，不解除交接 |
+| 2026-10-31 06:19:29 UTC | 本机 Claude R6 实际 FAIL/P1×1：status/long 的 05:54 旧行被混入 06:09 改号说明 | 两旧行精确恢复 R5 字节，改号与 R6 失败仅由本次新时点前滚登记；05:20 初稿行标清 05:22 版本更名、06:09 原因补记两次动作。R3～R6 失败原件保留，R7 待审 | `DEP-QUAL-HANDOFF` producer outgoing 未解除、consumer incoming 保持，无新验收/提交/发布 |
+| 2026-10-31 06:09:09 UTC | 本机 Claude R5 实际 FAIL/P1×1（06:08:06 UTC），初稿版本更名时间线缺口 | 05:20:08 初稿误用 v2.15、原生 rebase cfa 后 05:22:01 UTC 更名 v2.16 的回填时间已明示；producer `DEP-QUAL-HANDOFF` outgoing 未解除、consumer incoming 保持，旧五卡版本化 C/D 与 v0.30.92 base D FAIL 仍按原 SHA 归属；05:54:24 为上一轮登记时刻、R5 manifest 05:54:56 绑定其后终态，现行前滚 R6 待审 | 未开新 A/B/C/D 窗口、未提交或发布，LTR-10 仍阻塞 |
+| 2026-10-31 05:54:24 UTC | 本机 Claude R3 实际 FAIL/P1×3/P2×14（终态 05:42:17 UTC）；R4 实际 FAIL/P1×2（终态 05:53:09 UTC）后的资格合同前滚 | R3 三项 P1 已在 R4 实核关闭；补现行 DEP-QUAL-HANDOFF、PUBLISH/F2-GATE 与最新上游冻结最终树判据，明确 producer outgoing 未解除 / consumer incoming 保持、旧同 SHA D FAIL 不被 Release success 覆盖；旧版本化完成判据保留历史原文，R4 新 P1 时间线已前滚登记。R5 尚待审 | `DEP-QUAL-HANDOFF` 未解除、LTR-10 不准入；无新修复卡验收/提交/发布 |
+| 2026-10-31 05:20:08 UTC（初稿时间；v2.16 字样于 05:22:01 UTC 更名后回填，撞号原因于 06:09:09 UTC 补记） | 用户指定后续 Libra 仅代码提交；重核 v0.30.92 同 SHA release-branch base D failure | 初稿误以 v2.15 编号，与上游已生效的 v2.15 migration waiver 撞号；原生 rebase cfa86fa 后于 05:22:01 UTC 更名 v2.16。旧已发布卡历史合同及结果不倒改；未闭合来源资格按 v2.16 code-only 前滚、实际 PR/main D，原最终全量/doc/network 与本机 Claude 门保留；失败原因待受控归属 | `DEP-QUAL-HANDOFF` incoming，LTR-10 不准入，未开新验收窗口或修复卡 |
 | 2026-10-29 UTC（DOCS R3 后） | FIX06-ER05 R3：DOCS FAIL（P1×1，带存储配置文字的进程内病例实为 4 例） | 4 例改正并补 `client_storage_reads_pack_sha1` 及证据行；注明用户作答时依据的是 3 例；DEFER 行措辞、1e5310c 重叠说明、摘要与 plan-status 前提、卡内观测点与快照路径改正；`commit.py` 去除剩余 assert 并防止重跑覆盖恢复副本 | 待 DOCS 复审后提交 |
 | 2026-10-29 UTC（R5 后） | DEC-QUAL-R4-BASELINE、DEC-QUAL-INPROCESS-DEFER、上游 1e5310c、R5、FIX06-ER05 R2 FAIL、DEC-QUAL-FIX08-NEXTEST-RULE | 记录发布代码对照与 DEFER-QUAL-INPROCESS-ISOLATION（含 4 例存储配置文字与 4 例仅最终树失败）、1e5310c 同步（plan-status 补丁重放）与 R5 结果、FIX-LTR-08 失败处置与关闭条件改为只以 nextest 与 C/D 为依据、提交与网站步骤；措辞与时间改正 | FIX-LTR-06/07/08 in-progress；待 DOCS 复审后提交 |
 | 2026-10-29 UTC（R4 后） | FIX-LTR-08 ER-05 PASS、green3、R3/R4 全量、上游 ba38e30、FIX06-ER05 R1 FAIL | 记录 green3（`fetch_update` 改 `fetch_add`）、R3 与 R4 结果、第七项用户决定 DEC-QUAL-R4-CARGO-TEST、ba38e30 同步（plan-status 补丁重放）；补齐审查日志十行与 RISK-QUAL-FIX08-QUERY-BUSY-TEST；FIX-LTR-06 卡两处 R6 措辞就地改正；R2 归属、doctest、Mega2 证据与时间措辞改正 | FIX-LTR-06/07/08 in-progress；待 FIX06-ER05 复审后提交 |

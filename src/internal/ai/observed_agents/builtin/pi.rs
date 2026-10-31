@@ -2,8 +2,10 @@
 //! `v1.4.0` (`4a08025`).
 //!
 //! PI-01 registered the identity; PI-02 adds restricted provider-root
-//! discovery of session files. Pi stays unsupported: nothing here imports a
-//! session, installs hooks, or reads a transcript for capture.
+//! discovery of session files; PI-15 keeps the discovered sessions of one
+//! repository, by header `cwd`, with the session id from the header `id`.
+//! Pi stays unsupported: nothing here imports a session, installs hooks, or
+//! reads a transcript for capture.
 //!
 //! Pi writes sessions under `<agent-dir>/sessions/--<encoded-cwd>--/` by
 //! default (`session-manager.ts:585-601`, `<agent-dir>` defaulting to
@@ -14,7 +16,7 @@
 //! root here, and neither does any path taken from a session context.
 
 use std::{
-    collections::BTreeSet,
+    collections::{BTreeMap, BTreeSet},
     path::{Component, Path, PathBuf},
 };
 
@@ -128,8 +130,8 @@ pub enum PiPartialReason {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct PiSessionCandidate {
     pub path: PathBuf,
-    /// The header line without its newline. Session identity and repository
-    /// attribution are decided from it later (PI-15).
+    /// The header line without its newline. [`attribute_pi_sessions`] takes
+    /// the session identity and repository attribution from it.
     pub header: Vec<u8>,
 }
 
@@ -208,6 +210,234 @@ fn discover_pi_sessions_observed(
         limits,
         before_open,
     )
+}
+
+/// One session of the repository: the file, the session id from its header,
+/// and the header `cwd` that placed it in the repository.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct PiRepoSession {
+    pub path: PathBuf,
+    /// The header `id`. File names are never read for it: Pi names a file
+    /// `<timestamp>_<id>.jsonl` (`session-manager.ts:1079-1080`), but the
+    /// header is the record.
+    pub session_id: String,
+    pub cwd: PathBuf,
+}
+
+/// Why a discovered session file is not one of the repository's sessions.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
+pub enum PiSkipReason {
+    /// The first line is a JSON object but not a Pi session header (`type`
+    /// `"session"` with a string `id`). Pi does not list the file either
+    /// (`session-manager.ts:677-683`).
+    NotASession,
+    /// The first line is blank, not JSON, repeats a key, or is not an
+    /// object. Pi skips such a line and keeps scanning for a header, so the
+    /// file may still be a session.
+    UnreadableHeader,
+    /// The header `cwd` is missing, not a string, empty, relative, or has a
+    /// `.` or `..` component, so the session cannot be placed.
+    NoCwd,
+    /// The header `cwd` is outside the repository.
+    OutsideRepo,
+    /// A session of this repository whose header `id` does not match Pi's
+    /// session id grammar (`session-manager.ts:268-274`).
+    InvalidSessionId,
+    /// A session of this repository whose header `id` another file of this
+    /// repository also has; none of them is returned.
+    DuplicateSessionId,
+}
+
+impl PiSkipReason {
+    /// Whether a file skipped for this reason may be a session of the
+    /// repository that the result leaves out.
+    pub fn may_hide_a_repo_session(self) -> bool {
+        !matches!(self, Self::NotASession | Self::OutsideRepo)
+    }
+}
+
+/// The sessions one discovery walk found for one repository.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct PiRepoSessions {
+    /// The repository's sessions, sorted by path.
+    pub sessions: Vec<PiRepoSession>,
+    /// Discovered files left out, counted by reason.
+    pub skipped: BTreeMap<PiSkipReason, usize>,
+    /// The discovery walk's root refusal, if any.
+    pub refused: Option<PiRootRefusal>,
+    /// The discovery walk's partial reasons.
+    pub partial_reasons: BTreeSet<PiPartialReason>,
+}
+
+impl PiRepoSessions {
+    /// Whether some of the repository's sessions may be missing from
+    /// [`Self::sessions`]: the root was refused, the walk was partial, or a
+    /// skipped file may be one.
+    pub fn partial(&self) -> bool {
+        self.refused.is_some()
+            || !self.partial_reasons.is_empty()
+            || self
+                .skipped
+                .keys()
+                .any(|reason| reason.may_hide_a_repo_session())
+    }
+
+    fn skip(&mut self, reason: PiSkipReason) {
+        *self.skipped.entry(reason).or_default() += 1;
+    }
+}
+
+/// Keep the discovered sessions whose header `cwd` is `repo_root` or lies
+/// beneath it, with the session id taken from the header `id`. This holds
+/// for both layouts: the default layout's `--<encoded-cwd>--` directory name
+/// is a lossy encoding of the cwd (`session-manager.ts:589-594`), so it never
+/// places a session, and an explicit directory holds sessions of any cwd
+/// (Pi filters those by header `cwd` too, `session-manager.ts:1874-1910`).
+///
+/// `repo_root` must be absolute. A header `cwd` matches when it equals, or
+/// lies beneath, the canonical repository root or `repo_root` as given; it
+/// is compared lexically, component by component, and never resolved, so no
+/// path a header names is touched.
+pub fn attribute_pi_sessions(discovery: PiDiscovery, repo_root: &Path) -> Result<PiRepoSessions> {
+    if !repo_root.is_absolute()
+        || repo_root
+            .components()
+            .any(|component| matches!(component, Component::ParentDir))
+    {
+        anyhow::bail!(
+            "the repository root {} must be an absolute path without `..`",
+            repo_root.display()
+        );
+    }
+    let canonical = repo_root.canonicalize().with_context(|| {
+        format!(
+            "resolve the repository root {} for Pi session attribution",
+            repo_root.display()
+        )
+    })?;
+    let roots = [without_verbatim_prefix(canonical), repo_root.to_path_buf()];
+    let mut result = PiRepoSessions {
+        refused: discovery.refused,
+        partial_reasons: discovery.partial_reasons,
+        ..PiRepoSessions::default()
+    };
+    let mut attributed = Vec::new();
+    for candidate in discovery.candidates {
+        match attribute_candidate(&candidate.header, &roots) {
+            Ok((session_id, cwd)) => attributed.push(PiRepoSession {
+                path: candidate.path,
+                session_id,
+                cwd,
+            }),
+            Err(reason) => result.skip(reason),
+        }
+    }
+    let mut claims = BTreeMap::<String, usize>::new();
+    for session in &attributed {
+        *claims.entry(session.session_id.clone()).or_default() += 1;
+    }
+    for session in attributed {
+        if claims.get(&session.session_id).copied().unwrap_or_default() > 1 {
+            result.skip(PiSkipReason::DuplicateSessionId);
+        } else {
+            result.sessions.push(session);
+        }
+    }
+    Ok(result)
+}
+
+/// The session id and cwd of one header line, or why it is not one of the
+/// repository's sessions.
+fn attribute_candidate(
+    header: &[u8],
+    roots: &[PathBuf],
+) -> std::result::Result<(String, PathBuf), PiSkipReason> {
+    use super::super::coverage::{CanonValue, parse_canon_value};
+
+    let value = match parse_canon_value(header) {
+        Ok(value @ CanonValue::Object(_)) => value,
+        _ => return Err(PiSkipReason::UnreadableHeader),
+    };
+    let (Some("session"), Some(session_id)) = (
+        value.get("type").and_then(CanonValue::as_str),
+        value.get("id").and_then(CanonValue::as_str),
+    ) else {
+        return Err(PiSkipReason::NotASession);
+    };
+    // The raw text is checked for `.` and `..` segments: `Path::components`
+    // drops an interior `.`, which would let `/repo/./sub` through.
+    let cwd = value
+        .get("cwd")
+        .and_then(CanonValue::as_str)
+        .filter(|cwd| {
+            !cwd.is_empty()
+                && !cwd
+                    .split(std::path::is_separator)
+                    .any(|segment| segment == "." || segment == "..")
+        })
+        .map(PathBuf::from)
+        .filter(|cwd| cwd.is_absolute())
+        .ok_or(PiSkipReason::NoCwd)?;
+    if !roots.iter().any(|root| cwd.starts_with(root)) {
+        return Err(PiSkipReason::OutsideRepo);
+    }
+    if !is_pi_session_id(session_id) {
+        return Err(PiSkipReason::InvalidSessionId);
+    }
+    Ok((session_id.to_owned(), cwd))
+}
+
+/// Pi's session id grammar, `^[A-Za-z0-9](?:[A-Za-z0-9._-]*[A-Za-z0-9])?$`
+/// (`assertValidSessionId`, `session-manager.ts:268-274`). Pi's own ids are
+/// UUIDv7; `--session-id` accepts any id of this form.
+fn is_pi_session_id(id: &str) -> bool {
+    let bytes = id.as_bytes();
+    let (Some(first), Some(last)) = (bytes.first(), bytes.last()) else {
+        return false;
+    };
+    first.is_ascii_alphanumeric()
+        && last.is_ascii_alphanumeric()
+        && bytes
+            .iter()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'_' | b'-'))
+}
+
+/// `path` in the form Pi records a cwd. On Windows `canonicalize` returns a
+/// verbatim path (`\\?\C:\…`, `\\?\UNC\server\share\…`) while Pi records the
+/// plain one (`C:\…`, `\\server\share\…`), so the prefix is rewritten; any
+/// other verbatim form is kept and so matches no header.
+#[cfg(windows)]
+fn without_verbatim_prefix(path: PathBuf) -> PathBuf {
+    use std::{ffi::OsString, path::Prefix};
+
+    let mut components = path.components();
+    let Some(Component::Prefix(prefix)) = components.next() else {
+        return path;
+    };
+    let root = match prefix.kind() {
+        Prefix::VerbatimDisk(drive) => OsString::from(format!("{}:\\", char::from(drive))),
+        Prefix::VerbatimUNC(server, share) => {
+            let mut plain = OsString::from(r"\\");
+            plain.push(server);
+            plain.push(r"\");
+            plain.push(share);
+            plain.push(r"\");
+            plain
+        }
+        _ => return path,
+    };
+    let mut plain = PathBuf::from(root);
+    for component in components {
+        if let Component::Normal(part) = component {
+            plain.push(part);
+        }
+    }
+    plain
+}
+
+#[cfg(not(windows))]
+fn without_verbatim_prefix(path: PathBuf) -> PathBuf {
+    path
 }
 
 #[cfg(any(unix, windows))]
@@ -1080,5 +1310,49 @@ mod tests {
                 .contains(&PiPartialReason::ChangedEntry)
         );
         assert!(bounded.candidates.is_empty());
+    }
+
+    /// PI-15 AC2/AC3: on Windows `canonicalize` returns a verbatim path while
+    /// Pi records a plain cwd; a plain header `cwd` beneath the repository
+    /// still matches when the root is given in verbatim form.
+    #[cfg(windows)]
+    #[test]
+    fn pi_attribution_matches_a_plain_windows_cwd_against_a_verbatim_root() {
+        let repo = tempfile::tempdir().expect("repo");
+        let canonical = repo.path().canonicalize().expect("canonical repo root");
+        let verbatim = canonical.to_str().expect("utf-8 root");
+        assert!(verbatim.starts_with(r"\\?\"), "{verbatim}");
+        let plain = without_verbatim_prefix(canonical.clone());
+        assert_eq!(plain.to_str().expect("utf-8 root"), &verbatim[4..]);
+        assert_eq!(
+            without_verbatim_prefix(PathBuf::from(r"\\?\UNC\server\share\repo")),
+            PathBuf::from(r"\\server\share\repo")
+        );
+        assert_eq!(
+            without_verbatim_prefix(PathBuf::from(r"\\?\GLOBALROOT\repo")),
+            PathBuf::from(r"\\?\GLOBALROOT\repo"),
+            "other verbatim forms are kept"
+        );
+
+        let cwd = plain.join("src");
+        let header = serde_json::json!({
+            "type": "session",
+            "id": "w1",
+            "cwd": cwd.to_str().expect("utf-8 cwd"),
+        })
+        .to_string()
+        .into_bytes();
+        let discovery = PiDiscovery {
+            candidates: vec![PiSessionCandidate {
+                path: PathBuf::from(r"C:\sessions\w1.jsonl"),
+                header,
+            }],
+            ..PiDiscovery::default()
+        };
+        let sessions = attribute_pi_sessions(discovery, &canonical).expect("attribution");
+        assert!(!sessions.partial(), "{sessions:?}");
+        assert_eq!(sessions.sessions.len(), 1, "{sessions:?}");
+        assert_eq!(sessions.sessions[0].session_id, "w1");
+        assert_eq!(sessions.sessions[0].cwd, cwd);
     }
 }

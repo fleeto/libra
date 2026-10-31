@@ -1,6 +1,7 @@
 //! plan-20260713 M4 historical transcript import contract.
 
 use std::{
+    collections::BTreeMap,
     io::{Read, Write},
     path::{Path, PathBuf},
     process::{Command, Output, Stdio},
@@ -4506,8 +4507,6 @@ fn agent_list_schema_v1_stays_frozen_and_v2_is_explicit() {
 #[cfg(unix)]
 #[tokio::test]
 async fn cov2_mixed_v1_v2_direct_import_idempotent() {
-    use std::collections::BTreeMap;
-
     use libra::internal::ai::{
         agent_import::{ImportRequest, TurnBoundary, import_prepared_with_coverage_versions},
         capture::snapshot::{
@@ -5965,4 +5964,429 @@ fn pi_discovery_keeps_pi_unsupported() {
             })
             .is_err()
     );
+}
+
+// ---- PI-15: Pi session identity and repository attribution ----
+
+/// A repository directory for attribution, outside the Pi home.
+struct PiAttributionRepo {
+    dir: tempfile::TempDir,
+}
+
+impl PiAttributionRepo {
+    fn new() -> Self {
+        Self {
+            dir: tempfile::tempdir().expect("pi attribution repo"),
+        }
+    }
+
+    /// The root as given; on macOS a temporary directory is reached through
+    /// the `/var` symlink, so this differs from the canonical root.
+    fn root(&self) -> &Path {
+        self.dir.path()
+    }
+
+    /// The canonical root, the form Pi records as a header `cwd`.
+    fn canonical(&self) -> PathBuf {
+        self.dir.path().canonicalize().expect("canonical repo root")
+    }
+}
+
+/// Pi's default-layout directory name for `cwd` (`session-manager.ts:589-594`).
+fn pi_encoded_cwd_dir(cwd: &Path) -> String {
+    let cwd = cwd.to_str().expect("utf-8 cwd");
+    let trimmed = cwd
+        .strip_prefix('/')
+        .or_else(|| cwd.strip_prefix('\\'))
+        .unwrap_or(cwd);
+    format!("--{}--", trimmed.replace(['/', '\\', ':'], "-"))
+}
+
+/// A Pi session header line, as Pi writes it.
+fn pi_session_line(id: &str, cwd: &Path) -> String {
+    json!({
+        "type": "session",
+        "version": 3,
+        "id": id,
+        "timestamp": "2026-10-31T00:00:00.000Z",
+        "cwd": cwd.to_str().expect("utf-8 cwd"),
+    })
+    .to_string()
+}
+
+/// Write a session file whose first line is `first_line`; returns its
+/// canonical path.
+fn write_pi_file(dir: &Path, name: &str, first_line: &str) -> PathBuf {
+    std::fs::create_dir_all(dir).expect("pi session dir");
+    let path = dir.join(name);
+    std::fs::write(&path, format!("{first_line}\n{{\"type\":\"message\"}}\n"))
+        .expect("pi session file");
+    // Discovery reports the path with the macOS `/var` alias resolved.
+    path.canonicalize().expect("canonical session path")
+}
+
+fn pi_repo_sessions(
+    root: &Path,
+    layout: libra::internal::ai::observed_agents::PiSessionLayout,
+    repo: &Path,
+) -> libra::internal::ai::observed_agents::builtin::pi::PiRepoSessions {
+    use libra::internal::ai::observed_agents::{
+        PiDiscoveryLimits, builtin::pi::attribute_pi_sessions, discover_pi_sessions,
+    };
+
+    let discovery =
+        discover_pi_sessions(root, layout, PiDiscoveryLimits::default()).expect("discovery");
+    attribute_pi_sessions(discovery, repo).expect("attribution")
+}
+
+/// PI-15 AC1: the session id is the header `id`, never a guess from the file
+/// name; a `--session-id` id need not be a UUID. A header id outside Pi's id
+/// grammar, or one two files share, is not returned and makes the result
+/// partial.
+#[test]
+#[serial_test::serial(env)]
+fn pi_attribution_takes_the_session_id_from_the_header() {
+    use libra::internal::ai::observed_agents::{PiSessionLayout, builtin::pi::PiSkipReason};
+
+    let home = PiDiscoveryHome::new();
+    let repo = PiAttributionRepo::new();
+    let dir = home.sessions().join(pi_encoded_cwd_dir(&repo.canonical()));
+    let uuid_named = write_pi_file(
+        &dir,
+        "2026-10-31T00-00-00-000Z_019a3c2e-7b10-7000-8000-00000000000a.jsonl",
+        &pi_session_line("my-custom.session_1", &repo.canonical()),
+    );
+    let plain_named = write_pi_file(
+        &dir,
+        "notes.jsonl",
+        &pi_session_line("019a3c2e-7b10-7000-8000-00000000000b", &repo.canonical()),
+    );
+    let only = pi_repo_sessions(&home.sessions(), PiSessionLayout::Default, repo.root());
+    assert!(!only.partial(), "{only:?}");
+    assert!(only.skipped.is_empty(), "{only:?}");
+    assert_eq!(
+        only.sessions
+            .iter()
+            .map(|session| (session.path.clone(), session.session_id.as_str()))
+            .collect::<Vec<_>>(),
+        vec![
+            (uuid_named.clone(), "my-custom.session_1"),
+            (plain_named.clone(), "019a3c2e-7b10-7000-8000-00000000000b"),
+        ]
+    );
+    assert!(
+        only.sessions
+            .iter()
+            .all(|session| session.cwd == repo.canonical())
+    );
+
+    for (name, id) in [
+        ("2026-10-31T00-00-01-000Z_lead.jsonl", "-lead"),
+        ("2026-10-31T00-00-02-000Z_trail.jsonl", "trail."),
+        ("2026-10-31T00-00-03-000Z_slash.jsonl", "a/b"),
+        ("2026-10-31T00-00-04-000Z_empty.jsonl", ""),
+        ("2026-10-31T00-00-05-000Z_unicode.jsonl", "café"),
+    ] {
+        write_pi_file(&dir, name, &pi_session_line(id, &repo.canonical()));
+    }
+    write_pi_file(
+        &dir,
+        "first-copy.jsonl",
+        &pi_session_line("shared-id", &repo.canonical()),
+    );
+    write_pi_file(
+        &dir,
+        "second-copy.jsonl",
+        &pi_session_line("shared-id", &repo.canonical()),
+    );
+    let mixed = pi_repo_sessions(&home.sessions(), PiSessionLayout::Default, repo.root());
+    assert!(mixed.partial(), "{mixed:?}");
+    assert_eq!(
+        mixed.skipped,
+        BTreeMap::from([
+            (PiSkipReason::InvalidSessionId, 5),
+            (PiSkipReason::DuplicateSessionId, 2),
+        ])
+    );
+    assert_eq!(
+        mixed
+            .sessions
+            .iter()
+            .map(|session| session.path.clone())
+            .collect::<Vec<_>>(),
+        vec![uuid_named, plain_named]
+    );
+}
+
+/// PI-15 AC2: in the default layout only sessions whose header `cwd` is the
+/// repository or beneath it are returned, whichever `--<encoded-cwd>--`
+/// directory holds them; a sibling whose path merely starts with the same
+/// text is another directory.
+#[test]
+#[serial_test::serial(env)]
+fn pi_attribution_default_layout_keeps_only_repo_sessions() {
+    use libra::internal::ai::observed_agents::{PiSessionLayout, builtin::pi::PiSkipReason};
+
+    let home = PiDiscoveryHome::new();
+    let repo = PiAttributionRepo::new();
+    let canonical = repo.canonical();
+    let sub = canonical.join("crates").join("core");
+    let sibling = PathBuf::from(format!("{}-sibling", canonical.display()));
+    let elsewhere = tempfile::tempdir().expect("another project");
+    let elsewhere = elsewhere.path().canonicalize().expect("canonical project");
+    let repo_dir = home.sessions().join(pi_encoded_cwd_dir(&canonical));
+    let at_root = write_pi_file(
+        &repo_dir,
+        "a.jsonl",
+        &pi_session_line("at-root", &canonical),
+    );
+    write_pi_file(
+        &repo_dir,
+        "b.jsonl",
+        &pi_session_line("moved-in", &elsewhere),
+    );
+    let beneath = write_pi_file(
+        &home.sessions().join(pi_encoded_cwd_dir(&sub)),
+        "c.jsonl",
+        &pi_session_line("beneath", &sub),
+    );
+    write_pi_file(
+        &home.sessions().join(pi_encoded_cwd_dir(&sibling)),
+        "d.jsonl",
+        &pi_session_line("sibling", &sibling),
+    );
+    write_pi_file(
+        &home.sessions().join(pi_encoded_cwd_dir(&elsewhere)),
+        "e.jsonl",
+        &pi_session_line("elsewhere", &elsewhere),
+    );
+    let moved_out = write_pi_file(
+        &home.sessions().join(pi_encoded_cwd_dir(&elsewhere)),
+        "f.jsonl",
+        &pi_session_line("moved-out", &canonical),
+    );
+    // A cwd recorded through the root as given (not canonical) still places
+    // the session in the repository.
+    let as_given = write_pi_file(
+        &home.sessions().join("--as-given--"),
+        "g.jsonl",
+        &pi_session_line("as-given", &repo.root().join("docs")),
+    );
+
+    let found = pi_repo_sessions(&home.sessions(), PiSessionLayout::Default, repo.root());
+    assert!(!found.partial(), "{found:?}");
+    assert_eq!(found.refused, None);
+    assert_eq!(
+        found.skipped,
+        BTreeMap::from([(PiSkipReason::OutsideRepo, 3)])
+    );
+    let mut expected = vec![
+        (at_root, "at-root".to_string(), canonical.clone()),
+        (beneath, "beneath".to_string(), sub),
+        (moved_out, "moved-out".to_string(), canonical),
+        (as_given, "as-given".to_string(), repo.root().join("docs")),
+    ];
+    expected.sort();
+    assert_eq!(
+        found
+            .sessions
+            .iter()
+            .map(|session| (
+                session.path.clone(),
+                session.session_id.clone(),
+                session.cwd.clone()
+            ))
+            .collect::<Vec<_>>(),
+        expected
+    );
+}
+
+/// PI-15 AC3: in an explicit (flat) session directory, which holds sessions
+/// of any cwd side by side, only the repository's sessions are returned.
+#[test]
+#[serial_test::serial(env)]
+fn pi_attribution_flat_layout_keeps_only_repo_sessions() {
+    use libra::internal::ai::observed_agents::{PiSessionLayout, builtin::pi::PiSkipReason};
+
+    let home = PiDiscoveryHome::new();
+    let repo = PiAttributionRepo::new();
+    let canonical = repo.canonical();
+    let elsewhere = tempfile::tempdir().expect("another project");
+    let elsewhere = elsewhere.path().canonicalize().expect("canonical project");
+    let flat = home.home.path().join(".pi").join("shared-sessions");
+    let mine = write_pi_file(&flat, "1_mine.jsonl", &pi_session_line("mine", &canonical));
+    let deep = write_pi_file(
+        &flat,
+        "2_deep.jsonl",
+        &pi_session_line("deep", &canonical.join("a").join("b")),
+    );
+    write_pi_file(
+        &flat,
+        "3_theirs.jsonl",
+        &pi_session_line("theirs", &elsewhere),
+    );
+    write_pi_file(
+        &flat,
+        "4_sibling.jsonl",
+        &pi_session_line(
+            "sibling",
+            &PathBuf::from(format!("{}-sibling", canonical.display())),
+        ),
+    );
+    write_pi_file(
+        &flat,
+        "5_parent.jsonl",
+        &pi_session_line("parent", canonical.parent().expect("repo parent")),
+    );
+    // The flat layout does not descend into a `--<encoded-cwd>--` directory.
+    write_pi_file(
+        &flat.join(pi_encoded_cwd_dir(&canonical)),
+        "nested.jsonl",
+        &pi_session_line("nested", &canonical),
+    );
+
+    let found = pi_repo_sessions(&flat, PiSessionLayout::Flat, repo.root());
+    assert!(!found.partial(), "{found:?}");
+    assert_eq!(
+        found.skipped,
+        BTreeMap::from([(PiSkipReason::OutsideRepo, 3)])
+    );
+    assert_eq!(
+        found
+            .sessions
+            .iter()
+            .map(|session| (session.path.clone(), session.session_id.as_str()))
+            .collect::<Vec<_>>(),
+        vec![(mine, "mine"), (deep, "deep")]
+    );
+}
+
+/// PI-15 AC1–AC3 boundaries: a header that cannot be placed is skipped and,
+/// unless Pi itself would not list the file, makes the result partial; the
+/// walk's refusal and partial reasons carry through; the repository root
+/// must be absolute.
+#[test]
+#[serial_test::serial(env)]
+fn pi_attribution_reports_what_it_cannot_place() {
+    use libra::internal::ai::observed_agents::{
+        PiDiscoveryLimits, PiRootRefusal, PiSessionLayout,
+        builtin::pi::{PiSkipReason, attribute_pi_sessions},
+        discover_pi_sessions,
+    };
+
+    let home = PiDiscoveryHome::new();
+    let repo = PiAttributionRepo::new();
+    let canonical = repo.canonical();
+    let flat = home.home.path().join(".pi").join("odd-sessions");
+    write_pi_file(
+        &flat,
+        "not-a-session.jsonl",
+        r#"{"type":"message","id":"m1"}"#,
+    );
+    write_pi_file(&flat, "no-id.jsonl", r#"{"type":"session","cwd":"/work"}"#);
+    let not_sessions = pi_repo_sessions(&flat, PiSessionLayout::Flat, repo.root());
+    assert!(!not_sessions.partial(), "{not_sessions:?}");
+    assert_eq!(
+        not_sessions.skipped,
+        BTreeMap::from([(PiSkipReason::NotASession, 2)])
+    );
+
+    write_pi_file(&flat, "blank.jsonl", "");
+    write_pi_file(&flat, "torn.jsonl", r#"{"type":"session","id":"t"#);
+    write_pi_file(&flat, "array.jsonl", r#"["session"]"#);
+    write_pi_file(
+        &flat,
+        "repeated.jsonl",
+        &format!(
+            r#"{{"type":"session","id":"r1","id":"r2","cwd":{}}}"#,
+            json!(canonical.to_str().expect("utf-8 cwd"))
+        ),
+    );
+    for (name, cwd) in [
+        ("missing-cwd.jsonl", None),
+        ("empty-cwd.jsonl", Some(json!(""))),
+        ("number-cwd.jsonl", Some(json!(7))),
+        ("relative-cwd.jsonl", Some(json!("work/repo"))),
+        (
+            "parent-cwd.jsonl",
+            Some(json!(
+                canonical
+                    .join("sub")
+                    .join("..")
+                    .to_str()
+                    .expect("utf-8 cwd")
+            )),
+        ),
+        (
+            "dot-cwd.jsonl",
+            Some(json!(format!(
+                "{}{}.{}sub",
+                canonical.display(),
+                std::path::MAIN_SEPARATOR,
+                std::path::MAIN_SEPARATOR
+            ))),
+        ),
+    ] {
+        let mut header =
+            json!({"type": "session", "version": 3, "id": name.trim_end_matches(".jsonl")});
+        if let Some(cwd) = cwd {
+            header["cwd"] = cwd;
+        }
+        write_pi_file(&flat, name, &header.to_string());
+    }
+    let odd = pi_repo_sessions(&flat, PiSessionLayout::Flat, repo.root());
+    assert!(odd.sessions.is_empty(), "{odd:?}");
+    assert!(odd.partial(), "{odd:?}");
+    assert!(odd.partial_reasons.is_empty(), "the walk itself was whole");
+    assert_eq!(
+        odd.skipped,
+        BTreeMap::from([
+            (PiSkipReason::NotASession, 2),
+            (PiSkipReason::UnreadableHeader, 4),
+            (PiSkipReason::NoCwd, 6),
+        ])
+    );
+
+    // The walk's refusal and partial reasons carry through.
+    let refused = attribute_pi_sessions(
+        discover_pi_sessions(
+            &repo.root().join("sessions"),
+            PiSessionLayout::Flat,
+            PiDiscoveryLimits::default(),
+        )
+        .expect("discovery"),
+        repo.root(),
+    )
+    .expect("attribution");
+    assert_eq!(refused.refused, Some(PiRootRefusal::OutsideProviderRoot));
+    assert!(refused.sessions.is_empty());
+    assert!(refused.partial(), "a refused root was never scanned");
+    let bounded = attribute_pi_sessions(
+        discover_pi_sessions(
+            &flat,
+            PiSessionLayout::Flat,
+            PiDiscoveryLimits {
+                max_entries: 1,
+                ..PiDiscoveryLimits::default()
+            },
+        )
+        .expect("discovery"),
+        repo.root(),
+    )
+    .expect("attribution");
+    assert!(bounded.partial(), "{bounded:?}");
+    assert!(!bounded.partial_reasons.is_empty());
+
+    for relative in [PathBuf::from("repo"), canonical.join("..").join("repo")] {
+        let error = attribute_pi_sessions(
+            discover_pi_sessions(&flat, PiSessionLayout::Flat, PiDiscoveryLimits::default())
+                .expect("discovery"),
+            &relative,
+        )
+        .expect_err("a relative repository root is refused");
+        assert!(
+            error.to_string().contains("must be an absolute path"),
+            "{error:#}"
+        );
+    }
 }

@@ -1,3 +1,5 @@
+> **2026-10-31 GOV-LTR-CO-01 `done`/`complete`（现行）：** 七路径签名+DCO `0aa5cc5` 已在 main；其自身 run `41217305547` 被上游推进 superseded 取消（非失败），已原生前滚至 `f7c1c30` 并把 D 重绑到该 tip：`Check, Build and Test` `41221813772` success、`CodeQL Advanced` `41221813780` success；六份治理文件与 `0aa5cc5` 逐字节相同，`plan-status.md` 仅因上游 PI-03/PI-11 追加行不同。用户对本卡后续 Claude Review 的具名豁免保留（Review 栏无 PASS 判词，不外推）。正式 LTR 产品卡仍 0/26；`DEP-TR-H1` 仍 incoming，LTR-01 家族（10/11/12）不得开工。
+
 > **2026-10-31 GOV rebase 后门：** 七文档链接无缺失、20非治理路径同C3来源；nightly fmt、严格Clippy、release build均真exit0，项目警告/错误0，仅用户排除的第三方future-incompat尾注。最终提交前B/fmt/远端身份再核；签名提交/推送/D待。
 
 > **2026-10-31 15:49 UTC GOV 提交前 rebase 恢复：** HEAD 与最新 `origin/main` 同为 `f9afd416`；原生 rebase 快进但 autostash 自动回放和默认 apply 均报告冲突，新增 stash `b7ab36b` 保留。已从其原生 blob 按七路径精确恢复并核 SHA256/模式，27项受控来源无漂移、stage空；后置B/fmt/Clippy/release build与提交/推送/D待。详见日期计划 GOV 卡。

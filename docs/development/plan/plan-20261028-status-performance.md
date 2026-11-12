@@ -155,8 +155,8 @@ Phase 0 基线：SP-00；Phase 1 正确性与 stat：SP-01..03；Phase 2 核心�
 | SP-04 单次 status 复用同一 index 快照 | P2 | 可选建议项，默认未启用 | [#643](https://github.com/libra-tools/libra/issues/643) | pending / 空 |
 | SP-05 status 共享一次 HEAD tree 展开结果 | P2 | 本轮核心提速：第一梯队 | [#644](https://github.com/libra-tools/libra/issues/644) | done / complete |
 | SP-06 对象读取复用请求级 storage scope | P2 | 本轮核心提速：第二梯队 | [#645](https://github.com/libra-tools/libra/issues/645) | done / complete |
-| SP-07 pack index 整块 fanout 与二分查找 | P2 | 本轮核心提速：第一梯队 | [#646](https://github.com/libra-tools/libra/issues/646) | in-progress / locally-accepted |
-| SP-08 walk 级 ignore 上下文与 tracked 短路 | P2 | 本轮核心提速：第二梯队 | [#648](https://github.com/libra-tools/libra/issues/648) | done / complete（EX-SP-08-CLOSE-01，本地收口；远端 CI 待验） |
+| SP-07 pack index 整块 fanout 与二分查找 | P2 | 本轮核心提速：第一梯队 | [#646](https://github.com/libra-tools/libra/issues/646) | done / complete |
+| SP-08 walk 级 ignore 上下文与 tracked 短路 | P2 | 本轮核心提速：第二梯队 | [#648](https://github.com/libra-tools/libra/issues/648) | done / complete |
 | SP-09 核心优化复测、全量收口与可选项决策 | P2 | 必选验收收口 | [#647](https://github.com/libra-tools/libra/issues/647) | pending / 空 |
 
 ## 任务卡
@@ -1047,7 +1047,7 @@ Phase 0 基线：SP-00；Phase 1 正确性与 stat：SP-01..03；Phase 2 核心�
 
 **Task type:** implementation
 
-**Lifecycle / Acceptance:** done / complete（EX-SP-08-CLOSE-01；本地修复/评审验收已完成，远端 PR CI 尚待实际执行；独立发布由 DEFER-SP-REL-08 跟踪）
+**Lifecycle / Acceptance:** done / complete（EX-SP-08-CLOSE-01；PR #1023 已合并为 a305075，Issue #648 已关闭；主分支后续全量 CI 运行已成功覆盖合并提交；独立发布由 DEFER-SP-REL-08 跟踪，全量性能复测由 SP-09 承接）
 
 **执行记录（2026-11-03 02:44:11 UTC）：** 用户明确授权 SP-08。当前干净的 `main` 工作区开展本地实现，尚未提交/推送/发布；交付前建议切换 `codex/SP-08`。SP-07 卡片与 Issue #646 完成评论均已核实，其最终 PR CI 已通过。锁定下列四文件实现写集及本计划、plan-status.md 的协调记录；资格计划的 util 改动属于存储配置区域，本卡仅改 ignore 区域，当前工作区无其它未提交改动。本机物理内存 17179869184 bytes（16 GiB），低于 32 GiB，本机 nextest not-run；不降低并发绕过。先建立回归，再实现逐目录的安全 ignore 上下文和 tracked 短路，保留 deadline、beneath 和目录 marker 重新验证。
 
@@ -1206,6 +1206,8 @@ Phase 0 基线：SP-00；Phase 1 正确性与 stat：SP-01..03；Phase 2 核心�
 **ER-05 最终 review（2026-11-03 06:00:21 UTC）：** 本机 Codex 只读评审 session `01a19ff9-ca4e-7a93-aa2a-1b83ee0012c3` 返回 `Result: PASS`，P0/P1/P2 均无新增未关闭项。输入包含当时三份代码/测试改动及本卡最终证据；测试和性能结果取自实际回执，本轮 reviewer 未自行执行测试。其结尾提到的“未勾选”是评审发起时的旧状态，随后依据已执行矩阵/工作量审计勾选，不新增工作量通过主张。该 PASS 只覆盖整改前候选，不覆盖下述报告整改，也不替代 C/D、远端门或发布。
 
 **追加评审整改（2026-11-03 06:39:17 UTC）：** 用户指定 `/tmp/SP-08-review-report.md` 并授权按已核对思路修改。报告为 PASS with Findings（P1×2、P2×3），旧 Codex 无发现结论不外推。采纳四项同轴改动：`is_ignored` 明确绝对且 lexically-contained 路径契约并 debug_assert；布尔 matcher 已直接检查目录后从父目录继续，避免同路径二次 glob；`ScanEntry` 借用完整/相对路径，避免每个 untracked 文件重建 PathBuf；`IgnoreOpEpochGuard` 在正常返回及 unwind 时恢复 worker TLS，并新增局部 guard 单测。拒绝报告的 #2 统一 taxonomy 建议：旧文件分支本就将 ignore 读取失败映射为 io_timeout，真实父/候选配对已固定该行为；统一为 io_error 是已复现的回归，不纳入本优化卡。撤回 locally-accepted，整改后相关测试/静态/release/矩阵和最终 review 必须重新验收，旧候选 `ef839277` 不再作为最终候选。
+
+**PR 合并与 Issue 结项收口（2026-11-04 09:53:54 UTC）：** 实现 PR #1023 经全部 11 项检查 SUCCESS 后已合并入 `main`（merge commit `a305075bb04ba6a56936387f57acc59f8fdd63c1`）。维护者已于 2026-11-04 以 `completed` 正式关闭 Issue #648。虽然合并提交当次在 main 上的构建因并发冲突被取消（cancelled），但后续 `main` 分支的多次 `Check, Build and Test` 运行均已全绿成功，主线 CI 覆盖已闭环。本卡按 EX-SP-08-CLOSE-01 完全收口，独立发版继续由 `DEFER-SP-REL-08` 跟踪，最终全量矩阵复测由 SP-09 承接。
 
 ### Task SP-09: 核心优化复测、全量收口与可选项决策
 
